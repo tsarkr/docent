@@ -63,35 +63,6 @@ neo4j_driver = GraphDatabase.driver(
 )
 
 
-def _read_csv_flexible(filepath):
-    encodings = ("utf-8-sig", "utf-16", "cp949", "euc-kr", "iso-8859-1")
-    for encoding in encodings:
-        try:
-            with open(filepath, "r", encoding=encoding, errors="strict") as fh:
-                lines = [
-                    line.rstrip("\n\r")
-                    for line in fh
-                    if (
-                        (clean := line.rstrip("\n\r").replace("\ufeff", "").strip())
-                        and not clean.lstrip('"').lstrip("'").startswith("//")
-                        and re.sub(r"[\s,\t'\"]+", "", clean)
-                    )
-                ]
-
-            if not lines:
-                continue
-
-            sample = "\n".join(lines[:5])
-            delimiter = "\t" if sample.count("\t") >= sample.count(",") else ","
-
-            from io import StringIO
-
-            return pd.read_csv(StringIO("\n".join(lines)), sep=delimiter, dtype=str).fillna("")
-        except Exception:
-            continue
-    raise ValueError(f"CSV 읽기 실패: {filepath}")
-
-
 def _read_table_with_mapping(table_name, mapping, required=None):
     try:
         df = pd.read_sql(f'SELECT * FROM {table_name}', pg_engine)
