@@ -5,6 +5,7 @@ from streamlit_agraph import agraph, Node, Edge, Config
 import json
 import hashlib
 import random
+import time
 
 try:
     import psycopg2
@@ -125,6 +126,7 @@ class HybridHistoryDocent:
 
         return cypher, params, results
     def get_hybrid_context(self, term):
+        t_start = time.monotonic()
         found_ids = set()
         evidences = []
         nodes, edges = {}, []
@@ -199,6 +201,13 @@ class HybridHistoryDocent:
                         })
         except Exception as e:
             st.warning(f"⚠️ Neo4j 초기 검색 실패: {e}")
+        # record time after initial search
+        try:
+            t_after_search = time.monotonic()
+            st.session_state['last_neo4j_timings'] = st.session_state.get('last_neo4j_timings', {})
+            st.session_state['last_neo4j_timings'].update({'search_seconds': round(t_after_search - t_start, 3)})
+        except Exception:
+            pass
 
         # --- [Step 2] Neo4j: 그래프 확장 및 관계 탐색 ---
         try:
@@ -271,6 +280,15 @@ class HybridHistoryDocent:
                             edges.append(edge)
         except Exception as e:
             st.warning(f"⚠️ Neo4j 그래프 확장 실패: {e}")
+        # record time after graph expansion
+        try:
+            t_after_expand = time.monotonic()
+            timings = st.session_state.get('last_neo4j_timings', {})
+            timings.update({'expand_seconds': round(t_after_expand - (t_after_search if 't_after_search' in locals() else t_start), 3),
+                            'total_seconds': round(t_after_expand - t_start, 3)})
+            st.session_state['last_neo4j_timings'] = timings
+        except Exception:
+            pass
 
         # 항상 튜플 반환: 노드/엣지/증거 리스트
         return nodes, edges, evidences
@@ -560,10 +578,16 @@ try:
             raw_ids.append(str(rid))
     if raw_ids and st.session_state.get('pg_prefetch_term') != search_term:
         with st.spinner('PG 근거를 빠르게 수집 중...'):
+            t_pg0 = time.monotonic()
             pg_rows = fetch_pg_rows_for_nodes(raw_ids, limit_per_table=2, max_nodes=12)
+            t_pg1 = time.monotonic()
         st.session_state['pg_prefetch_term'] = search_term
         st.session_state['pg_prefetch_rows'] = pg_rows
         st.session_state['pg_prefetch_texts'] = build_pg_context(pg_rows)
+        try:
+            st.session_state['last_pg_prefetch_seconds'] = round(t_pg1 - t_pg0, 3)
+        except Exception:
+            pass
 except Exception:
     pass
 
@@ -599,12 +623,21 @@ with c1:
             rng.shuffle(nodes)
             rng.shuffle(edges)
 
+        # Prefer a repulsion-based solver and larger spacing to avoid node collisions
         config = Config(
-            width=700,
-            height=600,
+            width=900,
+            height=700,
             directed=True,
             physics=True,
             hierarchical=False,
+            solver='repulsion',
+            minVelocity=0.1,
+            maxVelocity=50,
+            stabilization=True,
+            timestep=0.5,
+            # layout hints (nodeSpacing used if hierarchical mode is enabled, but keep larger default)
+            nodeSpacing=200,
+            levelSeparation=200,
         )
         clicked = agraph(nodes=nodes, edges=edges, config=config)
 
@@ -731,9 +764,21 @@ with c2:
                 if ollama is not None:
                     try:
                         st.write("로컬 모델(Gemma4:26b)로 해설을 생성하고 있습니다...")
+                        t_model0 = time.monotonic()
                         response = ollama.generate(model="gemma4:26b", prompt=prompt)
+                        t_model1 = time.monotonic()
                         st.session_state.last_explained_term = search_term
                         st.session_state.last_explanation = response['response']
+                        # log model timing and compose summary timings
+                        try:
+                            st.session_state['last_model_inference_seconds'] = round(t_model1 - t_model0, 3)
+                            st.session_state['last_generation_timing'] = {
+                                'model_seconds': st.session_state.get('last_model_inference_seconds'),
+                                'pg_prefetch_seconds': st.session_state.get('last_pg_prefetch_seconds'),
+                                'neo4j': st.session_state.get('last_neo4j_timings')
+                            }
+                        except Exception:
+                            pass
                         status.update(label="해설 생성이 완료되었습니다!", state="complete", expanded=False)
                     except Exception as e:
                         st.write(f"Ollama 연결 실패: {e}. 간단 요약으로 대체합니다.")
