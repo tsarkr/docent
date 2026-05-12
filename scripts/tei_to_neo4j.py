@@ -93,43 +93,70 @@ def apply_cidoc_mappings(session, mappings):
     for table_name, rowid, mapping_label, ttl in mappings:
         if not ttl:
             continue
-        # find resources like ex:person_table_123 (match until final _digits)
-        res = re.findall(r'ex:(?P<rtype>\w+)_(?P<table>.+?)_(?P<rid>\d+)', ttl)
-        # extract rdfs:label if present
-        label = None
-        m = re.search(r'rdfs:label\s+"([^"]+)"', ttl)
-        if m:
-            label = m.group(1)
 
-        uids = []
-        for rtype, tname, rid in res:
-            uid = f'ex:{rtype}_{tname}_{rid}'
-            uids.append((rtype.lower(), uid))
-            if rtype.lower().startswith('person'):
-                if label:
-                    session.run("MERGE (p:Person {uid:$uid}) SET p.name = $label", uid=uid, label=label)
+        # extract all ex: identifiers (flexible)
+        ids = re.findall(r'ex:([A-Za-z0-9_\-]+)', ttl)
+        # extract labels per resource if present (rdfs:label)
+        labels = re.findall(r'ex:([A-Za-z0-9_\-]+)[^\n]*?rdfs:label\s+"([^"]+)"', ttl)
+        label_map = {rid: lbl for rid, lbl in labels}
+
+        # Build uids list with guessed type
+        uids = []  # list of tuples (kind, uid, short_id)
+        for rid in ids:
+            short = rid
+            kind = None
+            if short.lower().startswith('person') or short.lower().startswith('p') and 'person' in ttl.lower():
+                kind = 'Person'
+            elif short.lower().startswith('place'):
+                kind = 'Place'
+            elif short.lower().startswith('event') or short.lower().startswith('item'):
+                kind = 'Event'
+            else:
+                # fallback: decide by presence of keywords in ttl
+                if 'person' in ttl.lower() or 'ex:person' in ttl.lower():
+                    kind = 'Person'
+                elif 'place' in ttl.lower() or 'ex:place' in ttl.lower():
+                    kind = 'Place'
+                elif 'event' in ttl.lower() or 'ex:event' in ttl.lower():
+                    kind = 'Event'
+                else:
+                    # as last resort, infer by prefix
+                    if short.lower().startswith('p') and short[1:].isdigit():
+                        kind = 'Person'
+                    else:
+                        kind = 'Event'
+
+            uid = f'ex:{short}'
+            uids.append((kind, uid, short))
+
+            lbl = label_map.get(short)
+            if kind == 'Person':
+                if lbl:
+                    session.run("MERGE (p:Person {uid:$uid}) SET p.name = $label", uid=uid, label=lbl)
                 else:
                     session.run("MERGE (p:Person {uid:$uid})", uid=uid)
-            elif rtype.lower().startswith('place'):
-                if label:
-                    session.run("MERGE (pl:Place {uid:$uid}) SET pl.name = $label", uid=uid, label=label)
+            elif kind == 'Place':
+                if lbl:
+                    session.run("MERGE (pl:Place {uid:$uid}) SET pl.name = $label", uid=uid, label=lbl)
                 else:
                     session.run("MERGE (pl:Place {uid:$uid})", uid=uid)
             else:
-                if label:
-                    session.run("MERGE (e:Event {uid:$uid}) SET e.title = $label", uid=uid, label=label)
+                if lbl:
+                    session.run("MERGE (e:Event {uid:$uid}) SET e.title = $label", uid=uid, label=lbl)
                 else:
                     session.run("MERGE (e:Event {uid:$uid})", uid=uid)
 
-        # relationships by keyword
+        # create relationships based on known CIDOC predicates or explicit patterns
+        # find all predicate uses like 'cidoc:P14_carried_out_by' or plain 'P14_carried_out_by'
         if 'P14_carried_out_by' in ttl:
-            ev = next((u for r,u in uids if r.startswith('event') or r.startswith('item')), None)
-            pe = next((u for r,u in uids if r.startswith('person')), None)
+            ev = next((u for k,u,short in uids if k == 'Event'), None)
+            pe = next((u for k,u,short in uids if k == 'Person'), None)
             if ev and pe:
                 session.run("MATCH (a:Event {uid:$ev}),(b:Person {uid:$pe}) MERGE (a)-[:P14_carried_out_by]->(b)", ev=ev, pe=pe)
+
         if 'P7_took_place_at' in ttl:
-            ev = next((u for r,u in uids if r.startswith('event') or r.startswith('item')), None)
-            pl = next((u for r,u in uids if r.startswith('place')), None)
+            ev = next((u for k,u,short in uids if k == 'Event'), None)
+            pl = next((u for k,u,short in uids if k == 'Place'), None)
             if ev and pl:
                 session.run("MATCH (a:Event {uid:$ev}),(b:Place {uid:$pl}) MERGE (a)-[:P7_took_place_at]->(b)", ev=ev, pl=pl)
 

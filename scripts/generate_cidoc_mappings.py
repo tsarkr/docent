@@ -7,13 +7,13 @@
 
 This generator is intentionally simple: it creates small TTL examples referencing `ex:Person`, `ex:Event`, `ex:Place`.
 """
-import os, sys, re, datetime
+import os, sys, re, datetime, argparse, logging
 from xml.etree import ElementTree as ET
+
 try:
     import psycopg2
 except Exception:
-    print('psycopg2 not installed. Install with: pip install psycopg2-binary')
-    raise
+    raise RuntimeError('psycopg2 not installed. Install with: pip install psycopg2-binary')
 
 # TOML 읽기 (Python 3.11+ 또는 tomli)
 try:
@@ -228,10 +228,19 @@ ex:item_{table}_{rowid} a ex:Event ;
 
 
 def main():
+    parser = argparse.ArgumentParser(description='Generate CIDOC-CRM TTL snippets from TEI stored in DB')
+    parser.add_argument('--dry-run', action='store_true', help='Do not insert into DB; print sample mappings')
+    parser.add_argument('--table', help='Only process this table name (unqualified)')
+    parser.add_argument('--limit', type=int, default=0, help='Limit number of rows processed per table (0 = no limit)')
+    parser.add_argument('--log-level', default='INFO', help='Logging level (DEBUG, INFO, WARNING)')
+    args = parser.parse_args()
+
+    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format='%(levelname)s: %(message)s')
+
     conn = connect()
     cur = conn.cursor()
-    ensure_mapping_table(cur)
-    # Find all user tables in the database that have a `tei` column.
+
+    # Find tables with tei column
     cur.execute("""
     SELECT table_schema, table_name
     FROM information_schema.columns
@@ -242,14 +251,27 @@ def main():
     """)
     rows = cur.fetchall()
     if not rows:
-        print('No tables with a tei column found in the database.')
+        logging.info('No tables with a tei column found in the database.')
+        cur.close()
+        conn.close()
+        return
+
+    # create mapping table only if we're going to insert
+    if not args.dry_run:
+        ensure_mapping_table(cur)
+
     for schema, table_name in rows:
+        if args.table and args.table != table_name:
+            continue
         fq_table = f'"{schema}"."{table_name}"' if schema and schema != 'public' else f'"{table_name}"'
-        print('Processing table:', fq_table)
-        cur.execute(f'SELECT rowid, tei FROM {fq_table} WHERE tei IS NOT NULL')
+        logging.info('Processing table: %s', fq_table)
+        sql = f'SELECT rowid, tei FROM {fq_table} WHERE tei IS NOT NULL'
+        if args.limit and args.limit > 0:
+            sql += f' LIMIT {args.limit}'
+        cur.execute(sql)
         fetched = cur.fetchall()
         if not fetched:
-            print('  no rows with tei in', fq_table)
+            logging.info('  no rows with tei in %s', fq_table)
             continue
         for row in fetched:
             rowid, tei = row
@@ -257,11 +279,16 @@ def main():
                 continue
             mappings = generate_simple_ttls(table_name, rowid, tei)
             for label, ttl in mappings:
-                cur.execute('INSERT INTO tei_cidoc_mappings (table_name, rowid, mapping_label, cidoc_ttl) VALUES (%s,%s,%s,%s)', (table_name, rowid, label, ttl))
-                print('Inserted mapping', table_name, rowid, label)
+                if args.dry_run:
+                    print('DRY:', table_name, rowid, label)
+                    print(ttl)
+                else:
+                    cur.execute('INSERT INTO tei_cidoc_mappings (table_name, rowid, mapping_label, cidoc_ttl) VALUES (%s,%s,%s,%s)', (table_name, rowid, label, ttl))
+                    logging.debug('Inserted mapping %s %s %s', table_name, rowid, label)
+
     cur.close()
     conn.close()
-    print('Done')
+    logging.info('Done')
 
 if __name__ == '__main__':
     main()

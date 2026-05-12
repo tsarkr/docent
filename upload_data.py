@@ -97,7 +97,26 @@ def process_task(file_name, table_name, skip_rows, dry_run=False):
     # Excel files
     if ext in ('.xls', '.xlsx'):
         try:
-            df = pd.read_excel(full_path, skiprows=skip_rows)
+            # Read without header to detect correct header row robustly
+            raw = pd.read_excel(full_path, header=None, dtype=str)
+            header_idx = None
+            max_search = min(len(raw), 50)
+            for idx in range(0, max_search):
+                row = raw.iloc[idx].astype(str).tolist()
+                # treat 'nan' as empty
+                parsed = [c if c != 'nan' else '' for c in row]
+                non_numeric = sum(1 for v in parsed if v and not re.fullmatch(r"[0-9\-\.]+", v.strip()))
+                lengths = [len(v) for v in parsed]
+                max_len = max(lengths) if lengths else 0
+                avg_len = sum(lengths) / max(1, len(lengths))
+                long_cells = sum(1 for L in lengths if L > 100)
+                if len(parsed) > 1 and (non_numeric / max(1, len(parsed))) >= 0.6 and max_len < 200 and avg_len < 80 and (long_cells / max(1, len(parsed))) <= 0.2:
+                    header_idx = idx
+                    break
+            if header_idx is None:
+                # fallback: use skip_rows if provided
+                header_idx = max(0, skip_rows)
+            df = pd.read_excel(full_path, header=header_idx, dtype=str)
             df.columns, mapping = _make_unique_columns(df.columns)
             used_enc, used_sep = 'excel', None
         except Exception as e:
@@ -116,13 +135,10 @@ def process_task(file_name, table_name, skip_rows, dry_run=False):
                 continue
 
             for sep in separators:
-                # search header candidate lines
+                # search header candidate lines from the top (prefer earlier header rows)
                 header_idx = None
                 max_search = min(len(lines), 50)
-                start = max(0, skip_rows - 5)
-                end = min(len(lines), skip_rows + 6)
-                search_indices = list(range(start, end))
-                search_indices += [i for i in range(0, max_search) if i not in search_indices]
+                search_indices = list(range(0, max_search))
 
                 for idx in search_indices:
                     if idx < 0 or idx >= len(lines):
@@ -139,7 +155,13 @@ def process_task(file_name, table_name, skip_rows, dry_run=False):
                     def is_numeric(s):
                         return re.fullmatch(r"[0-9\-\.]+", s.strip()) is not None
                     non_numeric_count = sum(1 for v in parsed_candidate if v and not is_numeric(str(v)))
-                    if non_numeric_count / max(1, len(parsed_candidate)) >= 0.6:
+                    # additional heuristics: reject candidate rows that contain very long text
+                    lengths = [len(str(v)) for v in parsed_candidate]
+                    max_len = max(lengths) if lengths else 0
+                    avg_len = sum(lengths) / max(1, len(lengths))
+                    long_cells = sum(1 for L in lengths if L > 100)
+                    # Accept header if majority non-numeric, and not dominated by very long text
+                    if non_numeric_count / max(1, len(parsed_candidate)) >= 0.6 and max_len < 200 and avg_len < 80 and (long_cells / max(1, len(parsed_candidate))) <= 0.2:
                         header_idx = idx
                         parsed = parsed_candidate
                         break
@@ -148,10 +170,12 @@ def process_task(file_name, table_name, skip_rows, dry_run=False):
                     continue
 
                 try:
-                    temp_df = pd.read_csv(full_path, encoding=enc, sep=sep, skiprows=skip_rows)
+                    # Use the detected header row so pandas uses that row as column names
+                    temp_df = pd.read_csv(full_path, encoding=enc, sep=sep, header=header_idx)
                 except Exception:
                     continue
 
+                # If pandas didn't pick up the parsed header correctly, override it
                 if temp_df.shape[1] == len(parsed):
                     temp_df.columns = parsed
                 temp_df.columns, mapping = _make_unique_columns(temp_df.columns)
