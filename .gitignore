@@ -1,0 +1,24 @@
+# Ignore editor settings
+.vscode/
+
+# Streamlit state
+.streamlit/
+
+# TEI and raw data
+tei/
+data/
+
+# Python env
+.venv/
+env/
+
+# Secrets and config
+.env
+*.secret
+
+# Raw/large files
+*.csv
+*.tei.xml
+
+# OS files
+.DS_Store
