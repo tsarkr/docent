@@ -1,0 +1,29 @@
+{
+  "mcpServers": {
+    "docent-mcp": {
+      "command": "/Users/gyungmin/Dev/docent/.venv/bin/python",
+      "args": [
+        "/Users/gyungmin/Dev/docent/mcp_server.py"
+      ],
+      "env": {}
+    }
+  }
+}
+
+/* 
+===============================================
+[설정 가이드]
+
+1. Cursor IDE에서 사용할 경우:
+   - Cursor 설정(Settings) -> Features -> MCP 창으로 이동합니다.
+   - "+ Add New MCP Server"를 클릭합니다.
+   - Type을 "command"로 선택하고, Name에 "docent-mcp"를 입력합니다.
+   - Command 입력란에 아래와 같이 입력합니다:
+     /Users/gyungmin/Dev/docent/.venv/bin/python /Users/gyungmin/Dev/docent/mcp_server.py
+   - Save를 누르면 MCP 서버가 시작됩니다.
+
+2. Claude Desktop에서 사용할 경우:
+   - Mac 기준 `~/Library/Application Support/Claude/claude_desktop_config.json` 파일을 엽니다.
+   - 위 JSON 내용을 `mcpServers` 블록 안에 추가한 뒤 앱을 재시작합니다.
+===============================================
+*/

@@ -1,0 +1,8 @@
+streamlit>=1.35
+psycopg2-binary
+neo4j>=5.20
+streamlit-agraph>=0.0.45
+ollama>=0.3
+tomli>=2.0
+openpyxl>=3.0
+mcp>=1.2.0
