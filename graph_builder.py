@@ -1,3 +1,16 @@
+"""
+이 스크립트로 파이프라인이 통합되었으므로 pg_to_tei.py 및 tei_to_neo4j.py는 삭제 가능함
+
+설명:
+- Neo4j 그래프 초기화 및 스키마 확보
+- Postgres에서 사건/장소/인물/기관 등의 원천 데이터를 읽어 노드 생성
+- Postgres의 TEI 컬럼을 파싱해 사건↔인물(P14), 사건↔장소(P7) 관계를 맥락(context) 속성과 함께 삽입
+- Postgres의 `tei_cidoc_mappings` 테이블에 저장된 CIDOC TTL을 읽어 추가적인 CIDOC-CRM 매핑을 Neo4j에 병합
+
+주의: 로컬 `tei/` 디렉토리 또는 `.tei.xml` 파일 참조는 제거되어있으며,
+데이터의 단일 출처는 PostgreSQL DB입니다.
+"""
+
 import os
 import re
 import urllib.parse
@@ -158,6 +171,101 @@ def _extract_tei_values(tei_text, limit=None):
         return values
     except Exception:
         return []
+
+
+def apply_cidoc_mappings(session, mappings):
+    """Apply CIDOC TTL mappings from DB into Neo4j using Korean labels.
+    mappings: iterable of rows like (table_name, rowid, mapping_label, cidoc_ttl)
+    This function is forgiving and will continue on parse errors.
+    """
+    import re
+
+    applied = 0
+    for row in mappings:
+        try:
+            # support both sequences and dict-like rows
+            if isinstance(row, (list, tuple)) and len(row) >= 4:
+                table_name, rowid, mapping_label, ttl = row[0], row[1], row[2], row[3]
+            elif isinstance(row, dict):
+                table_name = row.get('table_name') or row.get('원천테이블')
+                rowid = row.get('rowid')
+                mapping_label = row.get('mapping_label') or row.get('mapping')
+                ttl = row.get('cidoc_ttl') or row.get('ttl')
+            else:
+                # fallback: try index access
+                table_name, rowid, mapping_label, ttl = row[0], row[1], row[2], row[3]
+
+            if not ttl or not str(ttl).strip():
+                continue
+
+            text = str(ttl)
+
+            # ex: identifiers
+            ids = re.findall(r'ex:([A-Za-z0-9_\-]+)', text)
+            # rdfs:label extraction
+            labels = re.findall(r'ex:([A-Za-z0-9_\-]+)[^\n]*?rdfs:label\s+"([^"]+)"', text)
+            label_map = {rid: lbl for rid, lbl in labels}
+
+            uids = []  # tuples (kind, uid, short)
+            for rid in ids:
+                short = rid
+                kind = None
+                low = text.lower()
+                if short.lower().startswith('person') or ('person' in low and short.lower().startswith('p')):
+                    kind = '인물'
+                elif short.lower().startswith('place'):
+                    kind = '장소'
+                elif short.lower().startswith('event') or short.lower().startswith('item'):
+                    kind = '사건'
+                else:
+                    if 'person' in low:
+                        kind = '인물'
+                    elif 'place' in low:
+                        kind = '장소'
+                    elif 'event' in low or 'item' in low:
+                        kind = '사건'
+                    else:
+                        kind = '사건'
+
+                uid = f'ex:{short}'
+                uids.append((kind, uid, short))
+
+                lbl = label_map.get(short)
+                if kind == '인물':
+                    if lbl:
+                        session.run("MERGE (n:인물 {uid:$uid}) SET n.명칭 = coalesce(n.명칭, $label)", uid=uid, label=lbl)
+                    else:
+                        session.run("MERGE (n:인물 {uid:$uid})", uid=uid)
+                elif kind == '장소':
+                    if lbl:
+                        session.run("MERGE (n:장소 {uid:$uid}) SET n.명칭 = coalesce(n.명칭, $label)", uid=uid, label=lbl)
+                    else:
+                        session.run("MERGE (n:장소 {uid:$uid})", uid=uid)
+                else:
+                    if lbl:
+                        session.run("MERGE (n:사건 {uid:$uid}) SET n.사건명 = coalesce(n.사건명, $label)", uid=uid, label=lbl)
+                    else:
+                        session.run("MERGE (n:사건 {uid:$uid})", uid=uid)
+
+            # relationship heuristics
+            if 'P14_carried_out_by' in text:
+                ev = next((u for k, u, s in uids if k == '사건'), None)
+                pe = next((u for k, u, s in uids if k == '인물'), None)
+                if ev and pe:
+                    session.run("MATCH (a:사건 {uid:$ev}),(b:인물 {uid:$pe}) MERGE (a)-[:P14_carried_out_by]->(b)", ev=ev, pe=pe)
+
+            if 'P7_took_place_at' in text:
+                ev = next((u for k, u, s in uids if k == '사건'), None)
+                pl = next((u for k, u, s in uids if k == '장소'), None)
+                if ev and pl:
+                    session.run("MATCH (a:사건 {uid:$ev}),(b:장소 {uid:$pl}) MERGE (a)-[:P7_took_place_at]->(b)", ev=ev, pl=pl)
+
+            applied += 1
+        except Exception as e:
+            print(f"⚠️ CIDOC 매핑 처리 중 오류 (rowid={rowid}): {e}")
+            continue
+
+    print(f"Applied {applied} CIDOC mappings")
 
 
 def build_ultimate_graph():
@@ -352,36 +460,43 @@ def build_ultimate_graph():
             def _flush_acc():
                 nonlocal person_acc, place_acc
                 if person_acc:
-                    _run_batches(
-                        session,
-                        """
-                        UNWIND $data AS row
-                        MATCH (e:사건 {id: row.event_id})
-                        MERGE (p:인물 {명칭: row.person_name})
-                        MERGE (e)-[r:P14_carried_out_by]->(p)
-                        SET r.context = row.context_text,
-                            r.source_tag = 'persName'
-                        """,
-                        person_acc,
-                        batch_size=25,
-                    )
+                    try:
+                        _run_batches(
+                            session,
+                            """
+                            UNWIND $data AS row
+                            MATCH (e:사건 {id: row.event_id})
+                            MERGE (p:인물 {명칭: row.person_name})
+                            SET p.한글명칭 = coalesce(p.한글명칭, row.person_name)
+                            MERGE (e)-[r:P14_carried_out_by]->(p)
+                            SET r.context = row.context_text,
+                                r.source_tag = 'persName'
+                            """,
+                            person_acc,
+                            batch_size=25,
+                        )
+                    except Exception as e:
+                        print(f"⚠️ 인물 관계 배치 주입 중 오류: {e}")
                     person_acc = []
 
                 if place_acc:
-                    _run_batches(
-                        session,
-                        """
-                        UNWIND $data AS row
-                        MATCH (e:사건 {id: row.event_id})
-                        MATCH (pl:장소)
-                        WHERE pl.명칭 = row.place_name OR pl.한글명칭 = row.place_name
-                        MERGE (e)-[r:P7_took_place_at]->(pl)
-                        SET r.context = row.context_text,
-                            r.source_tag = 'placeName'
-                        """,
-                        place_acc,
-                        batch_size=25,
-                    )
+                    try:
+                        _run_batches(
+                            session,
+                            """
+                            UNWIND $data AS row
+                            MATCH (e:사건 {id: row.event_id})
+                            MERGE (pl:장소 {명칭: row.place_name})
+                            SET pl.한글명칭 = coalesce(pl.한글명칭, row.place_name)
+                            MERGE (e)-[r:P7_took_place_at]->(pl)
+                            SET r.context = row.context_text,
+                                r.source_tag = 'placeName'
+                            """,
+                            place_acc,
+                            batch_size=25,
+                        )
+                    except Exception as e:
+                        print(f"⚠️ 장소 관계 배치 주입 중 오류: {e}")
                     place_acc = []
 
             for _, row in df_tei.iterrows():
@@ -421,6 +536,26 @@ def build_ultimate_graph():
                     print(f"⚠️ TEI 파싱 중 오류 (사건id={event_id}): {e}")
 
             _flush_acc()
+
+            # CIDOC-CRM 매핑 적용: Postgres의 tei_cidoc_mappings 테이블에서 TTL 불러와 병합
+            print("🔧 CIDOC 매핑 적용을 시도합니다 (Postgres 테이블: tei_cidoc_mappings)")
+            try:
+                df_mappings = pd.read_sql(
+                    'SELECT table_name, rowid, mapping_label, cidoc_ttl FROM tei_cidoc_mappings ORDER BY id',
+                    pg_engine,
+                )
+            except Exception as e:
+                print(f"⚠️ tei_cidoc_mappings 로딩 실패: {e}")
+                df_mappings = pd.DataFrame()
+
+            if df_mappings.empty:
+                print("⚠️ tei_cidoc_mappings 데이터가 비어있거나 테이블이 없습니다. CIDOC 적용 건너뜁니다.")
+            else:
+                try:
+                    mappings = list(df_mappings[['table_name', 'rowid', 'mapping_label', 'cidoc_ttl']].itertuples(index=False, name=None))
+                    apply_cidoc_mappings(session, mappings)
+                except Exception as e:
+                    print(f"⚠️ CIDOC 매핑 적용 중 오류: {e}")
 
     print("\n✨ 모든 데이터와 탄압 기구의 계층 구조까지 완벽하게 통합되었습니다!")
 

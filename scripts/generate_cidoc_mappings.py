@@ -241,14 +241,15 @@ def main():
     cur = conn.cursor()
 
     # Find tables with tei column
-    cur.execute("""
-    SELECT table_schema, table_name
-    FROM information_schema.columns
-    WHERE column_name = 'tei'
-      AND table_schema NOT IN ('pg_catalog', 'information_schema')
-    GROUP BY table_schema, table_name
-    ORDER BY table_schema, table_name
-    """)
+        cur.execute("""
+        SELECT table_schema, table_name
+        FROM information_schema.columns
+        WHERE column_name IN ('tei', 'tei_status')
+            AND table_schema NOT IN ('pg_catalog', 'information_schema')
+        GROUP BY table_schema, table_name
+        HAVING COUNT(DISTINCT column_name) = 2
+        ORDER BY table_schema, table_name
+        """)
     rows = cur.fetchall()
     if not rows:
         logging.info('No tables with a tei column found in the database.')
@@ -265,7 +266,8 @@ def main():
             continue
         fq_table = f'"{schema}"."{table_name}"' if schema and schema != 'public' else f'"{table_name}"'
         logging.info('Processing table: %s', fq_table)
-        sql = f'SELECT rowid, tei FROM {fq_table} WHERE tei IS NOT NULL'
+        sql = f"SELECT rowid, tei FROM {fq_table} WHERE tei IS NOT NULL AND tei_status = 'REFINED'"
+        # Ensure only refined TEI rows are processed
         if args.limit and args.limit > 0:
             sql += f' LIMIT {args.limit}'
         cur.execute(sql)

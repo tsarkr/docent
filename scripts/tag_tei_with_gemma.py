@@ -34,6 +34,46 @@ try:
     import ollama
 except Exception:
     ollama = None
+try:
+    import tomllib
+except Exception:
+    import tomli as tomllib
+
+try:
+    import psycopg2
+except Exception:
+    psycopg2 = None
+
+
+def _load_secrets(secret_file=None):
+    root = os.getcwd()
+    if secret_file is None:
+        secret_file = os.path.join(root, '.streamlit', 'secrets.toml')
+    if os.path.exists(secret_file):
+        try:
+            with open(secret_file, 'rb') as f:
+                return tomllib.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def _secret_or_env(key, default='', secrets_dict=None):
+    val = os.getenv(key)
+    if val:
+        return str(val)
+    if secrets_dict and key in secrets_dict:
+        return str(secrets_dict[key])
+    return str(default) if default else ''
+
+
+SECRETS = _load_secrets()
+
+PGHOST = _secret_or_env('PG_HOST', 'localhost', SECRETS)
+PGPORT = int(_secret_or_env('PG_PORT', '5432', SECRETS) or 5432)
+PGUSER = _secret_or_env('PG_USER', 'postgres', SECRETS)
+PGPASSWORD = _secret_or_env('PG_PASSWORD', '', SECRETS)
+PGDATABASE = _secret_or_env('PG_DATABASE', 'postgres', SECRETS)
 
 
 PROMPT_TEMPLATE = """
@@ -212,7 +252,7 @@ def add_hanja_gloss_to_text(text: str) -> str:
     return cjk_re.sub(repl, text)
 
 
-def process_csv(input_path, output_path, tei_col='TEI', replace=False, model='gemma4:26b', force_fallback=False):
+def process_csv(input_path, output_path, tei_col='TEI', replace=False, model='gemma4:26b', force_fallback=False, update_db_table=None, rowid_col='rowid'):
     if not os.path.exists(input_path):
         print(f"입력 파일이 존재하지 않습니다: {input_path}")
         sys.exit(1)
@@ -238,6 +278,7 @@ def process_csv(input_path, output_path, tei_col='TEI', replace=False, model='ge
             out_fieldnames = fieldnames + [add_col]
 
         i = 0
+        processed_rowids = set()
         for row in reader:
             i += 1
             tei = row.get(real_tei_col) or ''
@@ -279,6 +320,12 @@ def process_csv(input_path, output_path, tei_col='TEI', replace=False, model='ge
                     row[real_tei_col] = new_tei
                 else:
                     row[add_col] = new_tei
+                # mark as refined if rowid present and update_db_table requested
+                if update_db_table and rowid_col in row and row[rowid_col] is not None and str(row[rowid_col]).strip() != '':
+                    try:
+                        processed_rowids.add(int(row[rowid_col]))
+                    except Exception:
+                        processed_rowids.add(row[rowid_col])
 
             out_rows.append(row)
 
@@ -289,6 +336,56 @@ def process_csv(input_path, output_path, tei_col='TEI', replace=False, model='ge
         for r in out_rows:
             writer.writerow(r)
 
+    # If requested, update DB tei_status for processed rowids
+    if update_db_table:
+        if not psycopg2:
+            print('psycopg2 not available; skipping DB update for tei_status')
+            return
+        if not processed_rowids:
+            print('No processed rows to mark as REFINED in DB')
+            return
+
+        # connect and ensure column exists, then update
+        try:
+            conn = psycopg2.connect(host=PGHOST, port=PGPORT, user=PGUSER, password=PGPASSWORD, dbname=PGDATABASE)
+            conn.autocommit = True
+            cur = conn.cursor()
+            # safe table identifier: allow schema.table or table
+            tbl = update_db_table.strip()
+            # create column if not exists
+            try:
+                cur.execute(f'ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS tei_status text')
+            except Exception as e:
+                # try quoted identifier if simple name
+                try:
+                    cur.execute(f'ALTER TABLE "{tbl}" ADD COLUMN IF NOT EXISTS tei_status text')
+                except Exception as e2:
+                    print(f'⚠️ tei_status 컬럼 생성 실패: {e2} (원본: {e})')
+                    cur.close()
+                    conn.close()
+                    return
+
+            # prepare id list and update
+            ids = list(processed_rowids)
+            # chunk updates to avoid huge IN lists
+            chunk_size = 500
+            for start in range(0, len(ids), chunk_size):
+                chunk = ids[start:start+chunk_size]
+                # use psycopg2 mogrify for safe tuple
+                try:
+                    cur.execute(f"UPDATE {tbl} SET tei_status = 'REFINED' WHERE {rowid_col} = ANY(%s)", (chunk,))
+                except Exception as e:
+                    # fallback to quoted table
+                    try:
+                        cur.execute(f"UPDATE \"{tbl}\" SET tei_status = 'REFINED' WHERE {rowid_col} = ANY(%s)", (chunk,))
+                    except Exception as e2:
+                        print(f'⚠️ tei_status 업데이트 실패: {e2}')
+            cur.close()
+            conn.close()
+            print(f'✓ DB {update_db_table}의 {len(processed_rowids)}개 행을 tei_status=REFINED로 표시했습니다.')
+        except Exception as e:
+            print(f'⚠️ DB 연결/업데이트 실패: {e}')
+
 
 def main():
     p = argparse.ArgumentParser()
@@ -298,10 +395,21 @@ def main():
     p.add_argument('--replace', action='store_true', help='원본 TEI 컬럼을 교체합니다.')
     p.add_argument('--model', default='gemma4:26b')
     p.add_argument('--force-fallback', action='store_true', help='LLM 호출을 건너뛰고 hanja fallback을 사용합니다.')
+    p.add_argument('--update-db-table', help='처리 후 tei_status=REFINED로 표시할 DB 테이블 (예: raw_source_info)')
+    p.add_argument('--rowid-col', default='rowid', help='DB의 rowid 컬럼명 (기본: rowid)')
     args = p.parse_args()
 
     try:
-        process_csv(args.input, args.output, tei_col=args.col, replace=args.replace, model=args.model, force_fallback=args.force_fallback)
+        process_csv(
+            args.input,
+            args.output,
+            tei_col=args.col,
+            replace=args.replace,
+            model=args.model,
+            force_fallback=args.force_fallback,
+            update_db_table=args.update_db_table,
+            rowid_col=args.rowid_col,
+        )
     except Exception as e:
         print(f"오류: {e}")
         sys.exit(1)
