@@ -19,7 +19,7 @@ import hanja
 import pandas as pd
 from bs4 import BeautifulSoup
 from neo4j import GraphDatabase
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 try:
     import tomllib
@@ -65,8 +65,6 @@ NEO4J_CONFIG = {
     "password": _secret_or_env("NEO4J_PASSWORD", "", SECRETS),
 }
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), 'data')
-
 encoded_pass = urllib.parse.quote_plus(PG_CONFIG["password"])
 pg_engine = create_engine(
     f"postgresql://{PG_CONFIG['user']}:{encoded_pass}@{PG_CONFIG['host']}:5432/{PG_CONFIG['database']}"
@@ -74,6 +72,23 @@ pg_engine = create_engine(
 neo4j_driver = GraphDatabase.driver(
     NEO4J_CONFIG["uri"], auth=(NEO4J_CONFIG["user"], NEO4J_CONFIG["password"])
 )
+
+
+def safe_run(session, cypher, **params):
+    """Run cypher but defensively rewrite disconnected MATCH patterns like
+    "MATCH (a ...),(b ...)" -> "MATCH (a ...) MATCH (b ...)" to avoid
+    accidental cartesian products. Returns the underlying result object.
+    """
+    try:
+        if isinstance(cypher, str) and 'MATCH' in cypher and '),(' in cypher:
+            new = cypher.replace('),(', ') MATCH (')
+            if new != cypher:
+                print('⚠️ 안전조치: 분리된 MATCH 패턴을 더 안전한 형태로 변환합니다.')
+                cypher = new
+        return session.run(cypher, **params)
+    except Exception:
+        # re-raise for caller to handle
+        raise
 
 
 def _read_table_with_mapping(table_name, mapping, required=None):
@@ -113,7 +128,7 @@ def _run_batches(session, cypher, records, batch_size=500, extra_params=None):
     for start in range(0, total, batch_size):
         chunk = records[start:start + batch_size]
         params = {"data": chunk, **extra_params}
-        session.run(cypher, **params).consume()
+        safe_run(session, cypher, **params).consume()
         written += len(chunk)
     return written
 
@@ -131,16 +146,24 @@ def _ensure_schema(session):
 
     for statement in statements:
         try:
-            session.run(statement).consume()
+            safe_run(session, statement).consume()
         except Exception as e:
             print(f"⚠️ 스키마 생성 건너뜀: {e}")
+
+
+def _ensure_tei_status(table_name):
+    try:
+        with pg_engine.begin() as conn:
+            conn.execute(text(f'ALTER TABLE "{table_name}" ADD COLUMN IF NOT EXISTS tei_status text'))
+    except Exception as e:
+        print(f"⚠️ {table_name} tei_status 컬럼 생성 실패: {e}")
 
 
 def _clear_graph(session, batch_size=500):
     total_deleted = 0
 
     while True:
-        result = session.run(
+        result = safe_run(session,
             """
             MATCH (n)
             WITH n LIMIT $batch_size
@@ -180,42 +203,47 @@ def apply_cidoc_mappings(session, mappings):
     """
     import re
 
-    applied = 0
+    # Batch-oriented implementation:
+    # 1) scan all mappings and collect unique nodes (by uid) for each type
+    # 2) collect relationships (P14, P7) as row-level items
+    # 3) push nodes and relationships in batches via _run_batches to reduce per-row roundtrips
+    person_nodes = {}
+    place_nodes = {}
+    event_nodes = {}
+    rel_p14 = []
+    rel_p7 = []
+
+    total_rows = 0
     for row in mappings:
+        total_rows += 1
         try:
-            # support both sequences and dict-like rows
+            # normalize row shape
             if isinstance(row, (list, tuple)) and len(row) >= 4:
-                table_name, rowid, mapping_label, ttl = row[0], row[1], row[2], row[3]
+                ttl = row[3]
             elif isinstance(row, dict):
-                table_name = row.get('table_name') or row.get('원천테이블')
-                rowid = row.get('rowid')
-                mapping_label = row.get('mapping_label') or row.get('mapping')
                 ttl = row.get('cidoc_ttl') or row.get('ttl')
             else:
-                # fallback: try index access
-                table_name, rowid, mapping_label, ttl = row[0], row[1], row[2], row[3]
+                ttl = row[3]
 
             if not ttl or not str(ttl).strip():
                 continue
-
             text = str(ttl)
 
-            # ex: identifiers
             ids = re.findall(r'ex:([A-Za-z0-9_\-]+)', text)
-            # rdfs:label extraction
             labels = re.findall(r'ex:([A-Za-z0-9_\-]+)[^\n]*?rdfs:label\s+"([^"]+)"', text)
             label_map = {rid: lbl for rid, lbl in labels}
 
-            uids = []  # tuples (kind, uid, short)
-            for rid in ids:
-                short = rid
+            # collect uids with inferred kinds
+            uids = []
+            low = text.lower()
+            for short in ids:
                 kind = None
-                low = text.lower()
-                if short.lower().startswith('person') or ('person' in low and short.lower().startswith('p')):
+                sl = short.lower()
+                if sl.startswith('person') or ('person' in low and sl.startswith('p')):
                     kind = '인물'
-                elif short.lower().startswith('place'):
+                elif sl.startswith('place'):
                     kind = '장소'
-                elif short.lower().startswith('event') or short.lower().startswith('item'):
+                elif sl.startswith('event') or sl.startswith('item'):
                     kind = '사건'
                 else:
                     if 'person' in low:
@@ -232,40 +260,100 @@ def apply_cidoc_mappings(session, mappings):
 
                 lbl = label_map.get(short)
                 if kind == '인물':
-                    if lbl:
-                        session.run("MERGE (n:인물 {uid:$uid}) SET n.명칭 = coalesce(n.명칭, $label)", uid=uid, label=lbl)
-                    else:
-                        session.run("MERGE (n:인물 {uid:$uid})", uid=uid)
+                    if uid not in person_nodes:
+                        person_nodes[uid] = lbl
                 elif kind == '장소':
-                    if lbl:
-                        session.run("MERGE (n:장소 {uid:$uid}) SET n.명칭 = coalesce(n.명칭, $label)", uid=uid, label=lbl)
-                    else:
-                        session.run("MERGE (n:장소 {uid:$uid})", uid=uid)
+                    if uid not in place_nodes:
+                        place_nodes[uid] = lbl
                 else:
-                    if lbl:
-                        session.run("MERGE (n:사건 {uid:$uid}) SET n.사건명 = coalesce(n.사건명, $label)", uid=uid, label=lbl)
-                    else:
-                        session.run("MERGE (n:사건 {uid:$uid})", uid=uid)
+                    if uid not in event_nodes:
+                        event_nodes[uid] = lbl
 
-            # relationship heuristics
+            # collect relationships
             if 'P14_carried_out_by' in text:
                 ev = next((u for k, u, s in uids if k == '사건'), None)
                 pe = next((u for k, u, s in uids if k == '인물'), None)
                 if ev and pe:
-                    session.run("MATCH (a:사건 {uid:$ev}),(b:인물 {uid:$pe}) MERGE (a)-[:P14_carried_out_by]->(b)", ev=ev, pe=pe)
+                    rel_p14.append({'ev': ev, 'pe': pe})
 
             if 'P7_took_place_at' in text:
                 ev = next((u for k, u, s in uids if k == '사건'), None)
                 pl = next((u for k, u, s in uids if k == '장소'), None)
                 if ev and pl:
-                    session.run("MATCH (a:사건 {uid:$ev}),(b:장소 {uid:$pl}) MERGE (a)-[:P7_took_place_at]->(b)", ev=ev, pl=pl)
+                    rel_p7.append({'ev': ev, 'pl': pl})
 
-            applied += 1
         except Exception as e:
+            # ignore problematic rows but log
+            try:
+                rowid = row[1] if isinstance(row, (list, tuple)) and len(row) > 1 else getattr(row, 'rowid', None)
+            except Exception:
+                rowid = None
             print(f"⚠️ CIDOC 매핑 처리 중 오류 (rowid={rowid}): {e}")
             continue
 
-    print(f"Applied {applied} CIDOC mappings")
+    # push nodes in batches
+    applied = 0
+    batch = 200
+    if person_nodes:
+        data = [{'uid': k, 'label': v} for k, v in person_nodes.items()]
+        _run_batches(session,
+                     """
+                     UNWIND $data AS row
+                     MERGE (n:인물 {uid: row.uid})
+                     SET n.명칭 = coalesce(n.명칭, row.label)
+                     """,
+                     data,
+                     batch_size=batch)
+        applied += len(data)
+
+    if place_nodes:
+        data = [{'uid': k, 'label': v} for k, v in place_nodes.items()]
+        _run_batches(session,
+                     """
+                     UNWIND $data AS row
+                     MERGE (n:장소 {uid: row.uid})
+                     SET n.명칭 = coalesce(n.명칭, row.label)
+                     """,
+                     data,
+                     batch_size=batch)
+        applied += len(data)
+
+    if event_nodes:
+        data = [{'uid': k, 'label': v} for k, v in event_nodes.items()]
+        _run_batches(session,
+                     """
+                     UNWIND $data AS row
+                     MERGE (n:사건 {uid: row.uid})
+                     SET n.사건명 = coalesce(n.사건명, row.label)
+                     """,
+                     data,
+                     batch_size=batch)
+        applied += len(data)
+
+    # push relationships in batches
+    if rel_p14:
+        _run_batches(session,
+                     """
+                     UNWIND $data AS row
+                     MATCH (a:사건 {uid: row.ev})
+                     MATCH (b:인물 {uid: row.pe})
+                     MERGE (a)-[:P14_carried_out_by]->(b)
+                     """,
+                     rel_p14,
+                     batch_size=batch)
+
+    if rel_p7:
+        _run_batches(session,
+                     """
+                     UNWIND $data AS row
+                     MATCH (a:사건 {uid: row.ev})
+                     MATCH (b:장소 {uid: row.pl})
+                     MERGE (a)-[:P7_took_place_at]->(b)
+                     """,
+                     rel_p7,
+                     batch_size=batch)
+
+    print(f"Applied {applied} CIDOC mappings (nodes: {len(person_nodes)+len(place_nodes)+len(event_nodes)}, rels: {len(rel_p14)+len(rel_p7)}) from {total_rows} rows")
 
 
 def build_ultimate_graph():
@@ -275,8 +363,12 @@ def build_ultimate_graph():
         _ensure_schema(session)
 
         print("📍 장소 노드 생성 중... (Postgres TEI에서 로드)")
+        _ensure_tei_status('raw_detail_place')
         try:
-            df_place = pd.read_sql('SELECT rowid, tei FROM raw_detail_place WHERE tei IS NOT NULL', pg_engine)
+            df_place = pd.read_sql(
+                "SELECT rowid, tei FROM raw_detail_place WHERE tei IS NOT NULL AND tei_status = 'REFINED'",
+                pg_engine,
+            )
         except Exception as e:
             print(f"⚠️ 장소 TEI 로딩 실패: {e}")
             df_place = pd.DataFrame()
@@ -341,8 +433,12 @@ def build_ultimate_graph():
         source_tables = ['raw_bibliography', 'raw_source_info', 'raw_event_place_link']
         source_records = []
         for source_table in source_tables:
+            _ensure_tei_status(source_table)
             try:
-                df_source = pd.read_sql(f'SELECT rowid, tei FROM {source_table} WHERE tei IS NOT NULL', pg_engine)
+                df_source = pd.read_sql(
+                    f"SELECT rowid, tei FROM {source_table} WHERE tei IS NOT NULL AND tei_status = 'REFINED'",
+                    pg_engine,
+                )
             except Exception as e:
                 print(f"⚠️ {source_table} TEI 로딩 실패: {e}")
                 continue
@@ -441,9 +537,11 @@ def build_ultimate_graph():
                 print(f"❌ {table_name} 처리 중 에러: {e}")
 
         print("🔗 최종 관계망 구축 중... 사건 TEI에서 인물/장소 관계 생성")
+        _ensure_tei_status('raw_event_info')
         try:
             df_tei = pd.read_sql(
-                'SELECT "아이디" AS event_id, tei FROM raw_event_info WHERE tei IS NOT NULL AND "아이디" IS NOT NULL',
+                "SELECT \"아이디\" AS event_id, tei FROM raw_event_info "
+                "WHERE tei IS NOT NULL AND \"아이디\" IS NOT NULL AND tei_status = 'REFINED'",
                 pg_engine,
             )
         except Exception as e:
@@ -461,40 +559,108 @@ def build_ultimate_graph():
                 nonlocal person_acc, place_acc
                 if person_acc:
                     try:
-                        _run_batches(
-                            session,
-                            """
-                            UNWIND $data AS row
-                            MATCH (e:사건 {id: row.event_id})
-                            MERGE (p:인물 {명칭: row.person_name})
-                            SET p.한글명칭 = coalesce(p.한글명칭, row.person_name)
-                            MERGE (e)-[r:P14_carried_out_by]->(p)
-                            SET r.context = row.context_text,
-                                r.source_tag = 'persName'
-                            """,
-                            person_acc,
-                            batch_size=25,
-                        )
+                        # deduplicate by (main_name, gloss)
+                        unique = {}
+                        for r in person_acc:
+                            key = (r.get('person_name',''), r.get('gloss',''))
+                            if key not in unique:
+                                unique[key] = {'main': key[0], 'gloss': key[1]}
+
+                        mapping = {}
+                        for key, val in unique.items():
+                            main = val['main']
+                            gloss = val['gloss'] or ''
+                            try:
+                                res = safe_run(session,
+                                               "MATCH (n:인물) WHERE n.명칭 = $main OR n.명칭 = $gloss OR n.한글독음 = $main RETURN id(n) AS nid",
+                                               main=main, gloss=gloss).single()
+                                if res and res.get('nid') is not None:
+                                    mapping[key] = res['nid']
+                                    continue
+                            except Exception:
+                                pass
+
+                            # create node if not found
+                            res2 = safe_run(session,
+                                            "MERGE (p:인물 {명칭:$main}) SET p.한글독음 = coalesce(p.한글독음, $gloss) RETURN id(p) AS nid",
+                                            main=main, gloss=gloss).single()
+                            mapping[key] = res2['nid'] if res2 else None
+
+                        rels = []
+                        for r in person_acc:
+                            key = (r.get('person_name',''), r.get('gloss',''))
+                            nid = mapping.get(key)
+                            if nid is None:
+                                continue
+                            rels.append({'event_id': r['event_id'], 'person_nid': nid, 'context_text': r['context_text']})
+
+                        if rels:
+                            _run_batches(
+                                session,
+                                """
+                                UNWIND $data AS row
+                                MATCH (e:사건 {id: row.event_id})
+                                MATCH (p) WHERE id(p) = row.person_nid
+                                MERGE (e)-[r:P14_carried_out_by]->(p)
+                                SET r.context = row.context_text,
+                                    r.source_tag = 'persName'
+                                """,
+                                rels,
+                                batch_size=25,
+                            )
                     except Exception as e:
                         print(f"⚠️ 인물 관계 배치 주입 중 오류: {e}")
                     person_acc = []
 
                 if place_acc:
                     try:
-                        _run_batches(
-                            session,
-                            """
-                            UNWIND $data AS row
-                            MATCH (e:사건 {id: row.event_id})
-                            MERGE (pl:장소 {명칭: row.place_name})
-                            SET pl.한글명칭 = coalesce(pl.한글명칭, row.place_name)
-                            MERGE (e)-[r:P7_took_place_at]->(pl)
-                            SET r.context = row.context_text,
-                                r.source_tag = 'placeName'
-                            """,
-                            place_acc,
-                            batch_size=25,
-                        )
+                        unique = {}
+                        for r in place_acc:
+                            key = (r.get('place_name',''), r.get('gloss',''))
+                            if key not in unique:
+                                unique[key] = {'main': key[0], 'gloss': key[1]}
+
+                        mapping = {}
+                        for key, val in unique.items():
+                            main = val['main']
+                            gloss = val['gloss'] or ''
+                            try:
+                                res = safe_run(session,
+                                               "MATCH (n:장소) WHERE n.명칭 = $main OR n.명칭 = $gloss OR n.한글독음 = $main RETURN id(n) AS nid",
+                                               main=main, gloss=gloss).single()
+                                if res and res.get('nid') is not None:
+                                    mapping[key] = res['nid']
+                                    continue
+                            except Exception:
+                                pass
+
+                            res2 = safe_run(session,
+                                            "MERGE (p:장소 {명칭:$main}) SET p.한글독음 = coalesce(p.한글독음, $gloss) RETURN id(p) AS nid",
+                                            main=main, gloss=gloss).single()
+                            mapping[key] = res2['nid'] if res2 else None
+
+                        rels = []
+                        for r in place_acc:
+                            key = (r.get('place_name',''), r.get('gloss',''))
+                            nid = mapping.get(key)
+                            if nid is None:
+                                continue
+                            rels.append({'event_id': r['event_id'], 'place_nid': nid, 'context_text': r['context_text']})
+
+                        if rels:
+                            _run_batches(
+                                session,
+                                """
+                                UNWIND $data AS row
+                                MATCH (e:사건 {id: row.event_id})
+                                MATCH (p) WHERE id(p) = row.place_nid
+                                MERGE (e)-[r:P7_took_place_at]->(p)
+                                SET r.context = row.context_text,
+                                    r.source_tag = 'placeName'
+                                """,
+                                rels,
+                                batch_size=25,
+                            )
                     except Exception as e:
                         print(f"⚠️ 장소 관계 배치 주입 중 오류: {e}")
                     place_acc = []
@@ -513,20 +679,45 @@ def build_ultimate_graph():
                             continue
 
                         for pers in section.find_all('persName'):
+                            # extract <gloss> if present, remove it from tree, then get main name
+                            gloss_tag = pers.find('gloss')
+                            gloss_text = ''
+                            if gloss_tag:
+                                try:
+                                    gloss_text = gloss_tag.get_text(' ', strip=True) or ''
+                                except Exception:
+                                    gloss_text = ''
+                                try:
+                                    gloss_tag.extract()
+                                except Exception:
+                                    pass
                             person_name = pers.get_text(' ', strip=True)
                             if person_name:
                                 person_acc.append({
                                     'event_id': event_id,
                                     'person_name': person_name,
+                                    'gloss': gloss_text,
                                     'context_text': context_text,
                                 })
 
                         for place in section.find_all('placeName'):
+                            gloss_tag = place.find('gloss')
+                            gloss_text = ''
+                            if gloss_tag:
+                                try:
+                                    gloss_text = gloss_tag.get_text(' ', strip=True) or ''
+                                except Exception:
+                                    gloss_text = ''
+                                try:
+                                    gloss_tag.extract()
+                                except Exception:
+                                    pass
                             place_name = place.get_text(' ', strip=True)
                             if place_name:
                                 place_acc.append({
                                     'event_id': event_id,
                                     'place_name': place_name,
+                                    'gloss': gloss_text,
                                     'context_text': context_text,
                                 })
 

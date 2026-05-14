@@ -61,6 +61,22 @@ NEO_URI = _secret_or_env('NEO4J_URI', 'bolt://localhost:7687', SECRETS)
 NEO_USER = _secret_or_env('NEO4J_USER', 'neo4j', SECRETS)
 NEO_PW = _secret_or_env('NEO4J_PASSWORD', 'password', SECRETS)
 
+
+def safe_run(session, cypher, **params):
+    """Defensive wrapper for session.run that rewrites disconnected MATCH
+    patterns like "MATCH (a...),(b...)" to "MATCH (a...) MATCH (b...)" to
+    avoid accidental cartesian products.
+    """
+    try:
+        if isinstance(cypher, str) and 'MATCH' in cypher and '),(' in cypher:
+            new = cypher.replace('),(', ') MATCH (')
+            if new != cypher:
+                print('⚠️ 안전조치: 분리된 MATCH 패턴을 더 안전한 형태로 변환합니다.')
+                cypher = new
+        return session.run(cypher, **params)
+    except Exception:
+        raise
+
 # Postgres settings (for tei_cidoc_mappings)
 PGHOST = _secret_or_env('PG_HOST', 'localhost', SECRETS)
 PGPORT = int(_secret_or_env('PG_PORT', '5432', SECRETS) or 5432)
@@ -132,19 +148,19 @@ def apply_cidoc_mappings(session, mappings):
             lbl = label_map.get(short)
             if kind == 'Person':
                 if lbl:
-                    session.run("MERGE (p:Person {uid:$uid}) SET p.name = $label", uid=uid, label=lbl)
+                    safe_run(session, "MERGE (p:Person {uid:$uid}) SET p.name = $label", uid=uid, label=lbl)
                 else:
-                    session.run("MERGE (p:Person {uid:$uid})", uid=uid)
+                    safe_run(session, "MERGE (p:Person {uid:$uid})", uid=uid)
             elif kind == 'Place':
                 if lbl:
-                    session.run("MERGE (pl:Place {uid:$uid}) SET pl.name = $label", uid=uid, label=lbl)
+                    safe_run(session, "MERGE (pl:Place {uid:$uid}) SET pl.name = $label", uid=uid, label=lbl)
                 else:
-                    session.run("MERGE (pl:Place {uid:$uid})", uid=uid)
+                    safe_run(session, "MERGE (pl:Place {uid:$uid})", uid=uid)
             else:
                 if lbl:
-                    session.run("MERGE (e:Event {uid:$uid}) SET e.title = $label", uid=uid, label=lbl)
+                    safe_run(session, "MERGE (e:Event {uid:$uid}) SET e.title = $label", uid=uid, label=lbl)
                 else:
-                    session.run("MERGE (e:Event {uid:$uid})", uid=uid)
+                    safe_run(session, "MERGE (e:Event {uid:$uid})", uid=uid)
 
         # create relationships based on known CIDOC predicates or explicit patterns
         # find all predicate uses like 'cidoc:P14_carried_out_by' or plain 'P14_carried_out_by'
@@ -152,13 +168,14 @@ def apply_cidoc_mappings(session, mappings):
             ev = next((u for k,u,short in uids if k == 'Event'), None)
             pe = next((u for k,u,short in uids if k == 'Person'), None)
             if ev and pe:
-                session.run("MATCH (a:Event {uid:$ev}),(b:Person {uid:$pe}) MERGE (a)-[:P14_carried_out_by]->(b)", ev=ev, pe=pe)
+                # avoid cartesian product by using two MATCH clauses
+                safe_run(session, "MATCH (a:Event {uid:$ev}) MATCH (b:Person {uid:$pe}) MERGE (a)-[:P14_carried_out_by]->(b)", ev=ev, pe=pe)
 
         if 'P7_took_place_at' in ttl:
             ev = next((u for k,u,short in uids if k == 'Event'), None)
             pl = next((u for k,u,short in uids if k == 'Place'), None)
             if ev and pl:
-                session.run("MATCH (a:Event {uid:$ev}),(b:Place {uid:$pl}) MERGE (a)-[:P7_took_place_at]->(b)", ev=ev, pl=pl)
+                safe_run(session, "MATCH (a:Event {uid:$ev}) MATCH (b:Place {uid:$pl}) MERGE (a)-[:P7_took_place_at]->(b)", ev=ev, pl=pl)
 
         count += 1
     print(f'Applied {count} CIDOC mappings')
@@ -184,7 +201,7 @@ def load_tei_files(wipe=False):
                 print('Wipe mode enabled: deleting existing Person/Place/Event nodes...')
                 for label in ('Person', 'Place', 'Event'):
                     try:
-                        session.run(f"MATCH (n:{label}) DETACH DELETE n")
+                        safe_run(session, f"MATCH (n:{label}) DETACH DELETE n")
                     except Exception as _e:
                         print(f'Warning: failed to delete nodes with label {label}: {_e}')
                 print('Wipe complete.')
@@ -206,23 +223,26 @@ def load_tei_files(wipe=False):
                             continue
                         typ = detect_type(col)
                         if typ == 'person':
-                            session.run("MERGE (n:Person {name:$name}) RETURN id(n)", name=val)
+                            safe_run(session, "MERGE (n:Person {name:$name}) RETURN id(n)", name=val)
                         elif typ == 'place':
-                            session.run("MERGE (n:Place {name:$name}) RETURN id(n)", name=val)
+                            safe_run(session, "MERGE (n:Place {name:$name}) RETURN id(n)", name=val)
                         elif typ == 'event':
-                            session.run("MERGE (n:Event {title:$title}) RETURN id(n)", title=val)
+                            safe_run(session, "MERGE (n:Event {title:$title}) RETURN id(n)", title=val)
                     persons = [v for k,v in props.items() if detect_type(k)=='person' and v]
                     events = [v for k,v in props.items() if detect_type(k)=='event' and v]
                     places = [v for k,v in props.items() if detect_type(k)=='place' and v]
                     for p in persons:
                         for e in events:
-                            session.run(
-                                "MATCH (a:Person {name:$p}),(b:Event {title:$e}) MERGE (b)-[:P14_carried_out_by]->(a)",
+                            # avoid disconnected-pattern cartesian product
+                            safe_run(
+                                session,
+                                "MATCH (a:Person {name:$p}) MATCH (b:Event {title:$e}) MERGE (b)-[:P14_carried_out_by]->(a)",
                                 p=p, e=e)
                     for e in events:
                         for pl in places:
-                            session.run(
-                                "MATCH (a:Event {title:$e}),(b:Place {name:$pl}) MERGE (a)-[:P7_took_place_at]->(b)",
+                            safe_run(
+                                session,
+                                "MATCH (a:Event {title:$e}) MATCH (b:Place {name:$pl}) MERGE (a)-[:P7_took_place_at]->(b)",
                                 e=e, pl=pl)
 
             # apply CIDOC mappings from DB if available

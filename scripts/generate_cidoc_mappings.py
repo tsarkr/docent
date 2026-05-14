@@ -9,6 +9,8 @@ This generator is intentionally simple: it creates small TTL examples referencin
 """
 import os, sys, re, datetime, argparse, logging
 from xml.etree import ElementTree as ET
+from bs4 import BeautifulSoup
+import html
 
 try:
     import psycopg2
@@ -60,6 +62,22 @@ def qname(name):
     return name.lower()
 
 
+def safe_fragment(name: str) -> str:
+    """Create a URI-safe fragment from a name: keep letters/digits and CJK, replace others with underscore, collapse."""
+    if not name:
+        return ''
+    # unescape HTML entities
+    name = html.unescape(str(name))
+    # normalize whitespace
+    name = re.sub(r"\s+", '_', name.strip())
+    # allow ASCII letters/digits and CJK Unified Ideographs, replace other chars with '_'
+    name = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", '_', name)
+    # collapse multiple underscores
+    name = re.sub(r"_+", '_', name)
+    # strip leading/trailing underscores
+    return name.strip('_') or 'n'
+
+
 def connect():
     conn = psycopg2.connect(host=PGHOST, port=PGPORT, user=PGUSER, password=PGPASSWORD, dbname=PGDATABASE)
     conn.autocommit = True
@@ -91,51 +109,60 @@ def generate_simple_ttls(table, rowid, tei_text):
     PARENT_KEYWORDS = ['아버지','부친','父','父親','부','아비','어머니','모친','母']
     SPOUSE_KEYWORDS = ['부인','아내','남편','부부','妻','夫']
     try:
-        root = ET.fromstring(tei_text)
-        # build parent map to allow climbing from element to ancestor
-        parent_map = {c: p for p in root.iter() for c in p}
-        # find all persName elements (namespace-agnostic)
-        pers_nodes = root.findall('.//{*}persName') + root.findall('.//persName')
+        # Use BeautifulSoup for more robust XML handling (and easy extract())
+        soup = BeautifulSoup(tei_text or '', 'xml')
+        # find persName elements
+        pers_nodes = soup.find_all('persName')
         for idx, pn in enumerate(pers_nodes):
-            text = ''.join(pn.itertext()).strip()
+            # extract gloss if present
+            gloss_tag = pn.find('gloss')
+            gloss_text = ''
+            if gloss_tag:
+                try:
+                    gloss_text = gloss_tag.get_text(' ', strip=True) or ''
+                except Exception:
+                    gloss_text = ''
+                try:
+                    gloss_tag.extract()
+                except Exception:
+                    pass
+
+            text = pn.get_text(' ', strip=True)
             if not text:
                 continue
-            pid = pn.get('{http://www.w3.org/XML/1998/namespace}id') or pn.get('id') or f'{table}_{rowid}_p{idx+1}'
+            pid = pn.get('id') or pn.get('{http://www.w3.org/XML/1998/namespace}id') or f'{table}_{rowid}_p{idx+1}'
             hanja = None
             if any('\u4e00' <= ch <= '\u9fff' for ch in text):
                 hanja = text
-            persons.append({'id': pid, 'text': text, 'hanja': hanja, 'node': pn})
+            persons.append({'id': pid, 'text': text, 'hanja': hanja, 'node': pn, 'gloss': gloss_text})
 
-        # For each person, search ancestor text for action keywords to generate person-event-action mappings
+        # For each person, search ancestor text (using parent elements) for action keywords
         for p in persons:
-            # climb up a few ancestors to gather context
             ctx_texts = []
             cur = p['node']
             for _ in range(4):
-                parent = parent_map.get(cur)
-                if parent is None:
+                if cur is None or cur.parent is None:
                     break
-                ctx = ' '.join(t.strip() for t in parent.itertext() if t and t.strip())
+                parent = cur.parent
+                if not parent:
+                    break
+                ctx = ' '.join(t.strip() for t in parent.strings if t and t.strip())
                 if ctx:
                     ctx_texts.append(ctx)
                 cur = parent
             combined_ctx = '\n'.join(ctx_texts)
-            # find action keyword in context
             for kw in ACTION_KEYWORDS:
                 if kw in combined_ctx:
                     ev_id = f"{table}_{rowid}_ev_{qname(p['id'])}_{qname(kw)}"
                     events.append({'id': ev_id, 'label': kw, 'actor': p['id']})
                     break
 
-        # Candidate person-person relations: if two persName nodes occur within the same ancestor text and relation keywords present
-        # scan parent elements that contain multiple persName children
-        for elem in root.iter():
-            # collect persName children under this elem
-            child_pers = [p for p in persons if p['node'] in list(elem.iter())]
+        # Candidate person-person relations: find parent tags that contain multiple persName children
+        for elem in soup.find_all():
+            child_pers = [p for p in persons if p['node'] in elem.find_all()]
             if len(child_pers) < 2:
                 continue
-            text_block = ' '.join(t.strip() for t in elem.itertext() if t and t.strip())
-            # parent-like relation
+            text_block = ' '.join(t.strip() for t in elem.strings if t and t.strip())
             for kw in PARENT_KEYWORDS:
                 if kw in text_block:
                     a = child_pers[0]['id']
@@ -148,24 +175,32 @@ def generate_simple_ttls(table, rowid, tei_text):
                     b = child_pers[1]['id']
                     relations.append(('spouseOf', a, b, kw))
                     break
-    except ET.ParseError:
-        # not valid XML — fall back to keyword heuristics below
+    except Exception:
+        # parsing fallback handled below
         pass
 
     # produce TTLs for discovered persons
     if persons:
         for p in persons:
+            # choose fragment base: prefer hanja/main text cleaned, fallback to pid qname
+            base_name = p.get('hanja') or p.get('text') or p.get('id')
+            frag = safe_fragment(base_name) or qname(p.get('id'))
             ttl = f"""@prefix ex: <http://example.org/docent/> .
 @prefix cidoc: <http://www.cidoc-crm.org/cidoc-crm/> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
 
-ex:person_{qname(p['id'])} a ex:Person ;
+ex:person_{frag} a ex:Person ;
     rdfs:label "{p['text']}" .
 """
-            # add hanja as comment/altLabel if present
+            # add gloss as skos:altLabel if present
+            gloss = p.get('gloss')
+            if gloss:
+                ttl = ttl.rstrip() + f"\nex:person_{frag} skos:altLabel \"{gloss}\" .\n"
+            # add hanja comment
             if p.get('hanja'):
                 ttl += f"\n# hanja: {p['hanja']}\n"
-            ttls.append((f'person-{qname(p["id"]) }', ttl))
+            ttls.append((f'person-{frag}', ttl))
 
         # produce event TTLs (person-action-event)
         for ev in events:
@@ -241,7 +276,7 @@ def main():
     cur = conn.cursor()
 
     # Find tables with tei column
-        cur.execute("""
+    cur.execute("""
         SELECT table_schema, table_name
         FROM information_schema.columns
         WHERE column_name IN ('tei', 'tei_status')

@@ -1,14 +1,12 @@
 """Tag TEI <p data-col="출처정보"> content using local Gemma model (gemma4:26b).
 
 Usage:
-  python scripts/tag_tei_with_gemma.py \
-    --input data/data-1778569591261.csv \
-    --output data/data-1778569591261.tagged.csv \
-    --col TEI
+    python scripts/tag_tei_with_gemma.py --table raw_source_info --limit 5
 
-The script looks for <p data-col="출처정보">...</p> fragments inside the TEI column
-and sends the inner content to the local `gemma4:26b` model (via `ollama.generate`) with
-an instruction to add the following TEI tags where appropriate:
+The script reads from PostgreSQL and updates the `tei` column in-place. It looks for
+<p data-col="출처정보">...</p> fragments inside the TEI column and sends the inner
+content to the local `gemma4:26b` model (via `ollama.chat`) with an instruction to
+add the following TEI tags where appropriate:
 
 - <placeName> : 역사적 지명
 - <persName>  : 인명
@@ -17,17 +15,17 @@ an instruction to add the following TEI tags where appropriate:
 - <term>      : 특정 지위나 용어
 - <gloss>     : 한자/일본어 표현의 병기 (한글 독음/의미)
 
-The original paragraph wrapper and other TEI should be preserved. The script writes
-a new CSV with an added column `TEI_tagged` (or replaces the original if --replace).
+The original paragraph wrapper and other TEI should be preserved. Rows are updated
+with tei_status='REFINED' after successful processing.
 """
 
 import argparse
-import csv
 import os
 import re
 import sys
 import time
 import importlib
+import signal
 from typing import Optional
 
 try:
@@ -77,40 +75,27 @@ PGDATABASE = _secret_or_env('PG_DATABASE', 'postgres', SECRETS)
 
 
 PROMPT_TEMPLATE = """
-아래는 TEI 문단의 내용입니다. 당신은 역사 도슨트이자 XML 태깅 도우미로서, 주어진 문단 안에서 다음 역할을 수행하세요.
+당신은 역사 도슨트이자 XML 태깅 도우미입니다. 아래 지시를 엄격히 따르세요.
 
-요구사항(강제):
-1) 원문 텍스트의 의미나 어순은 변경하지 마세요. 가능한 한 최소 변경으로 엔티티 주변에 지정된 TEI 태그만 추가합니다.
-2) 이미 해당 XML 태그(예: <placeName>, <persName>, <gloss> 등)가 존재하면 중복으로 추가하지 마세요.
-3) 태그 목록과 활용법(반드시 적용):
-    - <placeName> : 역사적 지명(도시, 마을, 지역 등)을 감싸세요.
-    - <persName>  : 개인 이름을 감싸세요.
-    - <orgName>   : 조직/기관 이름을 감싸세요.
-    - <date when="YYYY-MM-DD">...</date> : 날짜는 가능하면 ISO(YYYY-MM 또는 YYYY-MM-DD) 형태로 `when` 속성에 표기하세요.
-    - <term>      : 직위·지위·특정 용어(예: 폭민, 하사)를 감싸세요.
-    - <gloss>     : 한자(漢字)와 일본어(仮名/漢字) 표기에 대해 **반드시** 한국어 독음(한글)과 가능하면 의미를 병기하세요. 형식은 아래 예시를 따르세요.
+[작업 규칙]
+1. 절대 텍스트를 창작하거나 반복하지 마시오.
+2. 주어진 텍스트 안의 명사(인물, 장소, 기구)에만 XML 태그를 씌워서 반환하시오.
+3. 마크다운(`xml`)이나 설명 없이 오직 태깅된 결과물만 반환하시오.
 
-gloss 사용 규칙(반드시 따를 것):
-- 원문에 한자/일문이 등장하면, 해당 토큰 뒤에 `<gloss>...</gloss>` 를 추가합니다.
-- `<gloss>` 안에는 '한글독음' 또는 '한글독음: 의미' 형태로 작성합니다.
-- 원문에 이미 괄호·대괄호 등으로 독음/설명이 주어져 있다면 그 정보를 우선 사용하세요.
+[예시 입력]
+1919년 3월 1일, 홍길동은 탑골공원에서 만세를 불렀다.
 
-예시 (반드시 이 포맷으로 출력):
- - 원문: 光州市內
-    출력: `<placeName>光州</placeName><gloss>광주</gloss>市內`
- - 원문: 海州カイシホ[海州는 海子浦의 오기]
-    출력: `<placeName>海州カイシホ</placeName><gloss>해주(해자포의 오기)</gloss>`
+[예시 출력]
+<date when="1919-03-01">1919년 3월 1일</date>, <persName>홍길동</persName>은 <placeName>탑골공원</placeName>에서 만세를 불렀다.
 
-4) 출력은 오로지 태깅된 XML 단편(원문에서 태그만 추가된 형태)이어야 합니다. 설명 문구나 메타 출력 금지.
-5) 불확실한 독음은 최선의 추정 한글 표기를 제공하되, 전혀 알 수 없으면 `<gloss>미상</gloss>`로 표기하세요.
+아래 추가 규칙을 준수하세요:
+- 이미 해당 XML 태그가 존재하면 중복 태깅하지 마시오.
+- 날짜는 가능하면 `when` 속성에 ISO(YYYY-MM 또는 YYYY-MM-DD) 형태로 표기하세요.
+- 한자/일문 표기에는 `<gloss>`를 추가하고 한글독음(및 가능하면 의미)을 병기하세요.
+- 출력은 오직 태깅된 원문 조각(원문에서 태그만 추가된 형태)이어야 하며, 어떠한 설명도 포함하지 마십시오.
 
-예시 입력 → 출력 예시:
-입력: "헌병주재소에서 김영수(하사)는 1919년 3월에 조사했다."
-출력: "<orgName>헌병주재소</orgName>에서 <persName>김영수</persName>(<term>하사</term>)는 <date when=\"1919-03\">1919년 3월</date>에 조사했다."
-
-이제 태깅 대상 텍스트를 아래에 넣었습니다. 태그된 단편만 응답하세요.
----
-{text}
+사용자 메시지로 전달된 텍스트만 태깅해 그대로 반환하세요. 추가 텍스트를 생성하거나 반복하면 안 됩니다.
+명령: 반드시 최종 결과물은 <result> 태그와 </result> 태그 사이에만 작성하시오. 서론, 결론, 마크다운 기호 등 다른 어떤 말도 절대 덧붙이지 마시오.
 """
 
 
@@ -124,26 +109,100 @@ def tag_paragraph_with_gemma(text, model="gemma4:26b", timeout=60, force_fallbac
     if ollama is None:
         return add_hanja_gloss_to_text(text)
 
-    prompt = PROMPT_TEMPLATE.format(text=text.strip())
+    # Build chat-style messages: system prompt (instructions) + user content (the exact text to tag)
+    messages = [
+        {'role': 'system', 'content': PROMPT_TEMPLATE},
+        {'role': 'user', 'content': text.strip()}
+    ]
+    # Use signal-based timeout to avoid infinite blocking LLM calls (works on Unix/macOS main thread)
+    def _timeout_handler(signum, frame):
+        raise TimeoutError('ollama.generate timeout')
+
+    old_handler = signal.getsignal(signal.SIGALRM)
     try:
         t0 = time.monotonic()
-        res = ollama.generate(model=model, prompt=prompt)
+        signal.signal(signal.SIGALRM, _timeout_handler)
+        # timeout is seconds; schedule alarm
+        if timeout and timeout > 0:
+            signal.alarm(int(timeout))
+        # 환각 방지를 위해 생성 파라미터를 강제합니다: 온도/탑피 낮춤, 출력 길이 상한 및 반복 패널티 설정
+        chat_options = {'temperature': 0.0, 'top_p': 0.1, 'num_predict': 1500, 'repeat_penalty': 1.5}
+        # prefer chat() API for clearer system/user separation
+        if hasattr(ollama, 'chat'):
+            res = ollama.chat(model=model, messages=messages, options=chat_options)
+        else:
+            # backward compatibility: if chat not available, fall back to generate with prompt concatenation
+            prompt = PROMPT_TEMPLATE + "\n---\n" + text.strip()
+            res = ollama.generate(model=model, prompt=prompt, options=chat_options)
+        # cancel alarm on success
+        signal.alarm(0)
         t1 = time.monotonic()
+    except TimeoutError as e:
+        # restore handler
+        signal.signal(signal.SIGALRM, old_handler)
+        print(f"경고: LLM 호출 타임아웃({timeout}s) — 폴백으로 원문 기반 처리 사용합니다.")
+        return add_hanja_gloss_to_text(text)
     except Exception as e:
         # on failure return original text to avoid dropping content
+        # cancel any pending alarm and restore handler
+        try:
+            signal.alarm(0)
+        except Exception:
+            pass
+        signal.signal(signal.SIGALRM, old_handler)
         print(f"경고: LLM 호출 실패: {e}")
         # attempt hanja-based fallback tagging
         return add_hanja_gloss_to_text(text)
+    finally:
+        try:
+            signal.signal(signal.SIGALRM, old_handler)
+        except Exception:
+            pass
 
-    # app.py 사용 방식과 호환: return value may be dict with 'response'
-    out = None
-    if isinstance(res, dict) and 'response' in res:
-        out = res['response']
-    else:
-        out = str(res)
+    # extract textual content from various possible ollama.chat/generate return shapes
+    def _extract_text_from_response(r):
+        if r is None:
+            return ''
+        if isinstance(r, str):
+            return r
+        if isinstance(r, dict):
+            # older generate returned {'response': '...'}
+            if 'response' in r and isinstance(r['response'], str):
+                return r['response']
+            # chat-like: choices -> [{ 'message': { 'role': 'assistant', 'content': '...' } }]
+            if 'choices' in r and isinstance(r['choices'], (list, tuple)) and r['choices']:
+                first = r['choices'][0]
+                if isinstance(first, dict):
+                    if 'message' in first and isinstance(first['message'], dict) and 'content' in first['message']:
+                        return first['message']['content']
+                    if 'content' in first and isinstance(first['content'], str):
+                        return first['content']
+            # some clients return {'content': '...'} or similar
+            if 'content' in r and isinstance(r['content'], str):
+                return r['content']
+            # last resort: stringify
+            return str(r)
+        # object-like with text attribute
+        if hasattr(r, 'text'):
+            return str(r.text)
+        return str(r)
+
+    out = _extract_text_from_response(res)
 
     # strip surrounding whitespace and ensure a string
     out_str = out.strip()
+
+    # Post-processing: extract only content inside <result> ... </result>
+    result_match = re.search(r'<result>(.*?)</result>', out_str, re.DOTALL)
+    if result_match:
+        out_str = result_match.group(1)
+    else:
+        # fallback: remove markdown code fences if present
+        out_str = re.sub(r'```(?:xml)?\n?', '', out_str)
+        out_str = out_str.replace('```', '')
+
+    out_str = out_str.strip()
+
     # If the model didn't include any <gloss> tags, try hanja-based fallback
     if '<gloss>' not in out_str:
         try:
@@ -252,163 +311,94 @@ def add_hanja_gloss_to_text(text: str) -> str:
     return cjk_re.sub(repl, text)
 
 
-def process_csv(input_path, output_path, tei_col='TEI', replace=False, model='gemma4:26b', force_fallback=False, update_db_table=None, rowid_col='rowid'):
-    if not os.path.exists(input_path):
-        print(f"입력 파일이 존재하지 않습니다: {input_path}")
+def process_db(table_name, limit=5, model='gemma4:26b', force_fallback=False):
+    if not psycopg2:
+        print('psycopg2 not available; cannot connect to DB')
         sys.exit(1)
 
-    out_rows = []
-    with open(input_path, 'r', encoding='utf-8-sig', newline='') as inf:
-        reader = csv.DictReader(inf)
-        fieldnames = list(reader.fieldnames or [])
-        # find actual TEI column case-insensitively
-        real_tei_col = None
-        for fn in fieldnames:
-            if fn.lower() == tei_col.lower():
-                real_tei_col = fn
-                break
-        if real_tei_col is None:
-            print(f"지정된 TEI 컬럼을 찾을 수 없습니다(대소문자 구분 없음): {tei_col}")
-            sys.exit(1)
+    conn = psycopg2.connect(host=PGHOST, port=PGPORT, user=PGUSER, password=PGPASSWORD, dbname=PGDATABASE)
+    conn.autocommit = True
+    cur = conn.cursor()
 
-        add_col = 'TEI_tagged'
-        if replace:
-            out_fieldnames = fieldnames
-        else:
-            out_fieldnames = fieldnames + [add_col]
+    # ensure tei_status column exists
+    try:
+        cur.execute(f'ALTER TABLE "{table_name}" ADD COLUMN IF NOT EXISTS tei_status text')
+    except Exception as e:
+        print(f'⚠️ tei_status 컬럼 생성 실패: {e}')
+        cur.close()
+        conn.close()
+        sys.exit(1)
 
-        i = 0
-        processed_rowids = set()
-        for row in reader:
-            i += 1
-            tei = row.get(real_tei_col) or ''
-            # normalize CSV-escaped quotes inside TEI fields (e.g. data-col=""출처정보""
-            # produced by CSV quoting) to a single-quote form for regex matching
-            if 'data-col=""' in tei:
-                tei = tei.replace('data-col=""', 'data-col="')
-            if not tei:
-                if not replace:
-                    row[add_col] = ''
-                out_rows.append(row)
-                continue
+    limit_sql = f' LIMIT {int(limit)}' if limit and int(limit) > 0 else ''
+    cur.execute(
+        f'SELECT rowid, tei FROM "{table_name}" '
+        'WHERE tei IS NOT NULL AND (tei_status IS NULL OR tei_status != \"REFINED\") '
+        'ORDER BY rowid' + limit_sql
+    )
+    rows = cur.fetchall()
 
-            # find all <p ... data-col="출처정보"> ... </p>
-            def repl(m):
-                open_tag = m.group(1)
-                inner = m.group(2)
-                close_tag = m.group(3)
-                try:
-                    tagged_inner = tag_paragraph_with_gemma(inner, model=model, force_fallback=force_fallback)
-                except Exception as e:
-                    print(f"경고: LLM 태깅 실패: {e}")
-                    tagged_inner = inner
-                return f"{open_tag}{tagged_inner}{close_tag}"
+    pattern = re.compile(r'(<p[^>]*data-col="출처정보"[^>]*>)(.*?)(</p>)', re.IGNORECASE | re.DOTALL)
 
-            pattern = re.compile(r'(<p[^>]*data-col="출처정보"[^>]*>)(.*?)(</p>)', re.IGNORECASE | re.DOTALL)
-            new_tei, nsubs = pattern.subn(repl, tei)
-            # debug: show first few processed rows
-            if i <= 5:
-                print(f"[debug] row={i} nsubs={nsubs} tei_len={len(tei)} new_tei_len={len(new_tei)}")
-            if nsubs == 0:
-                # no matching paragraph — leave as-is
-                if replace:
-                    row[real_tei_col] = tei
-                else:
-                    row[add_col] = tei
-            else:
-                if replace:
-                    row[real_tei_col] = new_tei
-                else:
-                    row[add_col] = new_tei
-                # mark as refined if rowid present and update_db_table requested
-                if update_db_table and rowid_col in row and row[rowid_col] is not None and str(row[rowid_col]).strip() != '':
-                    try:
-                        processed_rowids.add(int(row[rowid_col]))
-                    except Exception:
-                        processed_rowids.add(row[rowid_col])
+    for i, (rowid, tei) in enumerate(rows, 1):
+        tei = tei or ''
+        # normalize escaped quotes inside TEI fields
+        if 'data-col=""' in tei:
+            tei = tei.replace('data-col=""', 'data-col="')
+        if not tei:
+            continue
 
-            out_rows.append(row)
-
-    # write output
-    with open(output_path, 'w', encoding='utf-8', newline='') as outf:
-        writer = csv.DictWriter(outf, fieldnames=out_fieldnames)
-        writer.writeheader()
-        for r in out_rows:
-            writer.writerow(r)
-
-    # If requested, update DB tei_status for processed rowids
-    if update_db_table:
-        if not psycopg2:
-            print('psycopg2 not available; skipping DB update for tei_status')
-            return
-        if not processed_rowids:
-            print('No processed rows to mark as REFINED in DB')
-            return
-
-        # connect and ensure column exists, then update
-        try:
-            conn = psycopg2.connect(host=PGHOST, port=PGPORT, user=PGUSER, password=PGPASSWORD, dbname=PGDATABASE)
-            conn.autocommit = True
-            cur = conn.cursor()
-            # safe table identifier: allow schema.table or table
-            tbl = update_db_table.strip()
-            # create column if not exists
+        def repl(m):
+            open_tag = m.group(1)
+            inner = m.group(2)
+            close_tag = m.group(3)
             try:
-                cur.execute(f'ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS tei_status text')
+                tagged_inner = tag_paragraph_with_gemma(inner, model=model, force_fallback=force_fallback)
             except Exception as e:
-                # try quoted identifier if simple name
-                try:
-                    cur.execute(f'ALTER TABLE "{tbl}" ADD COLUMN IF NOT EXISTS tei_status text')
-                except Exception as e2:
-                    print(f'⚠️ tei_status 컬럼 생성 실패: {e2} (원본: {e})')
-                    cur.close()
-                    conn.close()
-                    return
+                print(f"경고: LLM 태깅 실패(rowid={rowid}): {e}")
+                tagged_inner = inner
+            return f"{open_tag}{tagged_inner}{close_tag}"
 
-            # prepare id list and update
-            ids = list(processed_rowids)
-            # chunk updates to avoid huge IN lists
-            chunk_size = 500
-            for start in range(0, len(ids), chunk_size):
-                chunk = ids[start:start+chunk_size]
-                # use psycopg2 mogrify for safe tuple
-                try:
-                    cur.execute(f"UPDATE {tbl} SET tei_status = 'REFINED' WHERE {rowid_col} = ANY(%s)", (chunk,))
-                except Exception as e:
-                    # fallback to quoted table
-                    try:
-                        cur.execute(f"UPDATE \"{tbl}\" SET tei_status = 'REFINED' WHERE {rowid_col} = ANY(%s)", (chunk,))
-                    except Exception as e2:
-                        print(f'⚠️ tei_status 업데이트 실패: {e2}')
-            cur.close()
-            conn.close()
-            print(f'✓ DB {update_db_table}의 {len(processed_rowids)}개 행을 tei_status=REFINED로 표시했습니다.')
-        except Exception as e:
-            print(f'⚠️ DB 연결/업데이트 실패: {e}')
+        new_tei, nsubs = pattern.subn(repl, tei)
+        tei_len = len(tei)
+        new_tei_len = len(new_tei)
+
+        if i <= 5:
+            print(f"[debug] row={i} rowid={rowid} nsubs={nsubs} tei_len={tei_len} new_tei_len={new_tei_len}")
+
+        if tei_len > 0 and new_tei_len > tei_len * 2.0:
+            print('⚠️ 환각 감지됨: 텍스트 폭주 — 반환값을 무시하고 원본 TEI로 롤백합니다.')
+            new_tei = tei
+            nsubs = 0
+
+        if nsubs > 0:
+            cur.execute(
+                f'UPDATE "{table_name}" SET tei = %s, tei_status = %s WHERE rowid = %s',
+                (new_tei, 'REFINED', rowid)
+            )
+        else:
+            cur.execute(
+                f'UPDATE "{table_name}" SET tei_status = %s WHERE rowid = %s',
+                ('REFINED', rowid)
+            )
+
+    cur.close()
+    conn.close()
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--input', '-i', required=True)
-    p.add_argument('--output', '-o', required=True)
-    p.add_argument('--col', default='TEI')
-    p.add_argument('--replace', action='store_true', help='원본 TEI 컬럼을 교체합니다.')
+    p.add_argument('--table', default='raw_source_info')
+    p.add_argument('--limit', type=int, default=5, help='처리할 최대 행 수 (기본: 5)')
     p.add_argument('--model', default='gemma4:26b')
     p.add_argument('--force-fallback', action='store_true', help='LLM 호출을 건너뛰고 hanja fallback을 사용합니다.')
-    p.add_argument('--update-db-table', help='처리 후 tei_status=REFINED로 표시할 DB 테이블 (예: raw_source_info)')
-    p.add_argument('--rowid-col', default='rowid', help='DB의 rowid 컬럼명 (기본: rowid)')
     args = p.parse_args()
 
     try:
-        process_csv(
-            args.input,
-            args.output,
-            tei_col=args.col,
-            replace=args.replace,
+        process_db(
+            args.table,
+            limit=args.limit,
             model=args.model,
             force_fallback=args.force_fallback,
-            update_db_table=args.update_db_table,
-            rowid_col=args.rowid_col,
         )
     except Exception as e:
         print(f"오류: {e}")

@@ -334,7 +334,8 @@ def make_tei_for_row(table, rowid, row, headers, entities):
     title.text = f'{table}-{rowid}'
     sourceDesc = ET.SubElement(fileDesc, 'sourceDesc')
     p = ET.SubElement(sourceDesc, 'p')
-    p.text = f'Generated from {table} row {rowid} on {datetime.datetime.utcnow().isoformat()}Z'
+    # Use timezone-aware UTC timestamp to avoid deprecation warning
+    p.text = f'Generated from {table} row {rowid} on {datetime.datetime.now(datetime.timezone.utc).isoformat()}'
 
     text = ET.SubElement(TEI, 'text')
     body = ET.SubElement(text, 'body')

@@ -12,6 +12,10 @@ data/
 .venv/
 env/
 
+# Python cache
+__pycache__
+scripts/__pycache__
+
 # Secrets and config
 .env
 *.secret
@@ -22,3 +26,10 @@ env/
 
 # OS files
 .DS_Store
+__pycache__/graph_builder.cpython-312.pyc
+__pycache__/graph_builder.cpython-312.pyc
+__pycache__/graph_builder.cpython-312.pyc
+__pycache__/graph_builder.cpython-312.pyc
+scripts/__pycache__/tag_tei_with_gemma.cpython-312.pyc
+scripts/__pycache__/tag_tei_with_gemma.cpython-312.pyc
+scripts/__pycache__/tag_tei_with_gemma.cpython-312.pyc
