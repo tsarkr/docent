@@ -30,10 +30,17 @@ pip install -r requirements.txt
 .venv/bin/streamlit run app.py
 ```
 
+또는 전체 파이프라인을 한 번에 실행할 수 있습니다:
+
+```bash
+.venv/bin/python run_pipeline.py
+```
+
 파일과 스크립트
 
 - `app.py` — Streamlit UI 및 Neo4j/Postgres 연동 로직
 - `graph_builder.py` — Postgres → Neo4j 데이터 적재 스크립트(TEI 파싱/관계 생성)
+- `run_pipeline.py` — 전체 파이프라인 오케스트레이터(순서대로 실행)
 - `scripts/` — TEI/PG 처리 유틸 및 변환 스크립트
 - `data/` — 원자료(샘플 CSV/TEI) 및 매핑 설정
 
@@ -43,13 +50,15 @@ pip install -r requirements.txt
 
 2. **데이터 매핑 확인 / 재생성**: CSV/Excel 헤더와 DB 컬럼 매핑을 최신화하려면 `upload_data.py`를 실행해 `data/column_mappings/`를 갱신합니다. (이 스크립트는 파일의 헤더를 감지하고 매핑 JSON을 출력합니다.)
 
-3. **TEI 컬럼을 Postgres에 준비**: TEI를 Postgres에 넣거나 기존 테이블에 `tei` 컬럼을 복사하려면 `scripts/pg_to_tei.py` 또는 `scripts/pg_to_pg_with_tei.py`를 사용하세요.
+3. **TEI 컬럼을 Postgres에 준비**: TEI를 Postgres에 넣거나 기존 테이블에 `tei` 컬럼을 복사하려면 `scripts/pg_to_pg_with_tei.py`를 사용하세요.
 
-4. **CIDOC 매핑 생성 (선택적 / dry-run 권장)**: TEI 기반으로 CIDOC-TTL 스니펫을 생성하려면 `scripts/generate_cidoc_mappings.py`를 사용합니다. 먼저 `--dry-run`으로 결과를 확인한 뒤 실제로 저장/삽입하세요.
+4. **TEI 태깅**: 기본은 사전 기반 태깅인 `scripts/tag_tei_with_dict.py`를 사용합니다. LLM 기반 태깅이 필요하면 `scripts/tag_tei_with_gemma.py`를 선택적으로 실행하세요.
 
-5. **TEI → Neo4j 적용**: Neo4j에 TEI에서 추출한 노드/관계를 넣으려면 `scripts/tei_to_neo4j.py`를 실행합니다. 대량 쓰기 전에는 `--wipe` 같은 옵션을 확인하고, 테스트 환경에서 먼저 실행하세요.
+5. **CIDOC 매핑 생성 (선택적 / dry-run 권장)**: TEI 기반으로 CIDOC-TTL 스니펫을 생성하려면 `scripts/generate_cidoc_mappings.py`를 사용합니다. 먼저 `--dry-run`으로 결과를 확인한 뒤 실제로 저장/삽입하세요.
 
-6. **Streamlit UI 실행 및 검증**: 모든 데이터가 준비되면 `streamlit run app.py`로 앱을 띄워 검색·그래프·해설 생성 흐름을 확인합니다. 해설 생성 지연 문제는 하단 디버그 패널(`PG`, `Neo4j`, `Model` 타이밍)을 확인하세요.
+6. **TEI → Neo4j 적용**: Neo4j에 TEI에서 추출한 노드/관계를 넣으려면 `graph_builder.py`를 실행합니다. 대량 쓰기 전에는 `--wipe` 같은 옵션을 확인하고, 테스트 환경에서 먼저 실행하세요.
+
+7. **Streamlit UI 실행 및 검증**: 모든 데이터가 준비되면 `streamlit run app.py`로 앱을 띄워 검색·그래프·해설 생성 흐름을 확인합니다. 해설 생성 지연 문제는 하단 디버그 패널(`PG`, `Neo4j`, `Model` 타이밍)을 확인하세요.
 
 팁:
 - `scripts/generate_cidoc_mappings.py`는 `--dry-run` 옵션으로 TTL 생성을 미리 볼 수 있습니다.
