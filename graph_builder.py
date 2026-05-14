@@ -20,6 +20,7 @@ import pandas as pd
 from bs4 import BeautifulSoup
 from neo4j import GraphDatabase
 from sqlalchemy import create_engine, text
+import time
 
 try:
     import tomllib
@@ -54,7 +55,7 @@ SECRETS = _load_secrets()
 PG_CONFIG = {
     "host": _secret_or_env("PG_HOST", "11e.kr", SECRETS),
     "port": _secret_or_env("PG_PORT", "5432", SECRETS),
-    "database": _secret_or_env("PG_DATABASE", "samil_db", SECRETS),
+    "database": _secret_or_env("PG_DATABASE", "historical", SECRETS),
     "user": _secret_or_env("PG_USER", "postgres", SECRETS),
     "password": _secret_or_env("PG_PASSWORD", "", SECRETS),
 }
@@ -118,7 +119,7 @@ def _read_table_with_mapping(table_name, mapping, required=None):
     return out
 
 
-def _run_batches(session, cypher, records, batch_size=500, extra_params=None):
+def _run_batches(session, cypher, records, batch_size=1000, extra_params=None):
     extra_params = extra_params or {}
     total = len(records)
     if total == 0:
@@ -142,6 +143,8 @@ def _ensure_schema(session):
         "CREATE CONSTRAINT person_name IF NOT EXISTS FOR (i:인물) REQUIRE i.명칭 IS UNIQUE",
         "CREATE INDEX place_name IF NOT EXISTS FOR (p:장소) ON (p.명칭)",
         "CREATE INDEX place_korean_name IF NOT EXISTS FOR (p:장소) ON (p.한글명칭)",
+        "DROP INDEX namesIndex IF EXISTS",
+        "CREATE FULLTEXT INDEX namesIndex IF NOT EXISTS FOR (n:인물|장소|사건|기관|문건) ON EACH [n.명칭, n.사건명, n.제목, n.name, n.title, n.한글독음, n.한글명칭]",
     ]
 
     for statement in statements:
@@ -159,7 +162,7 @@ def _ensure_tei_status(table_name):
         print(f"⚠️ {table_name} tei_status 컬럼 생성 실패: {e}")
 
 
-def _clear_graph(session, batch_size=500):
+def _clear_graph(session, batch_size=2000):
     total_deleted = 0
 
     while True:

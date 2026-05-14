@@ -27,6 +27,31 @@ except Exception:
     ollama = None
 
 
+def extract_keywords_from_sentence(sentence, model="gemma4:26b"):
+    system_prompt = (
+        "당신은 역사 지식 검색을 위한 키워드 추출기입니다. 사용자의 질문에서 지식 그래프 검색에 필요한 "
+        "핵심 고유명사(인물, 장소, 사건, 단체 등)를 최대 3개만 추출하여 쉼표로 구분해 반환하시오. "
+        "서론, 결론, 부가 설명은 절대 금지합니다."
+    )
+    try:
+        if ollama is None:
+            raise RuntimeError("ollama not available")
+        resp = ollama.chat(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": str(sentence or "").strip()},
+            ],
+        )
+        content = ""
+        if isinstance(resp, dict):
+            content = resp.get("message", {}).get("content", "") or ""
+        parts = [p.strip() for p in str(content).split(",") if p and p.strip()]
+        return parts[:3] if parts else [str(sentence or "").strip()]
+    except Exception:
+        return [str(sentence or "").strip()]
+
+
 def _secret_or_env(key, default=""):
     """Streamlit secrets → 환경변수 → 기본값 순서로 설정값 가져오기"""
     # 1. Streamlit secrets에서 확인 (secrets.toml 자동 로드)
@@ -93,8 +118,8 @@ class HybridHistoryDocent:
         # dedupe and limit terms to avoid excessive ORs
         terms = list(dict.fromkeys(terms))[:10]
         cypher = """
-        MATCH (n)
-        WHERE any(term IN $terms WHERE any(k IN ['명칭','제목','사건명','id','name','title']
+                MATCH (n)
+                    WHERE any(term IN $terms WHERE any(k IN ['명칭','한글독음','한글명칭','제목','사건명','id','name','title']
               WHERE n[k] IS NOT NULL AND toLower(toString(n[k])) CONTAINS toLower(term)))
         OPTIONAL MATCH (n)-[r]-(m)
         RETURN DISTINCT n, r, m
@@ -125,7 +150,7 @@ class HybridHistoryDocent:
                 results.append({"error": str(e)})
 
         return cypher, params, results
-    def get_hybrid_context(self, term):
+    def get_hybrid_context(self, terms):
         t_start = time.monotonic()
         found_ids = set()
         evidences = []
@@ -139,13 +164,20 @@ class HybridHistoryDocent:
             
             with self.neo4j_driver.session() as session:
                 # prepare search terms: include hanja equivalents if present in mapping
-                search_terms = [term]
-                if term in HANJA_MAP:
-                    search_terms.append(HANJA_MAP[term])
-                else:
-                    for k, v in HANJA_MAP.items():
-                        if k and k in term and v:
-                            search_terms.append(v)
+                search_terms = []
+                for t in (terms or []):
+                    if not t:
+                        continue
+                    t = str(t).strip()
+                    if not t:
+                        continue
+                    search_terms.append(t)
+                    if t in HANJA_MAP:
+                        search_terms.append(HANJA_MAP[t])
+                    else:
+                        for k, v in HANJA_MAP.items():
+                            if k and k in t and v:
+                                search_terms.append(v)
 
                 # Prefer fulltext index search if available (better tokenization for CJK)
                 use_fulltext = True
@@ -169,7 +201,7 @@ class HybridHistoryDocent:
                     # fallback: case-insensitive CONTAINS across common fields
                     search_query = """
                     MATCH (n)
-                    WHERE any(k IN ['명칭','제목','사건명','id','name','title'] 
+                    WHERE any(k IN ['명칭','한글독음','한글명칭','제목','사건명','id','name','title'] 
                               WHERE n[k] IS NOT NULL AND toLower(toString(n[k])) CONTAINS toLower($term))
                     RETURN DISTINCT n
                     LIMIT 50
@@ -218,7 +250,7 @@ class HybridHistoryDocent:
                 # 찾은 노드들의 직접 연결 관계와 간접 연결 모두 찾기
                 graph_query = """
                 MATCH (n)
-                WHERE any(k IN ['id','명칭','name','title'] WHERE n[k] IS NOT NULL AND toString(n[k]) IN $search_ids)
+                WHERE any(k IN ['id','명칭','한글독음','한글명칭','name','title'] WHERE n[k] IS NOT NULL AND toString(n[k]) IN $search_ids)
                 OPTIONAL MATCH (n)-[r]-(m)
                 RETURN DISTINCT n, r, m, labels(n) as n_labels, labels(m) as m_labels
                 """
@@ -226,6 +258,13 @@ class HybridHistoryDocent:
                 
                 edges_set = set()
                 
+                def _format_label_text(base_name, reading):
+                    base = str(base_name or '')
+                    read = str(reading or '')
+                    if read and base and read != base:
+                        return f"{base} ({read})"
+                    return base or read or ''
+
                 def add_node(node, labels_list):
                     if not node:
                         return
@@ -237,22 +276,33 @@ class HybridHistoryDocent:
 
                     # 레이블에 따라 표시용 라벨과 색 결정 (표시는 한국어 유지)
                     if '문건' in labels_list:
-                        display_label = "📜\n" + str(node.get('제목', '문건'))[:20]
+                        base = node.get('제목') or '문건'
+                        label_text = _format_label_text(base, node.get('한글독음'))
+                        display_label = "📜\n" + str(label_text)[:20]
                         color = "#F7A01F"
                     elif '인물' in labels_list:
-                        display_label = "👤\n" + str(node.get('명칭', raw_id))
+                        base = node.get('명칭') or raw_id
+                        label_text = _format_label_text(base, node.get('한글독음'))
+                        display_label = "👤\n" + str(label_text)
                         color = "#1CE1D4"
                     elif '사건' in labels_list:
-                        display_label = "🔥\n" + str(node.get('사건명', raw_id))[:15]
+                        base = node.get('사건명') or raw_id
+                        label_text = _format_label_text(base, node.get('한글독음'))
+                        display_label = "🔥\n" + str(label_text)[:15]
                         color = "#FF6B6B"
                     elif '장소' in labels_list:
-                        display_label = "📍\n" + str(node.get('명칭', raw_id))[:15]
+                        base = node.get('명칭') or raw_id
+                        label_text = _format_label_text(base, node.get('한글독음'))
+                        display_label = "📍\n" + str(label_text)[:15]
                         color = "#4ECDC4"
                     elif '기관' in labels_list:
-                        display_label = "🏢\n" + str(node.get('명칭', raw_id))[:15]
+                        base = node.get('명칭') or raw_id
+                        label_text = _format_label_text(base, node.get('한글독음'))
+                        display_label = "🏢\n" + str(label_text)[:15]
                         color = "#95E1D3"
                     else:
-                        display_label = str(raw_id)
+                        label_text = _format_label_text(raw_id, node.get('한글독음'))
+                        display_label = str(label_text)
                         color = "#999999"
 
                     nodes[nid] = {"label": display_label, "color": color, "shape": "box", "raw_id": str(raw_id)}
@@ -567,7 +617,14 @@ if len(search_term) < 2:
     st.stop()
 
 docent = get_docent()
-nodes_map, edges_list, evidences = docent.get_hybrid_context(search_term)
+if ' ' in search_term:
+    with st.spinner("🧠 AI가 질문의 의도를 분석 중입니다..."):
+        search_keywords = extract_keywords_from_sentence(search_term)
+    st.caption(f"✨ 분석된 검색어: {', '.join(search_keywords)}")
+else:
+    search_keywords = [search_term]
+
+nodes_map, edges_list, evidences = docent.get_hybrid_context(search_keywords)
 
 # Prefetch PG rows for visible nodes to reduce hallucination in storytelling
 try:

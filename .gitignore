@@ -33,3 +33,4 @@ __pycache__/graph_builder.cpython-312.pyc
 scripts/__pycache__/tag_tei_with_gemma.cpython-312.pyc
 scripts/__pycache__/tag_tei_with_gemma.cpython-312.pyc
 scripts/__pycache__/tag_tei_with_gemma.cpython-312.pyc
+scripts/tei_to_neo4j.py.bak

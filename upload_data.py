@@ -47,7 +47,7 @@ SECRETS = _load_secrets()
 PG_CONFIG = {
     "host": _secret_or_env("PG_HOST", "11e.kr", SECRETS),
     "port": _secret_or_env("PG_PORT", "5432", SECRETS),
-    "database": _secret_or_env("PG_DATABASE", "samil_db", SECRETS),
+    "database": _secret_or_env("PG_DATABASE", "historical", SECRETS),
     "user": _secret_or_env("PG_USER", "postgres", SECRETS),
     "password": _secret_or_env("PG_PASSWORD", "", SECRETS)  # secrets.toml에서만 로드
 }

@@ -13,6 +13,8 @@ import argparse
 import os
 import re
 import sys
+import subprocess
+from pathlib import Path
 
 try:
     import tomllib
@@ -59,6 +61,34 @@ try:
     import hanja
 except Exception:
     hanja = None
+
+
+# best-effort per-character fallback map for hanja -> hangul readings
+HANJA_TO_HANGUL = {
+    '柳': '유', '寬': '관', '順': '순',
+    '明': '명', '治': '치', '光': '광', '州': '주', '海': '해', '子': '자', '浦': '포',
+    '德': '덕', '沼': '소', '里': '리', '憲': '헌', '兵': '병', '駐': '주', '在': '재', '所': '소',
+}
+
+
+def _hanja_char_by_char(token: str) -> str:
+    if not token:
+        return ''
+    readings = []
+    mapped_count = 0
+    for ch in token:
+        if ch in HANJA_TO_HANGUL:
+            readings.append(HANJA_TO_HANGUL[ch])
+            mapped_count += 1
+        else:
+            # keep ASCII as-is, otherwise skip unknown CJK
+            if ord(ch) < 128:
+                readings.append(ch)
+            else:
+                readings.append('')
+    if mapped_count == 0:
+        return ''
+    return ''.join(readings)
 
 
 def _connect():
@@ -308,7 +338,10 @@ def _add_hanja_gloss_to_text(text: str) -> str:
 
     def repl(m):
         tok = m.group(1)
+        # try library translation first, then per-character fallback
         reading = _hanja_translate(tok)
+        if not reading:
+            reading = _hanja_char_by_char(tok)
         if reading:
             return f"{tok}<gloss>{reading}</gloss>"
         return f"{tok}<gloss>미상</gloss>"
@@ -374,11 +407,22 @@ def process_table(conn, table_name, term_list, limit=5):
             if len(rollback_samples) < 3:
                 rollback_samples.append((tei, new_tei))
             new_tei = tei
-
-        cur.execute(
-            f'UPDATE "{table_name}" SET tei = %s, tei_status = %s WHERE rowid = %s',
-            (new_tei, 'REFINED', rowid)
-        )
+        # If we made substitutions, prefer to set REFINED only when glosses exist.
+        if nsubs > 0:
+            has_gloss = '<gloss>' in (new_tei or '')
+            status = 'REFINED' if has_gloss else 'NEEDS_GLOSS'
+            if not has_gloss:
+                print(f"⚠️ rowid={rowid} — 태깅됐지만 <gloss> 없음, tei_status={status}로 설정합니다.")
+            cur.execute(
+                f'UPDATE "{table_name}" SET tei = %s, tei_status = %s WHERE rowid = %s',
+                (new_tei, status, rowid)
+            )
+        else:
+            # no substitutions; mark as REFINED to avoid reprocessing unchanged rows
+            cur.execute(
+                f'UPDATE "{table_name}" SET tei_status = %s WHERE rowid = %s',
+                ('REFINED', rowid)
+            )
 
     if rollback_samples:
         print('--- ROLLBACK SAMPLES (up to 3) ---')
@@ -409,6 +453,20 @@ def process_db(table_name='raw_source_info', limit=5, all_tables=False):
         print(f'--- START: {tbl}')
         process_table(conn, tbl, term_list, limit=limit)
         print(f'--- DONE: {tbl}')
+
+        # 자동으로 TEI를 Neo4j로 로드하는 스크립트를 호출합니다.
+        try:
+            tei_to_neo4j = Path(__file__).resolve().parent / 'tei_to_neo4j.py'
+            if tei_to_neo4j.exists():
+                print(f"자동호출: {tei_to_neo4j.name} 실행")
+                # run without wipe by default
+                subprocess.run([sys.executable, str(tei_to_neo4j)], check=True)
+            else:
+                print(f"tei_to_neo4j 스크립트가 없습니다: {tei_to_neo4j}")
+        except subprocess.CalledProcessError as e:
+            print(f"ERROR: tei_to_neo4j failed with exit {e.returncode}")
+        except Exception as e:
+            print(f"Warning: 자동 tei_to_neo4j 호출 중 오류: {e}")
 
     conn.close()
 
