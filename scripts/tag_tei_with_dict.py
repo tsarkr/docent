@@ -17,16 +17,38 @@ import subprocess
 from pathlib import Path
 
 # Attempt to import transformers NER pipeline once; fall back gracefully if unavailable
+NER_AVAILABLE = False
+ner_pipeline = None
+_NER_MODEL_NAME = None
+NER_GROUPED = False
 try:
     from transformers import pipeline
-    try:
-        # Load grouped entities so we get `entity_group` like 'PER'
-        ner_pipeline = pipeline("ner", model="kykim/bert-kor-base", grouped_entities=True)
-        NER_AVAILABLE = True
-    except Exception as e:
-        print(f'⚠️ NER 모델 로드 실패: {e} — 사전 기반 태깅만 사용합니다.')
-        ner_pipeline = None
-        NER_AVAILABLE = False
+    # Try multiple candidate models (the environment may not have all downloaded)
+    _model_candidates = [
+        "monologg/koelectra-base-finetuned-naver-ner",
+        "monologg/kocharelectra-base-modu-ner-all",
+        "monologg/kocharelectra-base-modu-ner-nx",
+        "monologg/kocharelectra-base-modu-ner-sx",
+        "kykim/bert-kor-base",
+    ]
+    for _m in _model_candidates:
+        try:
+            # some transformers versions don't accept grouped_entities at init; try and fall back
+            try:
+                ner_pipeline = pipeline("ner", model=_m, aggregation_strategy="none")
+                NER_GROUPED = False
+            except TypeError:
+                # fallback: create pipeline without grouped_entities and we will group manually
+                ner_pipeline = pipeline("ner", model=_m)
+                NER_GROUPED = False
+            NER_AVAILABLE = True
+            _NER_MODEL_NAME = _m
+            print(f'✅ NER 모델 로드 성공: {_m} (grouped={NER_GROUPED})')
+            break
+        except Exception as e:
+            print(f'⚠️ NER 모델({_m}) 로드 실패: {e}')
+    if not NER_AVAILABLE:
+        print('⚠️ 모든 NER 모델 로드에 실패했습니다 — 사전 기반 태깅만 사용합니다.')
 except Exception:
     ner_pipeline = None
     NER_AVAILABLE = False
@@ -291,6 +313,35 @@ def _find_spans(text, term_list):
     return spans
 
 
+def _group_token_entities(ents, offset):
+    groups = []
+    cur_s = None
+    cur_e = None
+    for ent in ents:
+        label = ent.get('entity') or ent.get('label') or ''
+        if not label:
+            continue
+        up = str(label).upper()
+        if 'PER' in up or 'PERSON' in up:
+            s = ent.get('start')
+            e = ent.get('end')
+            if s is None or e is None:
+                continue
+            s = int(s) + offset
+            e = int(e) + offset
+            if cur_s is None:
+                cur_s, cur_e = s, e
+            else:
+                if s <= cur_e:
+                    cur_e = max(cur_e, e)
+                else:
+                    groups.append((cur_s, cur_e))
+                    cur_s, cur_e = s, e
+    if cur_s is not None:
+        groups.append((cur_s, cur_e))
+    return groups
+
+
 def _find_spans_with_ner(text, term_list):
     """Find spans using dictionary terms first, then run NER on leftover regions to
     detect person names (PER) and add <persName> spans without overlapping existing spans."""
@@ -321,38 +372,58 @@ def _find_spans_with_ner(text, term_list):
             piece = text[a:b]
             if not piece.strip():
                 continue
-            # pipeline will return offsets relative to piece
-            try:
-                ents = ner_pipeline(piece)
-            except Exception:
-                # if ner_pipeline fails for this piece, skip
+            # NER is only reliable on pure Hangul fragments here; skip mixed Hanja text
+            if re.search(r'[\u4E00-\u9FFF]', piece):
                 continue
-            if not ents:
-                continue
-            for ent in ents:
-                # support both old 'entity' format (B-PER) and grouped 'entity_group'
-                label = ent.get('entity_group') or ent.get('entity') or ent.get('label')
-                if not label:
+            probe_texts = [piece]
+            if 2 <= len(piece) <= 4 and ' ' not in piece:
+                probe_texts = [piece + suffix for suffix in ['은', '는', '이', '가', '의', '도']] + [piece]
+
+            best_end = 0
+
+            for probe_text in probe_texts:
+                # pipeline will return offsets relative to probe_text
+                try:
+                    ents = ner_pipeline(probe_text)
+                except Exception:
                     continue
-                up = str(label).upper()
-                if 'PER' in up or 'PERSON' in up:
-                    # offsets may be in 'start'/'end' or 'word' structures
-                    start_off = ent.get('start')
-                    end_off = ent.get('end')
-                    if start_off is None or end_off is None:
-                        continue
-                    global_start = a + int(start_off)
-                    global_end = a + int(end_off)
-                    # ensure no overlap with existing spans
-                    overlap = False
-                    for s0, e0, _ in spans + new_spans:
-                        if global_start < e0 and global_end > s0:
-                            overlap = True
-                            break
-                    if not overlap and global_start < global_end:
-                        name_text = text[global_start:global_end]
-                        repl = f"<persName>{name_text}</persName>"
-                        new_spans.append((global_start, global_end, repl))
+                if not ents:
+                    continue
+                if NER_GROUPED:
+                    # grouped_entities pipeline returns items with entity_group and start/end
+                    for ent in ents:
+                        label = ent.get('entity_group') or ent.get('entity') or ent.get('label')
+                        if not label:
+                            continue
+                        up = str(label).upper()
+                        if 'PER' in up or 'PERSON' in up:
+                            start_off = ent.get('start')
+                            end_off = ent.get('end')
+                            if start_off is None or end_off is None:
+                                continue
+                            if int(start_off) != 0:
+                                continue
+                            best_end = max(best_end, min(int(end_off), len(piece)))
+                else:
+                    # token-level pipeline output: group tokens that are PER into spans
+                    groups = _group_token_entities(ents, a)
+                    for global_start, global_end in groups:
+                        if global_start != a:
+                            continue
+                        best_end = max(best_end, min(global_end - a, len(piece)))
+
+            if best_end >= 2:
+                global_start = a
+                global_end = a + best_end
+                overlap = False
+                for s0, e0, _ in spans + new_spans:
+                    if global_start < e0 and global_end > s0:
+                        overlap = True
+                        break
+                if not overlap:
+                    name_text = text[global_start:global_end]
+                    repl = f"<persName>{name_text}</persName>"
+                    new_spans.append((global_start, global_end, repl))
     except Exception as e:
         print(f'⚠️ NER 처리 중 오류: {e}')
 
@@ -409,7 +480,15 @@ def _tag_fragment(fragment, term_list):
     parts = []
     for seg, is_tag in _split_xml_segments(fragment):
         if is_tag:
-            parts.append(seg)
+            # If this is a gloss tag, allow NER inside the gloss content
+            m = re.match(r"^<gloss([^>]*)>(.*?)</gloss>$", seg, flags=re.DOTALL)
+            if m:
+                inner = m.group(2)
+                # run tagging (which includes dictionary+NER) on the gloss text
+                tagged_inner = _tag_text_segment(inner, term_list)
+                parts.append(f"<gloss{m.group(1)}>{tagged_inner}</gloss>")
+            else:
+                parts.append(seg)
         else:
             parts.append(_tag_text_segment(seg, term_list))
     return ''.join(parts)
@@ -434,6 +513,57 @@ def _add_hanja_gloss_to_text(text: str) -> str:
     return cjk_re.sub(repl, text)
 
 
+def _tag_persons_in_glosses(text: str) -> str:
+    if not text:
+        return text
+
+    def best_person_end(piece: str) -> int:
+        if not piece or re.search(r'[\s\u4E00-\u9FFF]', piece):
+            return 0
+
+        best_end = 0
+        probe_texts = [piece + suffix for suffix in ['은', '는', '이', '가', '의', '도']] + [piece]
+        for probe_text in probe_texts:
+            try:
+                ents = ner_pipeline(probe_text)
+            except Exception:
+                continue
+            if not ents:
+                continue
+            if NER_GROUPED:
+                for ent in ents:
+                    label = ent.get('entity_group') or ent.get('entity') or ent.get('label')
+                    if not label:
+                        continue
+                    up = str(label).upper()
+                    if 'PER' in up or 'PERSON' in up:
+                        start_off = ent.get('start')
+                        end_off = ent.get('end')
+                        if start_off == 0 and end_off is not None:
+                            best_end = max(best_end, min(int(end_off), len(piece)))
+            else:
+                groups = _group_token_entities(ents, 0)
+                for global_start, global_end in groups:
+                    if global_start == 0:
+                        best_end = max(best_end, min(global_end, len(piece)))
+        return best_end
+
+    def repl(m):
+        prefix = m.string[max(0, m.start() - 60):m.start()]
+        def is_open(tag_name):
+            return prefix.count(f'<{tag_name}') > prefix.count(f'</{tag_name}>')
+
+        if is_open('placeName') or is_open('orgName') or is_open('date'):
+            return m.group(0)
+        inner = m.group(1)
+        end = best_person_end(inner)
+        if end >= 2:
+            return f"<gloss><persName>{inner[:end]}</persName></gloss>"
+        return m.group(0)
+
+    return re.sub(r'<gloss>([가-힣]{2,4})</gloss>', repl, text)
+
+
 def _clip_text(text, limit=400):
     if text is None:
         return ''
@@ -443,7 +573,7 @@ def _clip_text(text, limit=400):
     return s[:limit] + '...'
 
 
-def process_table(conn, table_name, term_list, limit=5):
+def process_table(conn, table_name, term_list, limit=5, rowid=None):
     cur = conn.cursor()
 
     try:
@@ -453,11 +583,15 @@ def process_table(conn, table_name, term_list, limit=5):
         cur.close()
         return
 
-    limit_sql = f' LIMIT {int(limit)}' if limit and int(limit) > 0 else ''
+    if rowid is not None:
+        where_clause = "WHERE tei IS NOT NULL AND rowid = %s"
+    else:
+        where_clause = "WHERE tei IS NOT NULL AND (tei_status IS NULL OR tei_status != 'REFINED')"
+    params = [int(rowid)] if rowid is not None else []
+    limit_sql = '' if rowid is not None else (f' LIMIT {int(limit)}' if limit and int(limit) > 0 else '')
     cur.execute(
-        f'SELECT rowid, tei FROM "{table_name}" '
-        "WHERE tei IS NOT NULL AND (tei_status IS NULL OR tei_status != 'REFINED') "
-        'ORDER BY rowid' + limit_sql
+        f'SELECT rowid, tei FROM "{table_name}" {where_clause} ORDER BY rowid' + limit_sql,
+        params,
     )
     rows = cur.fetchall()
 
@@ -478,6 +612,7 @@ def process_table(conn, table_name, term_list, limit=5):
             close_tag = m.group(3)
             tagged_inner = _tag_fragment(inner, term_list)
             tagged_inner = _add_hanja_gloss_to_text(tagged_inner)
+            tagged_inner = _tag_persons_in_glosses(tagged_inner)
             return f"{open_tag}{tagged_inner}{close_tag}"
 
         new_tei, nsubs = pattern.subn(repl, tei)
@@ -518,7 +653,7 @@ def process_table(conn, table_name, term_list, limit=5):
     cur.close()
 
 
-def process_db(table_name='raw_source_info', limit=5, all_tables=False):
+def process_db(table_name='raw_source_info', limit=5, all_tables=False, rowid=None, skip_neo4j=False):
     conn = _connect()
 
     dictionary, term_list = build_dictionary(conn)
@@ -536,8 +671,11 @@ def process_db(table_name='raw_source_info', limit=5, all_tables=False):
 
     for tbl in tables:
         print(f'--- START: {tbl}')
-        process_table(conn, tbl, term_list, limit=limit)
+        process_table(conn, tbl, term_list, limit=limit, rowid=rowid)
         print(f'--- DONE: {tbl}')
+
+        if skip_neo4j:
+            continue
 
         # 자동으로 TEI를 Neo4j로 로드하는 스크립트를 호출합니다.
         try:
@@ -561,10 +699,12 @@ def main():
     p.add_argument('--table', default='raw_source_info')
     p.add_argument('--limit', type=int, default=5, help='처리할 최대 행 수 (기본: 5)')
     p.add_argument('--all', action='store_true', help='tei 컬럼이 있는 모든 테이블을 처리합니다')
+    p.add_argument('--rowid', type=int, help='특정 rowid 하나만 처리합니다')
+    p.add_argument('--skip-neo4j', action='store_true', help='tei_to_neo4j 후속 실행을 건너뜁니다')
     args = p.parse_args()
 
     try:
-        process_db(args.table, limit=args.limit, all_tables=args.all)
+        process_db(args.table, limit=args.limit, all_tables=args.all, rowid=args.rowid, skip_neo4j=args.skip_neo4j)
     except Exception as e:
         print(f"오류: {e}")
         sys.exit(1)
