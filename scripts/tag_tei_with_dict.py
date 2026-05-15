@@ -16,6 +16,20 @@ import sys
 import subprocess
 from pathlib import Path
 
+# Attempt to import transformers NER pipeline once; fall back gracefully if unavailable
+try:
+    from transformers import pipeline
+    try:
+        # Load grouped entities so we get `entity_group` like 'PER'
+        ner_pipeline = pipeline("ner", model="kykim/bert-kor-base", grouped_entities=True)
+        NER_AVAILABLE = True
+    except Exception as e:
+        print(f'⚠️ NER 모델 로드 실패: {e} — 사전 기반 태깅만 사용합니다.')
+        ner_pipeline = None
+        NER_AVAILABLE = False
+except Exception:
+    ner_pipeline = None
+    NER_AVAILABLE = False
 try:
     import tomllib
 except Exception:
@@ -277,10 +291,81 @@ def _find_spans(text, term_list):
     return spans
 
 
+def _find_spans_with_ner(text, term_list):
+    """Find spans using dictionary terms first, then run NER on leftover regions to
+    detect person names (PER) and add <persName> spans without overlapping existing spans."""
+    spans = _find_spans(text, term_list)
+
+    if not NER_AVAILABLE or not text:
+        return spans
+
+    # compute covered intervals
+    covered = []
+    for s, e, _ in spans:
+        covered.append((s, e))
+
+    # invert to get uncovered intervals
+    uncovered = []
+    pos = 0
+    for s, e in sorted(covered, key=lambda x: x[0]):
+        if pos < s:
+            uncovered.append((pos, s))
+        pos = max(pos, e)
+    if pos < len(text):
+        uncovered.append((pos, len(text)))
+
+    # run NER on each uncovered piece
+    new_spans = []
+    try:
+        for a, b in uncovered:
+            piece = text[a:b]
+            if not piece.strip():
+                continue
+            # pipeline will return offsets relative to piece
+            try:
+                ents = ner_pipeline(piece)
+            except Exception:
+                # if ner_pipeline fails for this piece, skip
+                continue
+            if not ents:
+                continue
+            for ent in ents:
+                # support both old 'entity' format (B-PER) and grouped 'entity_group'
+                label = ent.get('entity_group') or ent.get('entity') or ent.get('label')
+                if not label:
+                    continue
+                up = str(label).upper()
+                if 'PER' in up or 'PERSON' in up:
+                    # offsets may be in 'start'/'end' or 'word' structures
+                    start_off = ent.get('start')
+                    end_off = ent.get('end')
+                    if start_off is None or end_off is None:
+                        continue
+                    global_start = a + int(start_off)
+                    global_end = a + int(end_off)
+                    # ensure no overlap with existing spans
+                    overlap = False
+                    for s0, e0, _ in spans + new_spans:
+                        if global_start < e0 and global_end > s0:
+                            overlap = True
+                            break
+                    if not overlap and global_start < global_end:
+                        name_text = text[global_start:global_end]
+                        repl = f"<persName>{name_text}</persName>"
+                        new_spans.append((global_start, global_end, repl))
+    except Exception as e:
+        print(f'⚠️ NER 처리 중 오류: {e}')
+
+    # merge and sort
+    all_spans = spans + new_spans
+    all_spans.sort(key=lambda x: x[0])
+    return all_spans
+
+
 def _tag_text_segment(text, term_list):
     if not text:
         return text
-    spans = _find_spans(text, term_list)
+    spans = _find_spans_with_ner(text, term_list)
     if not spans:
         return text
     out = []
