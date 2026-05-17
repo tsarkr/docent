@@ -16,7 +16,12 @@ import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-PY = sys.executable
+# .venv 환경 반영
+PY_VENV = ROOT / '.venv' / 'bin' / 'python3'
+if PY_VENV.exists():
+    PY = str(PY_VENV)
+else:
+    PY = sys.executable
 
 STEPS = [
     (ROOT / 'upload_data.py', []),

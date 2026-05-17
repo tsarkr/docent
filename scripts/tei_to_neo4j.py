@@ -13,6 +13,7 @@ import os
 import sys
 import argparse
 import json
+from pathlib import Path
 
 # Optional DB drivers
 try:
@@ -28,10 +29,19 @@ except ImportError:
 
 
 def _load_secrets(secret_file=None):
-    root = os.getcwd()
     if secret_file is None:
-        secret_file = os.path.join(root, '.streamlit', 'secrets.toml')
-    if os.path.exists(secret_file):
+        # 1. Try current working directory
+        path1 = os.path.join(os.getcwd(), '.streamlit', 'secrets.toml')
+        # 2. Try relative to this script
+        # Assuming this script is in 'scripts/' and secrets.toml is in '.streamlit/' in the root
+        path2 = Path(__file__).resolve().parent.parent / '.streamlit' / 'secrets.toml'
+        
+        if os.path.exists(path1):
+            secret_file = path1
+        elif path2.exists():
+            secret_file = str(path2)
+
+    if secret_file and os.path.exists(secret_file):
         try:
             with open(secret_file, 'rb') as f:
                 return tomllib.load(f)
@@ -53,6 +63,7 @@ SECRETS = _load_secrets()
 
 try:
     from neo4j import GraphDatabase
+    from neo4j.exceptions import ClientError
 except Exception:
     print('neo4j driver not installed. Install with pip install neo4j')
     sys.exit(1)
@@ -63,7 +74,7 @@ NEO_USER = _secret_or_env('NEO4J_USER', 'neo4j', SECRETS)
 NEO_PW = _secret_or_env('NEO4J_PASSWORD', 'password', SECRETS)
 
 # Postgres settings
-PG_HOST = _secret_or_env('PG_HOST', 'localhost', SECRETS)
+PG_HOST = _secret_or_env('PG_HOST', '127.0.0.1', SECRETS)
 PG_PORT = int(_secret_or_env('PG_PORT', '5432', SECRETS) or 5432)
 PG_USER = _secret_or_env('PG_USER', 'postgres', SECRETS)
 PG_PASSWORD = _secret_or_env('PG_PASSWORD', '', SECRETS)
@@ -102,12 +113,15 @@ def load_from_postgres():
         return None
 
     try:
+        display_host = PG_HOST if PG_HOST in ['localhost', '127.0.0.1'] else f"{PG_HOST[:3]}***"
+        print(f"🔌 PostgreSQL 연결 시도 중... (host={display_host})")
         conn = psycopg2.connect(
             host=PG_HOST,
             port=PG_PORT,
             user=PG_USER,
             password=PG_PASSWORD,
-            database=PG_DATABASE
+            database=PG_DATABASE,
+            connect_timeout=10
         )
         return conn
     except Exception as e:
@@ -130,15 +144,55 @@ def fetch_table_data(conn, table_name):
 def safe_run(session, cypher, **params):
     """Defensive wrapper for session.run."""
     try:
-        if isinstance(cypher, str) and 'MATCH' in cypher and '),(' in cypher:
-            new = cypher.replace('),(', ') MATCH (')
-            if new != cypher:
-                cypher = new
         return session.run(cypher, **params)
     except Exception as e:
         print(f'⚠️ Cypher실행 실패: {e}')
-        print(f'  Cypher: {cypher[:100]}...')
+        # print(f'  Cypher: {cypher[:200]}...')
         raise
+
+
+def _ensure_schema(session):
+    """Create constraints for faster MERGE."""
+    import re
+    constraints = [
+        "CREATE CONSTRAINT person_name IF NOT EXISTS FOR (n:Person) REQUIRE n.name IS UNIQUE",
+        "CREATE CONSTRAINT place_name IF NOT EXISTS FOR (n:Place) REQUIRE n.name IS UNIQUE",
+        "CREATE CONSTRAINT event_title IF NOT EXISTS FOR (n:Event) REQUIRE n.title IS UNIQUE",
+    ]
+    for c in constraints:
+        try:
+            session.run(c)
+        except ClientError as e:
+            if "AlreadyExists" in e.code:
+                match = re.search(r'(?:CONSTRAINT|INDEX)\s+([^\s]+)', c, re.IGNORECASE)
+                if match:
+                    name = match.group(1)
+                    print(f"⚠️ Schema conflict ('{name}'): dropping and recreating.")
+                    try:
+                        if "CONSTRAINT" in c.upper():
+                            session.run(f"DROP CONSTRAINT {name} IF EXISTS")
+                        else:
+                            session.run(f"DROP INDEX {name} IF EXISTS")
+                        session.run(c)
+                    except Exception as retry_err:
+                        print(f"❌ Retry failed: {retry_err}")
+                else:
+                    print(f"⚠️ Constraint creation failed: {e}")
+            else:
+                print(f"⚠️ Constraint creation failed: {e}")
+        except Exception as e:
+            print(f"⚠️ Constraint creation failed: {e}")
+
+
+def _run_batches(session, cypher, records, batch_size=20000, extra_params=None):
+    extra_params = extra_params or {}
+    total = len(records)
+    if total == 0:
+        return
+    for i in range(0, total, batch_size):
+        batch = records[i:i + batch_size]
+        params = {**extra_params, "batch": batch}
+        safe_run(session, cypher, **params)
 
 
 def load_from_postgres_to_neo4j(wipe=False):
@@ -157,13 +211,16 @@ def load_from_postgres_to_neo4j(wipe=False):
 
     try:
         with driver.session() as session:
+            _ensure_schema(session)
+            
             if wipe:
                 print('🗑️ Wipe mode: deleting existing Person/Place/Event nodes...')
+                # Use batched delete for safety
                 for label in ('Person', 'Place', 'Event'):
-                    try:
-                        safe_run(session, f"MATCH (n:{label}) DETACH DELETE n")
-                    except Exception as _e:
-                        pass
+                    while True:
+                        res = session.run(f"MATCH (n:{label}) WITH n LIMIT 10000 DETACH DELETE n RETURN count(*) as c")
+                        if res.single()['c'] == 0:
+                            break
                 print('✅ Wipe complete.')
 
             # Process each raw_* table
@@ -176,10 +233,7 @@ def load_from_postgres_to_neo4j(wipe=False):
 
                 print(f'  Loaded {len(rows)} rows')
                 # Get column names from first row
-                if rows:
-                    columns = list(rows[0].keys())
-                else:
-                    continue
+                columns = list(rows[0].keys())
 
                 person_cols = [c for c in columns if detect_type(c) == 'person']
                 place_cols = [c for c in columns if detect_type(c) == 'place']
@@ -187,70 +241,77 @@ def load_from_postgres_to_neo4j(wipe=False):
 
                 print(f'  Detected columns: person={len(person_cols)}, place={len(place_cols)}, event={len(event_cols)}')
 
-                # Create nodes from rows
-                for i, row in enumerate(rows):
-                    # Collect entities from this row
-                    persons = []
-                    places = []
-                    events = []
+                all_persons = set()
+                all_places = set()
+                all_events = set()
+                rel_p_e = set() # (person, event)
+                rel_e_p = set() # (event, place)
+
+                # Collect all entities and relationships in memory first
+                for row in rows:
+                    row_persons = []
+                    row_places = []
+                    row_events = []
 
                     for col in person_cols:
                         val = row.get(col)
                         if val and str(val).strip() and str(val).lower() != 'none':
-                            persons.append(str(val).strip())
+                            row_persons.append(str(val).strip())
 
                     for col in place_cols:
                         val = row.get(col)
                         if val and str(val).strip() and str(val).lower() != 'none':
-                            places.append(str(val).strip())
+                            row_places.append(str(val).strip())
 
                     for col in event_cols:
                         val = row.get(col)
                         if val and str(val).strip() and str(val).lower() != 'none':
-                            events.append(str(val).strip())
+                            row_events.append(str(val).strip())
 
-                    # Create nodes
-                    for person in set(persons):
-                        try:
-                            safe_run(session, "MERGE (n:Person {name:$name}) RETURN id(n)", name=person)
-                        except Exception:
-                            pass
+                    # Track unique entities
+                    for p in row_persons: all_persons.add(p)
+                    for pl in row_places: all_places.add(pl)
+                    for e in row_events: all_events.add(e)
 
-                    for place in set(places):
-                        try:
-                            safe_run(session, "MERGE (n:Place {name:$name}) RETURN id(n)", name=place)
-                        except Exception:
-                            pass
+                    # Track relationships
+                    for p in set(row_persons):
+                        for e in set(row_events):
+                            rel_p_e.add((p, e))
+                    for e in set(row_events):
+                        for pl in set(row_places):
+                            rel_e_p.add((e, pl))
 
-                    for event in set(events):
-                        try:
-                            safe_run(session, "MERGE (n:Event {title:$title}) RETURN id(n)", title=event)
-                        except Exception:
-                            pass
+                # Batch Create Nodes
+                if all_persons:
+                    print(f"  → Creating {len(all_persons)} Person nodes...")
+                    _run_batches(session, "UNWIND $batch as name MERGE (n:Person {name:name})", list(all_persons))
+                if all_places:
+                    print(f"  → Creating {len(all_places)} Place nodes...")
+                    _run_batches(session, "UNWIND $batch as name MERGE (n:Place {name:name})", list(all_places))
+                if all_events:
+                    print(f"  → Creating {len(all_events)} Event nodes...")
+                    _run_batches(session, "UNWIND $batch as title MERGE (n:Event {title:title})", list(all_events))
 
-                    # Create relationships
-                    for person in set(persons):
-                        for event in set(events):
-                            try:
-                                safe_run(
-                                    session,
-                                    "MATCH (a:Person {name:$p}) MATCH (b:Event {title:$e}) MERGE (b)-[:P14_carried_out_by]->(a)",
-                                    p=person, e=event)
-                            except Exception:
-                                pass
-
-                    for event in set(events):
-                        for place in set(places):
-                            try:
-                                safe_run(
-                                    session,
-                                    "MATCH (a:Event {title:$e}) MATCH (b:Place {name:$pl}) MERGE (a)-[:P7_took_place_at]->(b)",
-                                    e=event, pl=place)
-                            except Exception:
-                                pass
-
-                    if (i + 1) % 100 == 0:
-                        print(f'  ... processed {i + 1} rows')
+                # Batch Create Relationships
+                if rel_p_e:
+                    print(f"  → Creating {len(rel_p_e)} P14 relationships...")
+                    recs = [{"p": p, "e": e} for p, e in rel_p_e]
+                    _run_batches(session, """
+                        UNWIND $batch as row
+                        MATCH (a:Person {name:row.p})
+                        MATCH (b:Event {title:row.e})
+                        MERGE (b)-[:P14_carried_out_by]->(a)
+                    """, recs)
+                
+                if rel_e_p:
+                    print(f"  → Creating {len(rel_e_p)} P7 relationships...")
+                    recs = [{"e": e, "pl": pl} for e, pl in rel_e_p]
+                    _run_batches(session, """
+                        UNWIND $batch as row
+                        MATCH (a:Event {title:row.e})
+                        MATCH (b:Place {name:row.pl})
+                        MERGE (a)-[:P7_took_place_at]->(b)
+                    """, recs)
 
                 print(f'  ✅ {table_name} complete')
 

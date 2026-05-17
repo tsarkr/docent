@@ -71,7 +71,7 @@ def safe_fragment(name: str) -> str:
     # normalize whitespace
     name = re.sub(r"\s+", '_', name.strip())
     # allow ASCII letters/digits and CJK Unified Ideographs, replace other chars with '_'
-    name = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", '_', name)
+    name = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff\uac00-\ud7a3\u1100-\u11ff\u3130-\u318f]+", '_', name)
     # collapse multiple underscores
     name = re.sub(r"_+", '_', name)
     # strip leading/trailing underscores
