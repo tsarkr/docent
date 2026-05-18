@@ -94,6 +94,18 @@ TABLE_INFO = {
 }
 
 
+def _env_int(name, default):
+    try:
+        return int(os.getenv(name, str(default)) or default)
+    except Exception:
+        return int(default)
+
+
+PG_FETCH_LIMIT = _env_int('TEI_NEO4J_FETCH_LIMIT', 10000)
+NEO4J_BATCH_SIZE = _env_int('TEI_NEO4J_BATCH_SIZE', 50000)
+NEO4J_DELETE_BATCH = _env_int('TEI_NEO4J_DELETE_BATCH', 20000)
+
+
 def detect_type(colname):
     """Detect entity type (person/place/event) from column name."""
     if colname is None:
@@ -133,7 +145,7 @@ def fetch_table_data(conn, table_name):
     """Fetch all rows from a table."""
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(f"SELECT * FROM {table_name} LIMIT 10000")
+            cur.execute(f"SELECT * FROM {table_name} LIMIT {PG_FETCH_LIMIT}")
             rows = cur.fetchall()
         return rows
     except Exception as e:
@@ -189,6 +201,7 @@ def _run_batches(session, cypher, records, batch_size=20000, extra_params=None):
     total = len(records)
     if total == 0:
         return
+    batch_size = max(1, int(batch_size or 1))
     for i in range(0, total, batch_size):
         batch = records[i:i + batch_size]
         params = {**extra_params, "batch": batch}
@@ -218,7 +231,7 @@ def load_from_postgres_to_neo4j(wipe=False):
                 # Use batched delete for safety
                 for label in ('Person', 'Place', 'Event'):
                     while True:
-                        res = session.run(f"MATCH (n:{label}) WITH n LIMIT 10000 DETACH DELETE n RETURN count(*) as c")
+                        res = session.run(f"MATCH (n:{label}) WITH n LIMIT {NEO4J_DELETE_BATCH} DETACH DELETE n RETURN count(*) as c")
                         if res.single()['c'] == 0:
                             break
                 print('✅ Wipe complete.')
@@ -284,13 +297,13 @@ def load_from_postgres_to_neo4j(wipe=False):
                 # Batch Create Nodes
                 if all_persons:
                     print(f"  → Creating {len(all_persons)} Person nodes...")
-                    _run_batches(session, "UNWIND $batch as name MERGE (n:Person {name:name})", list(all_persons))
+                    _run_batches(session, "UNWIND $batch as name MERGE (n:Person {name:name})", list(all_persons), batch_size=NEO4J_BATCH_SIZE)
                 if all_places:
                     print(f"  → Creating {len(all_places)} Place nodes...")
-                    _run_batches(session, "UNWIND $batch as name MERGE (n:Place {name:name})", list(all_places))
+                    _run_batches(session, "UNWIND $batch as name MERGE (n:Place {name:name})", list(all_places), batch_size=NEO4J_BATCH_SIZE)
                 if all_events:
                     print(f"  → Creating {len(all_events)} Event nodes...")
-                    _run_batches(session, "UNWIND $batch as title MERGE (n:Event {title:title})", list(all_events))
+                    _run_batches(session, "UNWIND $batch as title MERGE (n:Event {title:title})", list(all_events), batch_size=NEO4J_BATCH_SIZE)
 
                 # Batch Create Relationships
                 if rel_p_e:
@@ -301,7 +314,7 @@ def load_from_postgres_to_neo4j(wipe=False):
                         MATCH (a:Person {name:row.p})
                         MATCH (b:Event {title:row.e})
                         MERGE (b)-[:P14_carried_out_by]->(a)
-                    """, recs)
+                    """, recs, batch_size=NEO4J_BATCH_SIZE)
                 
                 if rel_e_p:
                     print(f"  → Creating {len(rel_e_p)} P7 relationships...")
@@ -311,7 +324,7 @@ def load_from_postgres_to_neo4j(wipe=False):
                         MATCH (a:Event {title:row.e})
                         MATCH (b:Place {name:row.pl})
                         MERGE (a)-[:P7_took_place_at]->(b)
-                    """, recs)
+                    """, recs, batch_size=NEO4J_BATCH_SIZE)
 
                 print(f'  ✅ {table_name} complete')
 

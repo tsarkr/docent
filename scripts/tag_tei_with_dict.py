@@ -1001,22 +1001,24 @@ def process_db(table_name='raw_source_info', limit=5, all_tables=False, rowid=No
         process_table(conn, tbl, term_list, limit=limit, rowid=rowid)
         print(f'--- DONE: {tbl}')
 
-        if skip_neo4j:
-            continue
+    if skip_neo4j:
+        conn.close()
+        return
 
-        # 자동으로 TEI를 Neo4j로 로드하는 스크립트를 호출합니다.
-        try:
-            tei_to_neo4j = Path(__file__).resolve().parent / 'tei_to_neo4j.py'
-            if tei_to_neo4j.exists():
-                print(f"자동호출: {tei_to_neo4j.name} 실행")
-                # run without wipe by default
-                subprocess.run([sys.executable, str(tei_to_neo4j)], check=True)
-            else:
-                print(f"tei_to_neo4j 스크립트가 없습니다: {tei_to_neo4j}")
-        except subprocess.CalledProcessError as e:
-            print(f"ERROR: tei_to_neo4j failed with exit {e.returncode}")
-        except Exception as e:
-            print(f"Warning: 자동 tei_to_neo4j 호출 중 오류: {e}")
+    # 자동으로 TEI를 Neo4j로 로드하는 스크립트를 한 번만 호출합니다.
+    # 테이블마다 반복 호출하면 연결 생성/종료 비용이 누적되고 실패 가능성이 커집니다.
+    try:
+        tei_to_neo4j = Path(__file__).resolve().parent / 'tei_to_neo4j.py'
+        if tei_to_neo4j.exists():
+            print(f"자동호출: {tei_to_neo4j.name} 실행")
+            # run without wipe by default
+            subprocess.run([sys.executable, str(tei_to_neo4j)], check=True)
+        else:
+            print(f"tei_to_neo4j 스크립트가 없습니다: {tei_to_neo4j}")
+    except subprocess.CalledProcessError as e:
+        print(f"ERROR: tei_to_neo4j failed with exit {e.returncode}")
+    except Exception as e:
+        print(f"Warning: 자동 tei_to_neo4j 호출 중 오류: {e}")
 
     conn.close()
 
