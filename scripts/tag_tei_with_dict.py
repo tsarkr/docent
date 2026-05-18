@@ -21,6 +21,9 @@ from pathlib import Path
 os.environ['TRANSFORMERS_OFFLINE'] = '1'
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 ner_lock = threading.Lock()
+DISABLE_NER = os.getenv('DISABLE_NER', '').lower() in ('1', 'true', 'yes')
+if os.getenv('USE_PROCESS_POOL', '').lower() in ('1', 'true', 'yes'):
+    DISABLE_NER = True
 
 # Attempt to import transformers NER pipeline once; fall back gracefully if unavailable
 NER_AVAILABLE = False
@@ -29,45 +32,48 @@ _NER_MODEL_NAME = None
 NER_GROUPED = False
 # Tunable batch size for NER to improve GPU utilization (increase on MPS/Apple Silicon)
 NER_BATCH_SIZE = int(os.getenv('NER_BATCH_SIZE', '256'))
-try:
-    from transformers import pipeline
-    # Try multiple candidate models (the environment may not have all downloaded)
-    _model_candidates = [
-        "monologg/koelectra-base-finetuned-naver-ner",
-        "monologg/kocharelectra-base-modu-ner-all",
-        "monologg/kocharelectra-base-modu-ner-nx",
-        "monologg/kocharelectra-base-modu-ner-sx",
-        "kykim/bert-kor-base",
-    ]
-    for _m in _model_candidates:
-        try:
-            # Check for Apple Silicon MPS acceleration
-            import torch
-            device = "mps" if torch.backends.mps.is_available() else -1
-            
-            # some transformers versions don't accept grouped_entities at init; try and fall back
+if DISABLE_NER and os.getenv('DOCENT_PROCESS_WORKER', '').lower() not in ('1', 'true', 'yes'):
+    print('⚠️ DISABLE_NER=1 이므로 NER를 비활성화하고 사전 기반 태깅만 사용합니다.')
+else:
+    try:
+        from transformers import pipeline
+        # Try multiple candidate models (the environment may not have all downloaded)
+        _model_candidates = [
+            "monologg/koelectra-base-finetuned-naver-ner",
+            "monologg/kocharelectra-base-modu-ner-all",
+            "monologg/kocharelectra-base-modu-ner-nx",
+            "monologg/kocharelectra-base-modu-ner-sx",
+            "kykim/bert-kor-base",
+        ]
+        for _m in _model_candidates:
             try:
-                # Set batch_size for better GPU utilization (tunable via NER_BATCH_SIZE)
-                ner_pipeline = pipeline("ner", model=_m, aggregation_strategy="simple", device=device, batch_size=NER_BATCH_SIZE)
-                NER_GROUPED = True
-            except Exception:
-                # fallback: create pipeline without aggregation_strategy and we will group manually
-                ner_pipeline = pipeline("ner", model=_m, device=device, batch_size=NER_BATCH_SIZE)
-                NER_GROUPED = False
-            NER_AVAILABLE = True
-            _NER_MODEL_NAME = _m
-            print(f'✅ NER 모델 로드 성공: {_m} (device={device}, batch_size={NER_BATCH_SIZE})')
-            break
-        except Exception as e:
-            # Only print error if it's not a "local files not found" error for the first few candidates
-            if "local_files_only=True" not in str(e):
-                print(f'⚠️ NER 모델({_m}) 로드 실패: {e}')
-    if not NER_AVAILABLE:
-        print('⚠️ 모든 NER 모델 로드에 실패했습니다 — 사전 기반 태깅만 사용합니다.')
-except Exception as e:
-    print(f"❌ NER 시스템 초기화 중 치명적 오류: {e}")
-    ner_pipeline = None
-    NER_AVAILABLE = False
+                # Check for Apple Silicon MPS acceleration
+                import torch
+                device = "mps" if torch.backends.mps.is_available() else -1
+                
+                # some transformers versions don't accept grouped_entities at init; try and fall back
+                try:
+                    # Set batch_size for better GPU utilization (tunable via NER_BATCH_SIZE)
+                    ner_pipeline = pipeline("ner", model=_m, aggregation_strategy="simple", device=device, batch_size=NER_BATCH_SIZE)
+                    NER_GROUPED = True
+                except Exception:
+                    # fallback: create pipeline without aggregation_strategy and we will group manually
+                    ner_pipeline = pipeline("ner", model=_m, device=device, batch_size=NER_BATCH_SIZE)
+                    NER_GROUPED = False
+                NER_AVAILABLE = True
+                _NER_MODEL_NAME = _m
+                print(f'✅ NER 모델 로드 성공: {_m} (device={device}, batch_size={NER_BATCH_SIZE})')
+                break
+            except Exception as e:
+                # Only print error if it's not a "local files not found" error for the first few candidates
+                if "local_files_only=True" not in str(e):
+                    print(f'⚠️ NER 모델({_m}) 로드 실패: {e}')
+        if not NER_AVAILABLE:
+            print('⚠️ 모든 NER 모델 로드에 실패했습니다 — 사전 기반 태깅만 사용합니다.')
+    except Exception as e:
+        print(f"❌ NER 시스템 초기화 중 치명적 오류: {e}")
+        ner_pipeline = None
+        NER_AVAILABLE = False
 try:
     import tomllib
 except Exception:
@@ -118,7 +124,7 @@ PGPASSWORD = _secret_or_env('PG_PASSWORD', '', SECRETS)
 PGDATABASE = _secret_or_env('PG_DATABASE', 'postgres', SECRETS)
 
 try:
-    import hanja
+    import hanja  # type: ignore[import-not-found]
 except Exception:
     hanja = None
 
@@ -832,6 +838,14 @@ def _clip_text(text, limit=400):
     return s[:limit] + '...'
 
 
+def _safe_execute_batch(cur, sql, rows, page_size=1000):
+    if not rows:
+        return
+    batch_size = max(1, int(page_size or 1000))
+    for i in range(0, len(rows), batch_size):
+        cur.executemany(sql, rows[i:i + batch_size])
+
+
 def process_table(conn, table_name, term_list, limit=5, rowid=None):
     cur = conn.cursor()
 
@@ -877,6 +891,10 @@ def process_table(conn, table_name, term_list, limit=5, rowid=None):
     futures = []
     if use_process_pool:
         print(f"⚙️ 프로세스 풀 사용: max_workers={max_workers}, chunk_size={chunk_size}")
+        # Avoid loading transformers/torch in each spawned worker process.
+        # In process mode, we intentionally disable NER and run dictionary-only tagging.
+        os.environ['DISABLE_NER'] = '1'
+        os.environ['DOCENT_PROCESS_WORKER'] = '1'
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             for i in range(0, total, chunk_size):
                 chunk = rows[i:i + chunk_size]
