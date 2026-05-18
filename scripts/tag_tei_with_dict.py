@@ -12,18 +12,23 @@ adds hanja glosses, and updates tei_status='REFINED'.
 import argparse
 import os
 import re
+import threading
 import sys
 import subprocess
 from pathlib import Path
 
 # Optimize transformers behavior
 os.environ['TRANSFORMERS_OFFLINE'] = '1'
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+ner_lock = threading.Lock()
 
 # Attempt to import transformers NER pipeline once; fall back gracefully if unavailable
 NER_AVAILABLE = False
 ner_pipeline = None
 _NER_MODEL_NAME = None
 NER_GROUPED = False
+# Tunable batch size for NER to improve GPU utilization (increase on MPS/Apple Silicon)
+NER_BATCH_SIZE = int(os.getenv('NER_BATCH_SIZE', '256'))
 try:
     from transformers import pipeline
     # Try multiple candidate models (the environment may not have all downloaded)
@@ -42,16 +47,16 @@ try:
             
             # some transformers versions don't accept grouped_entities at init; try and fall back
             try:
-                # Set batch_size for better GPU utilization
-                ner_pipeline = pipeline("ner", model=_m, aggregation_strategy="none", device=device, batch_size=32)
-                NER_GROUPED = False
+                # Set batch_size for better GPU utilization (tunable via NER_BATCH_SIZE)
+                ner_pipeline = pipeline("ner", model=_m, aggregation_strategy="simple", device=device, batch_size=NER_BATCH_SIZE)
+                NER_GROUPED = True
             except Exception:
                 # fallback: create pipeline without aggregation_strategy and we will group manually
-                ner_pipeline = pipeline("ner", model=_m, device=device, batch_size=32)
+                ner_pipeline = pipeline("ner", model=_m, device=device, batch_size=NER_BATCH_SIZE)
                 NER_GROUPED = False
             NER_AVAILABLE = True
             _NER_MODEL_NAME = _m
-            print(f'✅ NER 모델 로드 성공: {_m} (device={device}, batch_size=32)')
+            print(f'✅ NER 모델 로드 성공: {_m} (device={device}, batch_size={NER_BATCH_SIZE})')
             break
         except Exception as e:
             # Only print error if it's not a "local files not found" error for the first few candidates
@@ -120,9 +125,15 @@ except Exception:
 
 # best-effort per-character fallback map for hanja -> hangul readings
 HANJA_TO_HANGUL = {
-    '柳': '유', '寬': '관', '順': '순',
-    '明': '명', '治': '치', '光': '광', '州': '주', '海': '해', '子': '자', '浦': '포',
-    '德': '덕', '沼': '소', '里': '리', '憲': '헌', '兵': '병', '駐': '주', '在': '재', '所': '소',
+    '忠': '충', '淸': '청', '南': '남',
+    '天': '천', '安': '안', '郡': '군', '葛': '갈', '田': '전', '面': '면', '並': '병', '川': '천',
+    '市': '시', '場': '장', '京': '경', '東': '동', '龍': '용', '頭': '두', '里': '리', '山': '산',
+    '柳': '유', '寬': '관', '順': '순', '重': '중', '武': '무',
+    '金': '김', '用': '용', '伊': '이', '白': '백', '正': '정', '云': '운',
+    '朴': '박', '濟': '제', '奭': '석', '萬': '만', '衡': '형', '相': '상', '勳': '훈',
+    '仁': '인', '元': '원', '炳': '병', '鎬': '호', '鳳': '봉', '來': '래', '權': '권',
+    '孟': '맹', '星': '성', '鄭': '정', '春': '춘', '永': '영', '溱': '진', '太': '태', '部': '부',
+    '官': '관', '駐': '주', '在': '재', '所': '소', '軍': '군', '器': '기',
 }
 
 
@@ -232,7 +243,7 @@ def _split_names(value):
 
 
 from functools import lru_cache
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 
 @lru_cache(maxsize=10000)
 def _hanja_translate(token: str) -> str:
@@ -297,7 +308,7 @@ def _tag_single_tei(rowid, tei, term_list):
         close_tag = m.group(3)
         tagged_inner = _tag_fragment(inner, term_list)
         tagged_inner = _add_hanja_gloss_to_text(tagged_inner)
-        tagged_inner = _tag_persons_in_glosses(tagged_inner)
+        tagged_inner = _tag_persons_in_glosses(tagged_inner, term_list)
         return f"{open_tag}{tagged_inner}{close_tag}"
 
     new_tei, nsubs = pattern.subn(repl, tei)
@@ -379,6 +390,23 @@ def build_dictionary(conn):
             print(f'⚠️ {table} 로딩 실패: {e}')
 
     cur.close()
+    # Add hangul readings for hanja dictionary entries so glosses (한글) are matched
+    try:
+        extra = {}
+        for name, tag in list(dictionary.items()):
+            # only consider entries containing CJK hanja
+            if re.search(r'[\u4E00-\u9FFF]', name):
+                reading = _hanja_translate(name) or _hanja_char_by_char(name)
+                if reading:
+                    reading = reading.strip()
+                    if reading and reading not in dictionary:
+                        extra[reading] = tag
+        for k, v in extra.items():
+            dictionary[k] = v
+    except Exception:
+        # non-fatal: if hanja translation fails, continue with original dictionary
+        pass
+
     # longest match first
     sorted_terms = sorted(dictionary.items(), key=lambda x: len(x[0]), reverse=True)
     return dictionary, sorted_terms
@@ -439,6 +467,65 @@ def _find_spans(text, term_list):
     return spans
 
 
+_ENTITY_STRIP_CHARS = " \t\n\r\"'.,;:!?()[]{}<>~`|/\\-_=+*&#%^$@"
+_KOREAN_JOSA_SUFFIX_RE = re.compile(r'(?:에게|에서|으로|로|은/는|은|는|이|가|의|을|를|도|과|와)$')
+
+
+def _normalize_person_entity_span(text, start, end):
+    if text is None or start is None or end is None:
+        return None
+
+    s = int(start)
+    e = int(end)
+    if s < 0 or e <= s or e > len(text):
+        return None
+
+    # skip leading punctuation/whitespace that may be included in token offsets
+    while s < e and text[s] in " \t\n\r\"'.,;:!?()[]{}<>~`|/\\-_=+*&#%^$@":
+        s += 1
+    if s >= e: return None
+
+    window = text[s:min(len(text), s + 12)]
+    m = re.match(r'^([가-힣]+)', window)
+
+    if not m:
+        raw = text[s:e].strip(" \t\n\r\"'.,;:!?()[]{}<>~`|/\\-_=+*&#%^$@")
+        if not raw or len(raw) <= 1:
+            return None
+        return (s, s + len(raw), raw)
+
+    chunk = m.group(1)
+
+    josa_list = ['에게', '에서', '으로', '은', '는', '이', '가', '의', '을', '를', '도', '과', '와', '로']
+    real_name = None
+
+    for L in [4, 3, 2]:
+        if len(chunk) > L:
+            remainder = chunk[L:]
+            for josa in josa_list:
+                if remainder.startswith(josa):
+                    real_name = chunk[:L]
+                    break
+        if real_name:
+            break
+
+    if not real_name:
+        if 2 <= len(chunk) <= 4:
+            real_name = chunk
+        else:
+            ner_len = e - s
+            if 2 <= ner_len <= 4:
+                real_name = chunk[:ner_len]
+            else:
+                real_name = chunk[:3]
+
+    if not real_name or len(real_name) <= 1:
+        return None
+
+    new_e = s + len(real_name)
+    return (s, new_e, real_name)
+
+
 def _group_token_entities(ents, offset):
     groups = []
     cur_s = None
@@ -478,10 +565,36 @@ def _find_spans_with_ner(text, term_list):
 
     new_spans = []
     try:
-        # Run NER once on the entire text
-        # This is much faster than running on multiple small fragments.
-        ents = ner_pipeline(text)
-        if not ents:
+        # Split text into segments and run NER in batch to improve GPU throughput.
+        def _segment_text_for_ner(text, max_chars=512):
+            segs = []
+            if not text:
+                return segs
+            # split by sentence-like punctuation but preserve indices
+            boundaries = list(re.finditer(r'[^。！？!?.]+[。！？!?.]*', text))
+            cur = 0
+            for m in boundaries:
+                s, e = m.start(), m.end()
+                seg_text = text[s:e].strip()
+                if not seg_text:
+                    continue
+                # chunk long segments further
+                if len(seg_text) > max_chars:
+                    for i in range(0, len(seg_text), max_chars):
+                        part = seg_text[i:i+max_chars]
+                        segs.append((s + i, part))
+                else:
+                    segs.append((s, seg_text))
+            # fallback: if segmentation failed, use whole text
+            if not segs:
+                segs = [(0, text)]
+            return segs
+
+        segments = _segment_text_for_ner(text, max_chars=512)
+        seg_texts = [s for _, s in segments]
+        with ner_lock:
+            ents_result = ner_pipeline(seg_texts)
+        if not ents_result:
             return spans
 
         # Build a helper to check overlaps
@@ -492,30 +605,69 @@ def _find_spans_with_ner(text, term_list):
             return False
 
         if NER_GROUPED:
-            for ent in ents:
-                label = ent.get('entity_group') or ent.get('entity') or ent.get('label')
-                if not label:
-                    continue
-                up = str(label).upper()
-                if 'PER' in up or 'PERSON' in up:
-                    s = int(ent.get('start', -1))
-                    e = int(ent.get('end', -1))
-                    if s < 0 or e < 0 or (e - s) < 2:
-                        continue
-                    if not is_overlapping(s, e):
-                        name_text = text[s:e]
-                        # NER skip if it contains Hanja (covered by dictionary/gloss usually)
-                        if re.search(r'[\u4E00-\u9FFF]', name_text):
+            # ents_result is expected to be a list of lists (one per input segment)
+            if isinstance(ents_result, list) and len(ents_result) == len(segments):
+                for i, ents in enumerate(ents_result):
+                    offset = segments[i][0]
+                    for ent in ents:
+                        label = ent.get('entity_group') or ent.get('entity') or ent.get('label')
+                        if not label:
                             continue
-                        new_spans.append((s, e, f"<persName>{name_text}</persName>"))
+                        up = str(label).upper()
+                        if 'PER' in up or 'PERSON' in up:
+                            s = int(ent.get('start', -1)) + offset
+                            e = int(ent.get('end', -1)) + offset
+                            norm = _normalize_person_entity_span(text, s, e)
+                            if not norm:
+                                continue
+                            s, e, name_text = norm
+                            if not is_overlapping(s, e):
+                                if re.search(r'[\u4E00-\u9FFF]', name_text):
+                                    continue
+                                new_spans.append((s, e, f"<persName>{name_text}</persName>"))
+            else:
+                # fallback: single-list behavior
+                for ent in ents_result:
+                    label = ent.get('entity_group') or ent.get('entity') or ent.get('label')
+                    if not label:
+                        continue
+                    up = str(label).upper()
+                    if 'PER' in up or 'PERSON' in up:
+                        s = int(ent.get('start', -1))
+                        e = int(ent.get('end', -1))
+                        norm = _normalize_person_entity_span(text, s, e)
+                        if not norm:
+                            continue
+                        s, e, name_text = norm
+                        if not is_overlapping(s, e):
+                            if re.search(r'[\u4E00-\u9FFF]', name_text):
+                                continue
+                            new_spans.append((s, e, f"<persName>{name_text}</persName>"))
         else:
-            # Group token-level entities
-            groups = _group_token_entities(ents, 0)
+            # ents_result likely contains token-level outputs per segment; flatten with offsets
+            flat_ents = []
+            if isinstance(ents_result, list) and len(ents_result) == len(segments):
+                for i, ents in enumerate(ents_result):
+                    offset = segments[i][0]
+                    for ent in ents:
+                        ent_copy = dict(ent)
+                        if 'start' in ent_copy and ent_copy['start'] is not None:
+                            ent_copy['start'] = int(ent_copy['start']) + offset
+                        if 'end' in ent_copy and ent_copy['end'] is not None:
+                            ent_copy['end'] = int(ent_copy['end']) + offset
+                        flat_ents.append(ent_copy)
+            else:
+                # single list
+                for ent in ents_result:
+                    flat_ents.append(ent)
+
+            groups = _group_token_entities(flat_ents, 0)
             for s, e in groups:
-                if (e - s) < 2:
+                norm = _normalize_person_entity_span(text, s, e)
+                if not norm:
                     continue
+                s, e, name_text = norm
                 if not is_overlapping(s, e):
-                    name_text = text[s:e]
                     if re.search(r'[\u4E00-\u9FFF]', name_text):
                         continue
                     new_spans.append((s, e, f"<persName>{name_text}</persName>"))
@@ -609,7 +761,7 @@ def _add_hanja_gloss_to_text(text: str) -> str:
     return cjk_re.sub(repl, text)
 
 
-def _tag_persons_in_glosses(text: str) -> str:
+def _tag_persons_in_glosses(text: str, term_list) -> str:
     if not text:
         return text
 
@@ -621,7 +773,8 @@ def _tag_persons_in_glosses(text: str) -> str:
         probe_texts = [piece + suffix for suffix in ['은', '는', '이', '가', '의', '도']] + [piece]
         try:
             # Batch inference for all probe texts at once
-            batch_ents = ner_pipeline(probe_texts)
+            with ner_lock:
+                batch_ents = ner_pipeline(probe_texts)
         except Exception:
             return 0
 
@@ -654,9 +807,17 @@ def _tag_persons_in_glosses(text: str) -> str:
         if is_open('placeName') or is_open('orgName') or is_open('date'):
             return m.group(0)
         inner = m.group(1)
+        dict_spans = _find_spans(inner, term_list)
+        if dict_spans:
+            return f"<gloss>{_tag_text_segment(inner, term_list)}</gloss>"
         end = best_person_end(inner)
         if end >= 2:
             return f"<gloss><persName>{inner[:end]}</persName></gloss>"
+
+        # strong fallback: common Korean surnames inside gloss without context
+        surnames = "김이박최정강조윤장임한오서신권황안송전홍유고문양손배백허남심노하곽성차구우동맹"
+        if len(inner) >= 2 and len(inner) <= 4 and inner[0] in surnames:
+            return f"<gloss><persName>{inner}</persName></gloss>"
         return m.group(0)
 
     return re.sub(r'<gloss>([가-힣]{2,4})</gloss>', repl, text)
@@ -702,222 +863,103 @@ def process_table(conn, table_name, term_list, limit=5, rowid=None):
     updates = []
     status_only_updates = []
 
-    # Use multiprocessing with chunking to reduce overhead
-    # 14 workers for M5 Pro's performance cores
-    with ProcessPoolExecutor(max_workers=14) as executor:
-        # Process in larger chunks (e.g., 100 rows per job) to minimize IPC overhead
-        chunk_size = 100
-        futures = []
-        for i in range(0, total, chunk_size):
-            chunk = rows[i:i + chunk_size]
-            futures.append(executor.submit(_process_chunk, chunk, term_list))
-            
-        for i, future in enumerate(futures, 1):
-            try:
-                chunk_results = future.result()
-                for res in chunk_results:
-                    if res:
-                        rid, new_tei, status = res
-                        if new_tei:
-                            updates.append((new_tei, status, rid))
-                        else:
-                            status_only_updates.append((status, rid))
-            except Exception as e:
-                print(f"⚠️ 청크 처리 중 오류: {e}")
-            
-            prog = min(i * chunk_size, total)
-            if i % 5 == 0 or prog == total:
-                print(f"  → 진행률: {prog}/{total} ({prog/total*100:.1f}%)")
+    # Determine parallelism strategy. Allow overriding worker count and chunk size via env.
+    max_workers = int(os.getenv('MAX_WORKERS', str(min(8, max(4, (os.cpu_count() or 4))))))
+    chunk_size = int(os.getenv('CHUNK_SIZE', '200'))
 
-    # Perform batch updates with larger page size and retry logic
-    from psycopg2.extras import execute_batch
-    import time
-    
-    # Ensure connection is alive before updates
-    conn = _ensure_connection(conn)
-    cur = conn.cursor()
+    # Use process-based parallelism when NER is unavailable (to bypass GIL)
+    use_process_pool_env = os.getenv('USE_PROCESS_POOL', '').lower()
+    if use_process_pool_env in ('1', 'true', 'yes'):
+        use_process_pool = True
+    else:
+        use_process_pool = not NER_AVAILABLE
 
-    def _safe_execute_batch(cursor, sql, data, page_size=2000):
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                execute_batch(cursor, sql, data, page_size=page_size)
-                return True
-            except Exception as e:
-                print(f"⚠️ 배치 업데이트 중 오류 (시도 {attempt+1}/{max_retries}): {e}")
-                if attempt < max_retries - 1:
-                    nonlocal conn, cur
-                    conn = _ensure_connection(conn)
-                    cur = conn.cursor()
-                    cursor = cur
-                    time.sleep(2)
-                else:
-                    raise e
-        return False
+    futures = []
+    if use_process_pool:
+        print(f"⚙️ 프로세스 풀 사용: max_workers={max_workers}, chunk_size={chunk_size}")
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            for i in range(0, total, chunk_size):
+                chunk = rows[i:i + chunk_size]
+                futures.append(executor.submit(_process_chunk, chunk, term_list))
+
+            for i, future in enumerate(futures, 1):
+                try:
+                    chunk_results = future.result()
+                    for res in chunk_results:
+                        if res:
+                            rid, new_tei, status = res
+                            if new_tei:
+                                updates.append((new_tei, status, rid))
+                            else:
+                                status_only_updates.append((status, rid))
+                except Exception as e:
+                    print(f"⚠️ 청크 처리 중 오류(프로세스): {e}")
+
+                prog = min(i * chunk_size, total)
+                if i % 5 == 0 or prog == total:
+                    print(f"  → 진행률: {prog}/{total} ({prog/total*100:.1f}%)")
+    else:
+        print(f"⚙️ 스레드 풀 사용: max_workers={max_workers}, chunk_size={chunk_size}")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for i in range(0, total, chunk_size):
+                chunk = rows[i:i + chunk_size]
+                futures.append(executor.submit(_process_chunk, chunk, term_list))
+
+            for i, future in enumerate(futures, 1):
+                try:
+                    chunk_results = future.result()
+                    for res in chunk_results:
+                        if res:
+                            rid, new_tei, status = res
+                            if new_tei:
+                                updates.append((new_tei, status, rid))
+                            else:
+                                status_only_updates.append((status, rid))
+                except Exception as e:
+                    print(f"⚠️ 청크 처리 중 오류: {e}")
+
+                prog = min(i * chunk_size, total)
+                if i % 5 == 0 or prog == total:
+                    print(f"  → 진행률: {prog}/{total} ({prog/total*100:.1f}%)")
 
     if updates:
-        _safe_execute_batch(cur, f'UPDATE "{table_name}" SET tei = %s, tei_status = %s WHERE rowid = %s', updates, page_size=2000)
+        _safe_execute_batch(cur, f'UPDATE "{table_name}" SET tei = %s, tei_status = %s WHERE rowid = %s', updates, page_size=4000)
         print(f"  ✓ {len(updates)}개 레코드 대량 업데이트 완료 (tei + status)")
     
     if status_only_updates:
-        _safe_execute_batch(cur, f'UPDATE "{table_name}" SET tei_status = %s WHERE rowid = %s', status_only_updates, page_size=2000)
+        _safe_execute_batch(cur, f'UPDATE "{table_name}" SET tei_status = %s WHERE rowid = %s', status_only_updates, page_size=4000)
         print(f"  ✓ {len(status_only_updates)}개 레코드 상태 대량 업데이트 완료")
 
     cur.close()
 
 
 def _process_chunk(chunk, term_list):
-    """Process a chunk of rows in a single worker job, batching NER for GPU efficiency"""
     results = []
-    
-    # 1. Extract all paragraphs from all documents in this chunk
-    chunk_data = []
-    all_texts_to_ner = []
-    
     pattern = re.compile(r'(<p[^>]*>)(.*?)(</p>)', re.IGNORECASE | re.DOTALL)
-    
     for rowid, tei in chunk:
-        tei = tei or ''
-        if 'data-col=""' in tei:
-            tei = tei.replace('data-col=""', 'data-col="')
-        
-        matches = list(pattern.finditer(tei))
-        paragraphs = [m.group(2) for m in matches]
-        chunk_data.append({
-            'rowid': rowid,
-            'tei': tei,
-            'matches': matches,
-            'paragraphs': paragraphs
-        })
-        all_texts_to_ner.extend(paragraphs)
-
-    # 2. Batch NER inference for the entire chunk
-    ner_map = {}
-    if NER_AVAILABLE and all_texts_to_ner:
-        try:
-            # unique texts to avoid redundant inference
-            unique_texts = [t for t in list(set(all_texts_to_ner)) if t and len(t) > 2]
-            if unique_texts:
-                print(f"  [worker] {len(unique_texts)}개 문단에 대해 NER 추론 수행 중...")
-                # The pipeline with batch_size=32 will handle the heavy lifting on GPU
-                ner_results = ner_pipeline(unique_texts)
-                ner_map = dict(zip(unique_texts, ner_results))
-        except Exception as e:
-            print(f"⚠️ 배치 NER 추론 중 오류: {e}")
-
-    # 3. Process each document using the pre-computed NER results
-    for data in chunk_data:
-        rowid = data['rowid']
-        tei = data['tei']
         if not tei:
             results.append(None)
             continue
-            
-        def repl_with_ner(m):
+        if 'data-col=""' in tei:
+            tei = tei.replace('data-col=""', 'data-col="')
+        def repl(m):
             open_tag = m.group(1)
             inner = m.group(2)
             close_tag = m.group(3)
-            
-            # Use pre-computed NER results for this specific text
-            ents = ner_map.get(inner, [])
-            
-            # Custom tagging logic that uses the provided entities
-            tagged_inner = _tag_fragment_optimized(inner, term_list, ents)
-            tagged_inner = _add_hanja_gloss_to_text(tagged_inner)
-            tagged_inner = _tag_persons_in_glosses_optimized(tagged_inner, ents)
-            return f"{open_tag}{tagged_inner}{close_tag}"
-
-        new_tei, nsubs = pattern.subn(repl_with_ner, tei)
-        tei_len = len(tei)
-        new_tei_len = len(new_tei)
-
-        if tei_len > 0 and new_tei_len > tei_len * 3.0:
-            new_tei = tei
-            nsubs = 0
-
-        if nsubs > 0:
-            results.append((rowid, new_tei, 'REFINED'))
-        else:
-            results.append((rowid, None, 'REFINED'))
-            
+            tagged = _tag_fragment(inner, term_list)
+            tagged = _add_hanja_gloss_to_text(tagged)
+            tagged = _tag_persons_in_glosses(tagged, term_list)
+            return f"{open_tag}{tagged}{close_tag}"
+        new_tei, nsubs = pattern.subn(repl, tei)
+        if len(tei) > 0 and len(new_tei) > len(tei) * 3.0:
+            new_tei, nsubs = tei, 0
+        results.append((rowid, new_tei, 'REFINED') if nsubs > 0 else (rowid, None, 'REFINED'))
     return results
 
 
-def _tag_fragment_optimized(fragment, term_list, precomputed_ents):
-    if not fragment:
-        return fragment
-    parts = []
-    for seg, is_tag in _split_xml_segments(fragment):
-        if is_tag:
-            m = re.match(r"^<gloss([^>]*)>(.*?)</gloss>$", seg, flags=re.DOTALL)
-            if m:
-                inner = m.group(2)
-                tagged_inner = _tag_text_segment_optimized(inner, term_list, []) 
-                parts.append(f"<gloss{m.group(1)}>{tagged_inner}</gloss>")
-            else:
-                parts.append(seg)
-        else:
-            parts.append(_tag_text_segment_optimized(seg, term_list, precomputed_ents))
-    return ''.join(parts)
-
-
-def _tag_text_segment_optimized(text, term_list, precomputed_ents):
-    if not text:
-        return text
-    spans = _find_spans_with_precomputed_ner(text, term_list, precomputed_ents)
-    if not spans:
-        return text
-    out = []
-    pos = 0
-    for start, end, repl in spans:
-        if start > pos:
-            out.append(text[pos:start])
-        out.append(repl)
-        pos = end
-    if pos < len(text):
-        out.append(text[pos:])
-    return ''.join(out)
-
-
-def _find_spans_with_precomputed_ner(text, term_list, ents):
-    spans = _find_spans(text, term_list)
-    if not ents or not text or len(text) < 2:
-        return spans
-
-    new_spans = []
-    def is_overlapping(s, e):
-        for s0, e0, _ in spans + new_spans:
-            if s < e0 and e > s0:
-                return True
-        return False
-
-    if NER_GROUPED:
-        for ent in ents:
-            label = ent.get('entity_group') or ent.get('entity') or ent.get('label')
-            if not label: continue
-            if 'PER' in str(label).upper():
-                s, e = int(ent.get('start', -1)), int(ent.get('end', -1))
-                if s < 0 or e < 0 or (e-s) < 2: continue
-                if not is_overlapping(s, e):
-                    name = text[s:e]
-                    if not re.search(r'[\u4E00-\u9FFF]', name):
-                        new_spans.append((s, e, f"<persName>{name}</persName>"))
-    else:
-        groups = _group_token_entities(ents, 0)
-        for s, e in groups:
-            if (e - s) < 2: continue
-            if not is_overlapping(s, e):
-                name = text[s:e]
-                if not re.search(r'[\u4E00-\u9FFF]', name):
-                    new_spans.append((s, e, f"<persName>{name}</persName>"))
-
-    all_spans = spans + new_spans
-    all_spans.sort(key=lambda x: x[0])
-    return all_spans
-
-
-def _tag_persons_in_glosses_optimized(text, precomputed_ents):
-    return _tag_persons_in_glosses(text)
+# NOTE: Optimized fragment functions removed to avoid offset mismatches and
+# incorrect precomputed NER offsets. The simpler, robust `_process_chunk` and
+# original tagging helpers are used instead.
 
 
 def process_db(table_name='raw_source_info', limit=5, all_tables=False, rowid=None, skip_neo4j=False):

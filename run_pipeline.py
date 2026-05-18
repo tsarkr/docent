@@ -26,17 +26,24 @@ else:
 STEPS = [
     (ROOT / 'upload_data.py', []),
     (ROOT / 'scripts' / 'pg_to_pg_with_tei.py', []),
-    (ROOT / 'scripts' / 'tag_tei_with_dict.py', ['--all', '--limit', '0']),
+    (ROOT / 'scripts' / 'tag_tei_with_dict.py', ['--all', '--limit', '0'], {
+        'USE_PROCESS_POOL': os.getenv('USE_PROCESS_POOL', '1'),
+        'MAX_WORKERS': os.getenv('MAX_WORKERS', str(max(4, (os.cpu_count() or 4)))),
+        'CHUNK_SIZE': os.getenv('CHUNK_SIZE', '200'),
+    }),
     (ROOT / 'scripts' / 'generate_cidoc_mappings.py', []),
     (ROOT / 'graph_builder.py', []),
 ]
 
 
-def run_step(path, args):
+def run_step(path, args, extra_env=None):
     print(f'--- START: {path.relative_to(ROOT)}')
     cmd = [PY, str(path)] + args
     try:
-        subprocess.run(cmd, check=True)
+        env = os.environ.copy()
+        if extra_env:
+            env.update({k: str(v) for k, v in extra_env.items() if v is not None and str(v) != ''})
+        subprocess.run(cmd, check=True, env=env)
     except subprocess.CalledProcessError as e:
         print(f'ERROR: step {path} failed with exit {e.returncode}')
         sys.exit(e.returncode)
@@ -48,11 +55,16 @@ def run_step(path, args):
 
 def main():
     print('Pipeline orchestrator starting')
-    for path, args in STEPS:
+    for step in STEPS:
+        if len(step) == 2:
+            path, args = step
+            extra_env = None
+        else:
+            path, args, extra_env = step
         if not path.exists():
             print(f'ERROR: required script missing: {path}')
             sys.exit(1)
-        run_step(path, args or [])
+        run_step(path, args or [], extra_env)
     print('Pipeline finished successfully')
 
 

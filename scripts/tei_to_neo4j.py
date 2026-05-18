@@ -155,9 +155,9 @@ def _ensure_schema(session):
     """Create constraints for faster MERGE."""
     import re
     constraints = [
-        "CREATE CONSTRAINT person_name IF NOT EXISTS FOR (n:Person) REQUIRE n.name IS UNIQUE",
-        "CREATE CONSTRAINT place_name IF NOT EXISTS FOR (n:Place) REQUIRE n.name IS UNIQUE",
-        "CREATE CONSTRAINT event_title IF NOT EXISTS FOR (n:Event) REQUIRE n.title IS UNIQUE",
+        "CREATE CONSTRAINT tei_person_name IF NOT EXISTS FOR (n:Person) REQUIRE n.name IS UNIQUE",
+        "CREATE CONSTRAINT tei_place_name IF NOT EXISTS FOR (n:Place) REQUIRE n.name IS UNIQUE",
+        "CREATE CONSTRAINT tei_event_title IF NOT EXISTS FOR (n:Event) REQUIRE n.title IS UNIQUE",
     ]
     for c in constraints:
         try:
