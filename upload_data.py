@@ -224,7 +224,8 @@ def process_task(file_name, table_name, skip_rows, dry_run=False):
             conn.execute(text(f"DROP TABLE IF EXISTS {table_name} CASCADE"))
 
         # write table
-        df = df.astype(str)
+        # Replace missing values with empty string to avoid literal 'None'/'nan' being written
+        df = df.fillna("")
         df.to_sql(table_name, engine, if_exists='replace', index=False, chunksize=500)
         print(f"   ✅ 성공! ({used_enc} / '{used_sep}' / {len(df)}행)")
         print(f"   Column mapping saved to: {map_path}")
