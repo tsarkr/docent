@@ -4,9 +4,11 @@
 Sequence:
  1) upload_data.py
  2) scripts/pg_to_pg_with_tei.py
- 3) scripts/tag_tei_with_gemma.py
- 4) scripts/generate_cidoc_mappings.py
- 5) graph_builder.py
+ 3) scripts/tag_tei_with_dict.py
+ 4) HITL pause for xlsx review
+ 5) scripts/update_historical_entities_from_excel.py
+ 6) scripts/generate_cidoc_mappings.py
+ 7) graph_builder.py
 
 Each step is run synchronously; on error the process exits with non-zero code.
 """
@@ -22,6 +24,8 @@ if PY_VENV.exists():
     PY = str(PY_VENV)
 else:
     PY = sys.executable
+
+XLSX_PATH = ROOT / 'Extracted_Historical_Entities.xlsx'
 
 STEPS = [
     (ROOT / 'upload_data.py', []),
@@ -53,7 +57,16 @@ def run_step(path, args, extra_env=None):
     print(f'--- DONE: {path.relative_to(ROOT)}')
 
 
+def pause_for_hitl(xlsx_path):
+    print('--- HOLD: HITL review required')
+    print(f'Please review and update the workbook before continuing: {xlsx_path}')
+    print('When the workbook is ready, press Enter to continue or Ctrl+C to stop.')
+    input()
+    print('--- RESUME: continuing after HITL review')
+
+
 def main():
+    skip_hitl_pause = os.getenv('SKIP_HITL_PAUSE', '').strip().lower() in {'1', 'true', 'yes', 'on'}
     print('Pipeline orchestrator starting')
     for step in STEPS:
         if len(step) == 2:
@@ -65,6 +78,17 @@ def main():
             print(f'ERROR: required script missing: {path}')
             sys.exit(1)
         run_step(path, args or [], extra_env)
+
+        if path.name == 'tag_tei_with_dict.py' and not skip_hitl_pause:
+            if not XLSX_PATH.exists():
+                print(f'ERROR: HITL workbook missing: {XLSX_PATH}')
+                sys.exit(1)
+            pause_for_hitl(XLSX_PATH)
+
+            # After HITL resume, continue pipeline. The tag script itself
+            # produces the reviewed workbook; we don't auto-run the old
+            # update_historical_entities_from_excel.py step anymore.
+
     print('Pipeline finished successfully')
 
 

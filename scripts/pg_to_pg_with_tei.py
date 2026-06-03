@@ -67,6 +67,14 @@ TAGGABLE_COLS = {
     '작성일', '발신일', '수신일', '수신일2'
 }
 
+TABLE_TAGGABLE_COLS = {
+    'raw_detail_place': {'명칭', '이칭', '행정구역명', '상태_참고', '비고', '참고노트'},
+}
+
+TABLE_ENTITY_TAGS = {
+    'raw_detail_place': {'placeName'},
+}
+
 
 def qname(name):
     # normalize filename -> table name
@@ -171,7 +179,10 @@ def build_entity_catalog(conn):
 
     if 'raw_bibliography' in tables:
         cols = get_table_columns(conn, 'raw_bibliography')
-        person_cols = _find_columns_by_keywords(cols, ['피고인', '관련인물', '인물'])
+        person_cols = _find_columns_by_keywords(
+            cols,
+            ['피고인', '관련인물', '인물', '작성자', '발신자', '수신자', '수신자2', '상위자료_작성자']
+        )
         for row in _select_column_values(conn, 'raw_bibliography', person_cols):
             for val in row:
                 for name in _split_names(val):
@@ -340,13 +351,17 @@ def make_tei_for_row(table, rowid, row, headers, entities):
     text = ET.SubElement(TEI, 'text')
     body = ET.SubElement(text, 'body')
     div = ET.SubElement(body, 'div', {'type':'record', 'xml:id': f'{table}-{rowid}'})
+    taggable_cols = TAGGABLE_COLS | TABLE_TAGGABLE_COLS.get(table, set())
+    allowed_tags = TABLE_ENTITY_TAGS.get(table)
+    if allowed_tags:
+        entities = [entity for entity in entities if entity.get('tag') in allowed_tags]
     for h in headers:
         v = row.get(h, '')
         if v is None:
             v = ''
         p = ET.SubElement(div, 'p')
         p.set('data-col', h)
-        if h in TAGGABLE_COLS:
+        if h in taggable_cols:
             tagged = tag_text(v, entities)
         else:
             tagged = escape(str(v))
@@ -365,7 +380,7 @@ def ensure_connection():
 
 def load_table_to_tei(table, conn, entities):
     print('-> table:', table)
-    headers = [c for c in get_table_columns(conn, table) if c not in ('tei', 'rowid')]
+    headers = [c for c in get_table_columns(conn, table) if c not in ('tei', 'rowid', 'tei_status')]
     if not headers:
         print('  no columns, skipping', table)
         return

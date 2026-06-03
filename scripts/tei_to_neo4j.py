@@ -81,7 +81,7 @@ PG_PASSWORD = _secret_or_env('PG_PASSWORD', '', SECRETS)
 PG_DATABASE = _secret_or_env('PG_DATABASE', 'postgres', SECRETS)
 
 HEURISTICS = {
-    'person': ['명칭', '피고인', '작성자', '저자', '인물', '성명', '이름'],
+    'person': ['명칭', '피고인', '작성자', '발신자', '수신자', '수신자2', '저자', '인물', '성명', '이름'],
     'place': ['장소', '명칭', '지역', '주소', '세부장소'],
     'event': ['사건', '사건명', '사건번호']
 }

@@ -50,6 +50,20 @@ class CidocTimelineGenerator:
         text = re.sub(r'[<>"\'\\]', '', text)
         return text
 
+    def _table_has_column(self, table, column_name):
+        self.cur.execute(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = %s
+              AND column_name = %s
+            LIMIT 1
+            """,
+            (table, column_name),
+        )
+        return self.cur.fetchone() is not None
+
     def _build_sequential_timeline(self, target_graph, table, rowid, tei, event_uri):
         pers_blocks = re.findall(r'<persName\s+ref="([^"]+)"[^>]*>(.*?)</persName>', tei, flags=re.DOTALL)
         if not pers_blocks:
@@ -130,10 +144,15 @@ class CidocTimelineGenerator:
         print("🔮 [클래스 구조 명시적 주입판] CIDOC-CRM 타임라인 변환을 가동합니다.")
 
         for table in tables:
-            self.cur.execute(f"SELECT count(*) FROM information_schema.columns WHERE table_name = '{table}' AND column_name = 'tei'")
-            if self.cur.fetchone()[0] == 0: continue
+            if not self._table_has_column(table, 'tei'):
+                continue
 
-            self.cur.execute(f'SELECT rowid, tei FROM "{table}" WHERE tei_status = \'REFINED\' ORDER BY rowid')
+            if self._table_has_column(table, 'tei_status'):
+                query = f'SELECT rowid, tei FROM "{table}" WHERE tei_status = \'REFINED\' ORDER BY rowid'
+            else:
+                query = f'SELECT rowid, tei FROM "{table}" ORDER BY rowid'
+
+            self.cur.execute(query)
             rows = self.cur.fetchall()
             
             if not rows: continue
