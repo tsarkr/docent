@@ -232,12 +232,19 @@ def find_raw_tables(cur) -> List[str]:
 def wrap_name_in_tei(tei_text: str, name: str, url: str) -> str:
     """
     Safely wraps a `name` inside TEI text with <persName ref="...">...</persName>.
-    It prevents wrapping names that are already within an existing <persName> block.
+    It also updates existing <persName> tags if they have a reference starting with '#' 
+    and match the target name.
     """
     if not tei_text or name not in tei_text:
         return tei_text
 
-    # Split into list of XML tags and text nodes
+    # 1. Update existing tags that have internal references
+    # Example: <persName ref="#some_id">Name</persName> -> <persName ref="URL">Name</persName>
+    # We use a non-greedy match for the content to avoid over-matching.
+    internal_ref_pattern = re.compile(rf'<persName\s+ref="#[^"]+"[^>]*>({re.escape(name)})</persName>')
+    tei_text = internal_ref_pattern.sub(f'<persName ref="{url}">\\1</persName>', tei_text)
+
+    # 2. Wrap occurrences that are not already in a persName tag
     tokens = re.split(r'(<[^>]+>)', tei_text)
     result = []
     in_persname = 0

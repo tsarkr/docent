@@ -34,3 +34,5 @@ scripts/__pycache__/tag_tei_with_gemma.cpython-312.pyc
 scripts/__pycache__/tag_tei_with_gemma.cpython-312.pyc
 scripts/__pycache__/tag_tei_with_gemma.cpython-312.pyc
 scripts/tei_to_neo4j.py.bak
+CIDOC_Timeline_Mappings.ttl
+Extracted_Historical_Entities.xlsx

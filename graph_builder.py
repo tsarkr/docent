@@ -53,6 +53,26 @@ def _secret_or_env(key, default="", secrets_dict=None):
 
 SECRETS = _load_secrets()
 
+RELATION_MAPPING = {
+    "부친": "P152_has_parent",
+    "모친": "P152_has_parent",
+    "딸": "P152_has_parent",
+    "아들": "P152_has_parent",
+    "자녀": "P152_has_parent",
+    "동지": "foaf:knows",
+    "소속": "foaf:member"
+}
+
+
+def _split_names(val):
+    """Split names in a cell by common delimiters."""
+    if not val or pd.isna(val):
+        return []
+    import re
+    # Split by ;, / | · and whitespace
+    parts = re.split(r'[;,/|·\s]+', str(val).strip())
+    return [p for p in parts if p and p.lower() != 'none' and p.lower() != 'nan']
+
 PG_CONFIG = {
     "host": _secret_or_env("PG_HOST", "11e.kr", SECRETS),
     "port": _secret_or_env("PG_PORT", "5432", SECRETS),
@@ -689,6 +709,78 @@ def build_ultimate_graph():
                     print(f"⚠️ TEI 파싱 중 오류 (사건id={event_id}): {e}")
 
             _flush_acc()
+
+            print("👨‍👩‍👧‍👦 인물 간 관계망 분석 및 주입 중 (원천 컬럼 기반)...")
+            # 분석 대상 테이블들
+            relation_source_tables = ['raw_bibliography', 'raw_event_info', 'raw_source_info']
+            MAIN_PERSON_KWS = ['피고인', '성명', '이름', '인물', '명칭']
+
+            for table_name in relation_source_tables:
+                try:
+                    df_rel = pd.read_sql(f'SELECT * FROM "{table_name}"', pg_engine)
+                    cols = df_rel.columns.tolist()
+
+                    # 주체(Main Person) 컬럼 식별
+                    subject_cols = [c for c in cols if any(kw in c for kw in MAIN_PERSON_KWS) and c not in RELATION_MAPPING]
+                    # 관계(Relation) 컬럼 식별
+                    rel_cols = [c for c in cols if any(rk in c for rk in RELATION_MAPPING.keys())]
+
+                    if not subject_cols or not rel_cols:
+                        continue
+
+                    print(f"  ✓ {table_name}: 주체 컬럼({len(subject_cols)}), 관계 컬럼({len(rel_cols)}) 발견")
+
+                    rel_p_p_acc = [] # (src_name, rel_type, dst_name)
+
+                    for _, row in df_rel.iterrows():
+                        subjects = []
+                        for sc in subject_cols:
+                            subjects.extend(_split_names(row.get(sc)))
+                        
+                        if not subjects:
+                            continue
+
+                        for rc in rel_cols:
+                            # 매핑되는 관계 키 찾기
+                            matched_key = next((k for k in RELATION_MAPPING.keys() if k in rc), None)
+                            if not matched_key:
+                                continue
+                            
+                            rel_type = RELATION_MAPPING[matched_key]
+                            related_names = _split_names(row.get(rc))
+                            
+                            for p_related in related_names:
+                                for p_subject in subjects:
+                                    if p_related == p_subject:
+                                        continue
+                                    
+                                    # 방향성 및 타입 결정
+                                    if matched_key in ("딸", "아들", "자녀"):
+                                        # 자녀 -> 부모 (Subject가 부모)
+                                        rel_p_p_acc.append({'src': p_related, 'rel': rel_type, 'dst': p_subject})
+                                    elif matched_key in ("부친", "모친"):
+                                        # 자녀 -> 부모 (Subject가 자녀)
+                                        rel_p_p_acc.append({'src': p_subject, 'rel': rel_type, 'dst': p_related})
+                                    else:
+                                        # 기본: 주체 -> 관계인물
+                                        rel_p_p_acc.append({'src': p_subject, 'rel': rel_type, 'dst': p_related})
+
+                    if rel_p_p_acc:
+                        # 관계 타입별로 묶어서 실행
+                        rel_types_acc = set(r['rel'] for r in rel_p_p_acc)
+                        for rt in rel_types_acc:
+                            batch = [r for r in rel_p_p_acc if r['rel'] == rt]
+                            query = """
+                                UNWIND $data AS row
+                                MERGE (a:인물 {명칭: row.src})
+                                MERGE (b:인물 {명칭: row.dst})
+                                MERGE (a)-[:`REL_TYPE`]->(b)
+                            """.replace("REL_TYPE", rt)
+                            _run_batches(session, query, batch, batch_size=5000)
+                        print(f"    ✓ {len(rel_p_p_acc)}개 인물 관계 추가됨")
+
+                except Exception as e:
+                    print(f"⚠️ {table_name} 관계 분석 중 오류: {e}")
 
             # CIDOC-CRM 매핑 적용: Postgres의 tei_cidoc_mappings 테이블에서 TTL 불러와 병합
             print("🔧 CIDOC 매핑 적용을 시도합니다 (Postgres 테이블: tei_cidoc_mappings)")

@@ -5,10 +5,11 @@ Sequence:
  1) upload_data.py
  2) scripts/pg_to_pg_with_tei.py
  3) scripts/tag_tei_with_dict.py
- 4) HITL pause for xlsx review
- 5) scripts/update_historical_entities_from_excel.py
- 6) scripts/generate_cidoc_mappings.py
- 7) graph_builder.py
+ 4) scripts/link_persnames_i815.py
+ 5) scripts/extract_all_entities.py
+ 6) HITL pause for xlsx review
+ 7) scripts/generate_cidoc_mappings.py
+ 8) graph_builder.py
 
 Each step is run synchronously; on error the process exits with non-zero code.
 """
@@ -30,11 +31,13 @@ XLSX_PATH = ROOT / 'Extracted_Historical_Entities.xlsx'
 STEPS = [
     (ROOT / 'upload_data.py', []),
     (ROOT / 'scripts' / 'pg_to_pg_with_tei.py', []),
-    (ROOT / 'scripts' / 'tag_tei_with_dict.py', ['--all', '--limit', '0'], {
+    (ROOT / 'scripts' / 'tag_tei_with_dict.py', ['--all', '--limit', '0', '--skip-hitl'], {
         'USE_PROCESS_POOL': os.getenv('USE_PROCESS_POOL', '1'),
         'MAX_WORKERS': os.getenv('MAX_WORKERS', str(max(4, (os.cpu_count() or 4)))),
         'CHUNK_SIZE': os.getenv('CHUNK_SIZE', '200'),
     }),
+    (ROOT / 'scripts' / 'link_persnames_i815.py', ['--apply']),
+    (ROOT / 'scripts' / 'extract_all_entities.py', []),
     (ROOT / 'scripts' / 'generate_cidoc_mappings.py', []),
     (ROOT / 'graph_builder.py', []),
 ]
@@ -57,6 +60,19 @@ def run_step(path, args, extra_env=None):
     print(f'--- DONE: {path.relative_to(ROOT)}')
 
 
+def convert_csv_to_xlsx(csv_path, xlsx_path):
+    print(f'🔁 Converting {csv_path.name} to {xlsx_path.name}...')
+    try:
+        import pandas as pd
+        df = pd.read_csv(csv_path, encoding='utf-8-sig')
+        df.to_excel(xlsx_path, index=False)
+        print(f'✅ Conversion complete: {xlsx_path.name}')
+    except ImportError:
+        print('⚠️ pandas not found, skipping XLSX conversion. Please use the CSV file.')
+    except Exception as e:
+        print(f'⚠️ Conversion failed: {e}')
+
+
 def pause_for_hitl(xlsx_path):
     print('--- HOLD: HITL review required')
     print(f'Please review and update the workbook before continuing: {xlsx_path}')
@@ -77,17 +93,26 @@ def main():
         if not path.exists():
             print(f'ERROR: required script missing: {path}')
             sys.exit(1)
+        
         run_step(path, args or [], extra_env)
 
-        if path.name == 'tag_tei_with_dict.py' and not skip_hitl_pause:
-            if not XLSX_PATH.exists():
-                print(f'ERROR: HITL workbook missing: {XLSX_PATH}')
-                sys.exit(1)
-            pause_for_hitl(XLSX_PATH)
+        # Refresh XLSX after extract_all_entities.py
+        if path.name == 'extract_all_entities.py':
+            csv_path = ROOT / 'Extracted_Historical_Entities.csv'
+            xlsx_path = ROOT / 'Extracted_Historical_Entities.xlsx'
+            if csv_path.exists():
+                convert_csv_to_xlsx(csv_path, xlsx_path)
 
-            # After HITL resume, continue pipeline. The tag script itself
-            # produces the reviewed workbook; we don't auto-run the old
-            # update_historical_entities_from_excel.py step anymore.
+        if path.name == 'extract_all_entities.py' and not skip_hitl_pause:
+            xlsx_path = ROOT / 'Extracted_Historical_Entities.xlsx'
+            if not xlsx_path.exists():
+                # Fallback to CSV if XLSX conversion failed
+                xlsx_path = ROOT / 'Extracted_Historical_Entities.csv'
+            
+            if not xlsx_path.exists():
+                print(f'ERROR: HITL file missing: {xlsx_path}')
+                sys.exit(1)
+            pause_for_hitl(xlsx_path)
 
     print('Pipeline finished successfully')
 

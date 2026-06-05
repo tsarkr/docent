@@ -81,7 +81,7 @@ PG_PASSWORD = _secret_or_env('PG_PASSWORD', '', SECRETS)
 PG_DATABASE = _secret_or_env('PG_DATABASE', 'postgres', SECRETS)
 
 HEURISTICS = {
-    'person': ['명칭', '피고인', '작성자', '발신자', '수신자', '수신자2', '저자', '인물', '성명', '이름'],
+    'person': ['명칭', '피고인', '작성자', '발신자', '수신자', '수신자2', '저자', '인물', '성명', '이름', '부친', '모친', '딸', '아들', '자녀', '동지'],
     'place': ['장소', '명칭', '지역', '주소', '세부장소'],
     'event': ['사건', '사건명', '사건번호']
 }
@@ -92,6 +92,26 @@ TABLE_INFO = {
     'raw_detail_place': 'Detailed place information',
     'raw_event_place_link': 'Event-place links',
 }
+
+RELATION_MAPPING = {
+    "부친": "P152_has_parent",
+    "모친": "P152_has_parent",
+    "딸": "P152_has_parent",
+    "아들": "P152_has_parent",
+    "자녀": "P152_has_parent",
+    "동지": "foaf:knows",
+    "소속": "foaf:member"
+}
+
+
+def _split_names(val):
+    """Split names in a cell by common delimiters."""
+    if not val:
+        return []
+    import re
+    # Split by ;, / | · and whitespace
+    parts = re.split(r'[;,/|·\s]+', str(val).strip())
+    return [p for p in parts if p and p.lower() != 'none']
 
 
 def _env_int(name, default):
@@ -259,40 +279,69 @@ def load_from_postgres_to_neo4j(wipe=False):
                 all_events = set()
                 rel_p_e = set() # (person, event)
                 rel_e_p = set() # (event, place)
+                rel_p_p = set() # (person_src, rel, person_dst)
+
+                # Identify subject person columns (Main Person)
+                MAIN_PERSON_KWS = ['피고인', '성명', '이름', '인물', '명칭']
+                subject_cols = [c for c in person_cols if any(kw in c for kw in MAIN_PERSON_KWS) and c not in RELATION_MAPPING]
+                if not subject_cols and person_cols:
+                    subject_cols = [person_cols[0]]
 
                 # Collect all entities and relationships in memory first
                 for row in rows:
-                    row_persons = []
+                    row_persons_by_col = {}
                     row_places = []
                     row_events = []
 
                     for col in person_cols:
                         val = row.get(col)
                         if val and str(val).strip() and str(val).lower() != 'none':
-                            row_persons.append(str(val).strip())
+                            name = str(val).strip()
+                            if col not in row_persons_by_col: row_persons_by_col[col] = []
+                            row_persons_by_col[col].append(name)
+                            all_persons.add(name)
 
                     for col in place_cols:
                         val = row.get(col)
                         if val and str(val).strip() and str(val).lower() != 'none':
-                            row_places.append(str(val).strip())
+                            pl = str(val).strip()
+                            row_places.append(pl)
+                            all_places.add(pl)
 
                     for col in event_cols:
                         val = row.get(col)
                         if val and str(val).strip() and str(val).lower() != 'none':
-                            row_events.append(str(val).strip())
+                            e = str(val).strip()
+                            row_events.append(e)
+                            all_events.add(e)
 
-                    # Track unique entities
-                    for p in row_persons: all_persons.add(p)
-                    for pl in row_places: all_places.add(pl)
-                    for e in row_events: all_events.add(e)
-
-                    # Track relationships
-                    for p in set(row_persons):
+                    # Event relationships
+                    row_all_persons = [p for names in row_persons_by_col.values() for p in names]
+                    for p in set(row_all_persons):
                         for e in set(row_events):
                             rel_p_e.add((p, e))
                     for e in set(row_events):
                         for pl in set(row_places):
                             rel_e_p.add((e, pl))
+
+                    # Person-Person relationships based on RELATION_MAPPING
+                    subjects = [p for sc in subject_cols for p in row_persons_by_col.get(sc, [])]
+                    for col, names in row_persons_by_col.items():
+                        if col in RELATION_MAPPING:
+                            rel_type = RELATION_MAPPING[col]
+                            for p_related in names:
+                                for p_subject in subjects:
+                                    if p_related == p_subject: continue
+                                    # Directionality handling
+                                    if col == "딸":
+                                        # Daughter -> Parent
+                                        rel_p_p.add((p_related, rel_type, p_subject))
+                                    elif col in ("부친", "모친"):
+                                        # Child -> Parent
+                                        rel_p_p.add((p_subject, rel_type, p_related))
+                                    else:
+                                        # Default: Subject -> Related
+                                        rel_p_p.add((p_subject, rel_type, p_related))
 
                 # Batch Create Nodes
                 if all_persons:
@@ -325,6 +374,21 @@ def load_from_postgres_to_neo4j(wipe=False):
                         MATCH (b:Place {name:row.pl})
                         MERGE (a)-[:P7_took_place_at]->(b)
                     """, recs, batch_size=NEO4J_BATCH_SIZE)
+
+                if rel_p_p:
+                    print(f"  → Creating {len(rel_p_p)} Person-Person relationships...")
+                    # Group by relation type for efficiency
+                    rel_types = set(r[1] for r in rel_p_p)
+                    for rt in rel_types:
+                        # Use backticks for Neo4j relationship types with colons
+                        recs = [{"src": src, "dst": dst} for src, rel, dst in rel_p_p if rel == rt]
+                        print(f"    → {rt} ({len(recs)} pairs)")
+                        _run_batches(session, f"""
+                            UNWIND $batch as row
+                            MATCH (a:Person {{name:row.src}})
+                            MATCH (b:Person {{name:row.dst}})
+                            MERGE (a)-[:`{rt}`]->(b)
+                        """, recs, batch_size=NEO4J_BATCH_SIZE)
 
                 print(f'  ✅ {table_name} complete')
 
