@@ -27,11 +27,23 @@ except Exception:
     ollama = None
 
 
-def extract_keywords_from_sentence(sentence, model="gemma4:26b"):
+def analyze_user_query(sentence, model="gemma4:26b"):
+    """
+    사용자의 질문을 분석하여 의도(intent)와 핵심 키워드를 추출합니다.
+    """
     system_prompt = (
-        "당신은 역사 지식 검색을 위한 키워드 추출기입니다. 사용자의 질문에서 지식 그래프 검색에 필요한 "
-        "핵심 고유명사(인물, 장소, 사건, 단체 등)를 최대 3개만 추출하여 쉼표로 구분해 반환하시오. "
-        "서론, 결론, 부가 설명은 절대 금지합니다."
+        "당신은 역사 지식 검색을 위한 전문 분석가입니다. 사용자의 질문을 분석하여 다음 JSON 형식으로만 답하십시오.\n"
+        "{\n"
+        "  \"intent\": \"질문의 의도 (ENTITY_SEARCH, RELATION_FIND, TEMPORAL_QUERY, DOCUMENT_REQUEST 중 하나)\",\n"
+        "  \"keywords\": [\"핵심 키워드 1\", \"핵심 키워드 2\", \"핵심 키워드 3\"],\n"
+        "  \"focus\": \"분석의 핵심 초점 (인물, 사건, 장소 등)\",\n"
+        "  \"explanation\": \"의도 분석에 대한 간략한 이유\"\n"
+        "}\n"
+        "- ENTITY_SEARCH: 특정 인물, 장소, 사건 등에 대한 일반적인 정보 검색\n"
+        "- RELATION_FIND: 두 개체 간의 관계나 연결 고리 검색\n"
+        "- TEMPORAL_QUERY: 특정 시기나 시간 순서에 따른 사건 검색\n"
+        "- DOCUMENT_REQUEST: 특정 사료나 문헌 검색\n"
+        "부가적인 설명 없이 JSON만 반환하십시오."
     )
     try:
         if ollama is None:
@@ -42,14 +54,29 @@ def extract_keywords_from_sentence(sentence, model="gemma4:26b"):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": str(sentence or "").strip()},
             ],
+            format="json"
         )
         content = ""
         if isinstance(resp, dict):
             content = resp.get("message", {}).get("content", "") or ""
-        parts = [p.strip() for p in str(content).split(",") if p and p.strip()]
-        return parts[:3] if parts else [str(sentence or "").strip()]
-    except Exception:
-        return [str(sentence or "").strip()]
+        
+        data = json.loads(content)
+        return data
+    except Exception as e:
+        # Fallback for errors or missing ollama
+        return {
+            "intent": "ENTITY_SEARCH",
+            "keywords": [str(sentence or "").strip()],
+            "focus": "unknown",
+            "explanation": f"분석 실패로 인한 기본 검색 (에러: {str(e)})"
+        }
+
+
+def extract_keywords_from_sentence(sentence, model="gemma4:26b"):
+    # 하위 호환성을 위해 유지하되 analyze_user_query를 호출
+    analysis = analyze_user_query(sentence, model)
+    return analysis.get("keywords", [sentence])
+
 
 def export_to_cidoc_ttl(nodes_map, edges_list):
     """지식망 그래프 데이터를 CIDOC-CRM 규격의 Turtle(TTL) 포맷 문자열로 변환합니다."""
@@ -187,7 +214,7 @@ class HybridHistoryDocent:
         terms = list(dict.fromkeys(terms))[:10]
         cypher = """
                 MATCH (n)
-                    WHERE any(term IN $terms WHERE any(k IN ['명칭','한글독음','한글명칭','제목','사건명','id','name','title']
+                    WHERE any(term IN $terms WHERE any(k IN ['명칭','한글독음','한글명칭','제목','사건명','id','name','title','uid']
               WHERE n[k] IS NOT NULL AND toLower(toString(n[k])) CONTAINS toLower(term)))
         OPTIONAL MATCH (n)-[r]-(m)
         RETURN DISTINCT n, r, m
@@ -218,6 +245,7 @@ class HybridHistoryDocent:
                 results.append({"error": str(e)})
 
         return cypher, params, results
+
     def get_hybrid_context(self, terms):
         t_start = time.monotonic()
         found_ids = set()
@@ -256,9 +284,9 @@ class HybridHistoryDocent:
 
                 results_nodes = []
                 if use_fulltext:
-                    for st in list(dict.fromkeys(search_terms)):
+                    for st_term in list(dict.fromkeys(search_terms)):
                         try:
-                            q = self._run_and_log(session, "CALL db.index.fulltext.queryNodes(\"namesIndex\", $q) YIELD node, score RETURN DISTINCT node, score ORDER BY score DESC LIMIT 50", q=st)
+                            q = self._run_and_log(session, "CALL db.index.fulltext.queryNodes(\"namesIndex\", $q) YIELD node, score RETURN DISTINCT node, score ORDER BY score DESC LIMIT 50", q=st_term)
                             for rec in q:
                                 results_nodes.append(rec['node'])
                         except Exception:
@@ -269,19 +297,19 @@ class HybridHistoryDocent:
                     # fallback: case-insensitive CONTAINS across common fields
                     search_query = """
                     MATCH (n)
-                    WHERE any(k IN ['명칭','한글독음','한글명칭','제목','사건명','id','name','title'] 
+                    WHERE any(k IN ['명칭','한글독음','한글명칭','제목','사건명','id','name','title','uid'] 
                               WHERE n[k] IS NOT NULL AND toLower(toString(n[k])) CONTAINS toLower($term))
                     RETURN DISTINCT n
                     LIMIT 50
                     """
-                    for st in list(dict.fromkeys(search_terms)):
-                        res = self._run_and_log(session, search_query, term=st)
+                    for st_term in list(dict.fromkeys(search_terms)):
+                        res = self._run_and_log(session, search_query, term=st_term)
                         for record in res:
                             results_nodes.append(record['n'])
 
                 # process resulting nodes
                 for node in results_nodes:
-                    node_id = node.get('id') or node.get('명칭') or node.get('name') or node.get('title') or 'unknown'
+                    node_id = node.get('uid') or node.get('id') or node.get('명칭') or node.get('name') or node.get('title') or 'unknown'
                     found_ids.add(str(node_id))
 
                     labels = list(node.labels)
@@ -301,6 +329,7 @@ class HybridHistoryDocent:
                         })
         except Exception as e:
             st.warning(f"⚠️ Neo4j 초기 검색 실패: {e}")
+        
         # record time after initial search
         try:
             t_after_search = time.monotonic()
@@ -315,17 +344,42 @@ class HybridHistoryDocent:
                 return nodes, edges, evidences
             
             with self.neo4j_driver.session() as session:
-                # 찾은 노드들의 직접 연결 관계와 간접 연결 모두 찾기
+                # 찾은 노드들의 직접 연결 관계와 간접 연결(인물-사건-인물) 모두 찾기
                 graph_query = """
                 MATCH (n)
-                WHERE any(k IN ['id','명칭','한글독음','한글명칭','name','title'] WHERE n[k] IS NOT NULL AND toString(n[k]) IN $search_ids)
+                WHERE any(k IN ['id','명칭','한글독음','한글명칭','name','title','uid'] WHERE n[k] IS NOT NULL AND toString(n[k]) IN $search_ids)
+                
+                // 1-hop 관계: 모든 직접 연결
                 OPTIONAL MATCH (n)-[r]-(m)
-                RETURN DISTINCT n, r, m, labels(n) as n_labels, labels(m) as m_labels
+                
+                // 2-hop 관계 확장: 인물 -> 사건 -> 다른 인물 (CIDOC-CRM 핵심 관계)
+                WITH n, r, m, labels(n) as n_labels, labels(m) as m_labels
+                OPTIONAL MATCH (n)-[:P14_carried_out_by|P11_had_participant]-(e:사건)-[:P14_carried_out_by|P11_had_participant]-(p:인물)
+                WHERE n:인물 AND n <> p
+                
+                RETURN DISTINCT n, r, m, n_labels, m_labels, e, p, labels(e) as e_labels, labels(p) as p_labels
                 """
                 results = self._run_and_log(session, graph_query, search_ids=list(found_ids))
                 
-                edges_set = set()
-                
+                # 관계 타입 한글 매핑 (CIDOC-CRM, FOAF)
+                REL_LABEL_MAP = {
+                    "P14_carried_out_by": "수행(참여)",
+                    "P7_took_place_at": "발생 장소",
+                    "P152_has_parent": "가족 관계",
+                    "foaf:knows": "동지/지인",
+                    "foaf:member": "소속 기구",
+                    "P11_had_participant": "참여 인물",
+                    "P108_has_produced": "생성/저작",
+                    "P102_has_title": "명칭/제목",
+                    "소속": "소속"
+                }
+
+                def _get_rel_label(rtype):
+                    if not rtype: return "관련됨"
+                    # 특수문자 제거 후 매핑 확인
+                    clean_type = str(rtype).replace('`', '')
+                    return REL_LABEL_MAP.get(clean_type, clean_type)
+
                 def _format_label_text(base_name, reading):
                     base = str(base_name or '')
                     read = str(reading or '')
@@ -336,13 +390,13 @@ class HybridHistoryDocent:
                 def add_node(node, labels_list):
                     if not node:
                         return
-                    # 원래 id/명칭을 raw_id로 보존하고, 컴포넌트 파일 요청 이슈를 피하기 위해 ASCII-safe 해시 id 사용
-                    raw_id = node.get('id') or node.get('명칭') or node.get('name') or node.get('title') or getattr(node, 'element_id', getattr(node, 'id', 'unknown'))
+                    # 원래 id/명칭/uid를 raw_id로 보존
+                    raw_id = node.get('uid') or node.get('id') or node.get('명칭') or node.get('name') or node.get('title') or getattr(node, 'element_id', getattr(node, 'id', 'unknown'))
                     nid = 'n' + hashlib.sha1(str(raw_id).encode('utf-8')).hexdigest()[:12]
                     if nid in nodes:
                         return nid
 
-                    # 레이블에 따라 표시용 라벨과 색 결정 (표시는 한국어 유지)
+                    # 레이블에 따라 표시용 라벨과 색 결정
                     if '문건' in labels_list:
                         base = node.get('제목') or '문건'
                         label_text = _format_label_text(base, node.get('한글독음'))
@@ -377,27 +431,29 @@ class HybridHistoryDocent:
                     return nid
                 
                 for rec in results:
-                    n = rec['n']
-                    m = rec['m']
-                    r = rec['r']
-                    n_labels = rec['n_labels']
-                    m_labels = rec['m_labels']
-
-                    n_nid = add_node(n, n_labels)
-                    m_nid = add_node(m, m_labels) if m else None
-
-                    # if there's a relationship, add an edge using hashed ids
-                    if r is not None and n_nid and m_nid:
-                        try:
-                            rel_type = getattr(r, 'type', None) or r.__class__.__name__
-                        except Exception:
-                            rel_type = 'relatedTo'
-                        edge = {'source': n_nid, 'target': m_nid, 'label': str(rel_type)}
-                        # avoid duplicates
-                        if edge not in edges:
-                            edges.append(edge)
+                    n_nid = add_node(rec['n'], rec['n_labels'])
+                    m_nid = add_node(rec['m'], rec['m_labels']) if rec['m'] else None
+                    
+                    # 1-hop 관계 추가
+                    if rec['r'] and n_nid and m_nid:
+                        rtype = getattr(rec['r'], 'type', None)
+                        edge = {'source': n_nid, 'target': m_nid, 'label': _get_rel_label(rtype)}
+                        if edge not in edges: edges.append(edge)
+                        
+                    # 2-hop 관계 추가 (인물-사건-인물)
+                    if rec['e'] and rec['p']:
+                        e_nid = add_node(rec['e'], rec['e_labels'])
+                        p_nid = add_node(rec['p'], rec['p_labels'])
+                        
+                        if n_nid and e_nid:
+                            edge1 = {'source': n_nid, 'target': e_nid, 'label': "수행/참여"}
+                            if edge1 not in edges: edges.append(edge1)
+                        if e_nid and p_nid:
+                            edge2 = {'source': e_nid, 'target': p_nid, 'label': "수행/참여"}
+                            if edge2 not in edges: edges.append(edge2)
         except Exception as e:
             st.warning(f"⚠️ Neo4j 그래프 확장 실패: {e}")
+
         # record time after graph expansion
         try:
             t_after_expand = time.monotonic()
@@ -411,21 +467,15 @@ class HybridHistoryDocent:
         # 항상 튜플 반환: 노드/엣지/증거 리스트
         return nodes, edges, evidences
 
+
 def load_faiss_index():
-    """Attempt to load a FAISS index and its metadata.
-    This is a conservative stub: if FAISS or numpy is unavailable, return (None, None, None).
-    If you have a saved index and meta, extend this function to load them from files.
-    """
+    """Attempt to load a FAISS index and its metadata."""
     if faiss is None or np is None:
         return None, None, None
     try:
-        # Placeholder: no default index path configured. Return None to indicate not available.
         return None, None, None
     except Exception:
         return None, None, None
-
-
-# OpenAI integration removed from this app; using ollama/simple fallback instead
 
 
 def _pg_conn():
@@ -445,9 +495,7 @@ def _pg_conn():
 
 
 def fetch_pg_rows_for_node(name, limit_per_table=10, max_text_cols=6):
-    """Search all tables with a `tei` column for rows matching `name`.
-    Returns list of dicts: {table, schema, rowid, id_col, match_cols, snippets, tei}
-    """
+    """Search all tables with a `tei` column for rows matching `name`."""
     conn = _pg_conn()
     if conn is None:
         return []
@@ -466,7 +514,6 @@ def fetch_pg_rows_for_node(name, limit_per_table=10, max_text_cols=6):
         tables = cur.fetchall()
         for schema, table in tables:
             fq = f'"{schema}"."{table}"' if schema and schema != 'public' else f'"{table}"'
-            # determine the table's first column to use as id (ordinal_position=1)
             try:
                 cur.execute("""
                 SELECT column_name
@@ -480,7 +527,6 @@ def fetch_pg_rows_for_node(name, limit_per_table=10, max_text_cols=6):
             except Exception:
                 id_col = 'rowid'
 
-            # Discover text-like columns to search (limit for performance)
             text_cols = []
             try:
                 cur.execute("""
@@ -493,7 +539,6 @@ def fetch_pg_rows_for_node(name, limit_per_table=10, max_text_cols=6):
                 for (cname,) in cur.fetchall():
                     if cname not in text_cols:
                         text_cols.append(cname)
-                # prioritize common semantic columns if present
                 for cname in ['명칭', '사건명', '제목']:
                     if cname in text_cols:
                         text_cols.remove(cname)
@@ -501,7 +546,6 @@ def fetch_pg_rows_for_node(name, limit_per_table=10, max_text_cols=6):
             except Exception:
                 text_cols = []
 
-            # build search predicates across id_col, tei, and a limited set of text columns
             search_cols = [id_col]
             if 'tei' not in search_cols:
                 search_cols.append('tei')
@@ -515,13 +559,10 @@ def fetch_pg_rows_for_node(name, limit_per_table=10, max_text_cols=6):
             q = f'SELECT * FROM {fq} WHERE ({or_clauses}) LIMIT {limit_per_table}'
             params = [f'%{name}%'] * len(search_cols)
             try:
-                # log the parameterized query before execution
                 queries_log.append((q, list(params)))
                 cur.execute(q, params)
                 rows = cur.fetchall()
-                # map columns dynamically from cursor description
                 cols = [d[0] for d in cur.description]
-                # collect raw rows for debugging
                 raw_rows = []
                 for row in rows:
                     rowdict = {
@@ -545,18 +586,15 @@ def fetch_pg_rows_for_node(name, limit_per_table=10, max_text_cols=6):
                             rowdict['snippets'][col] = str(val) if val is not None else ''
                     raw_rows.append(raw_row)
                     out.append(rowdict)
-                # attach raw rows to session state for UI inspection
                 try:
                     st.session_state.setdefault('last_raw_rows', []).extend([{'table': table, 'rows': raw_rows}])
                 except Exception:
                     pass
             except Exception:
-                # skip problematic table
                 continue
     finally:
         cur.close()
         conn.close()
-        # store executed queries in session state for UI inspection
         try:
             st.session_state['last_queries'] = queries_log
         except Exception:
@@ -623,9 +661,6 @@ def build_pg_context(pg_rows, max_rows=20):
     return items
 
 
-# OpenAI embedding removed (not used)
-
-
 def simple_fallback_summary(search_term, evidences, retrieved=None):
     """Compose a short, non-AI summary from evidences and optional retrieved texts."""
     parts = [f"'{search_term}' 관련 근거 요약:"]
@@ -652,13 +687,13 @@ def simple_fallback_summary(search_term, evidences, retrieved=None):
 
 
 def get_docent():
-    """Return a cached HybridHistoryDocent instance (stored in Streamlit session state)."""
+    """Return a cached HybridHistoryDocent instance."""
     if 'docent' not in st.session_state:
         st.session_state['docent'] = HybridHistoryDocent()
     return st.session_state['docent']
 
 # ==========================================
-# 3. UI 및 Gemma 3:12b 해설 파트
+# 3. UI 및 Gemma 4:26b 해설 파트
 # ==========================================
 st.set_page_config(layout="wide", page_title="역사 도슨트")
 st.title("🇰🇷 대한민국 역사 도슨트 (Gemma4:26b)")
@@ -687,14 +722,22 @@ if len(search_term) < 2:
 docent = get_docent()
 if ' ' in search_term:
     with st.spinner("🧠 AI가 질문의 의도를 분석 중입니다..."):
-        search_keywords = extract_keywords_from_sentence(search_term)
+        analysis = analyze_user_query(search_term)
+        search_keywords = analysis.get("keywords", [search_term])
+        intent = analysis.get("intent", "ENTITY_SEARCH")
+        focus = analysis.get("focus", "unknown")
+    
+    col_intent, col_focus = st.columns(2)
+    with col_intent:
+        st.info(f"🎯 **의도**: {intent}")
+    with col_focus:
+        st.success(f"🔍 **초점**: {focus}")
     st.caption(f"✨ 분석된 검색어: {', '.join(search_keywords)}")
 else:
     search_keywords = [search_term]
 
 nodes_map, edges_list, evidences = docent.get_hybrid_context(search_keywords)
 
-# Prefetch PG rows for visible nodes to reduce hallucination in storytelling
 try:
     raw_ids = []
     for _k, _v in (nodes_map or {}).items():
@@ -734,14 +777,11 @@ with c1:
             use_container_width=True
         )
     if nodes_map:
-        # Build Node objects with display label and include raw_id as tooltip/title
         nodes = []
         for k, v in nodes_map.items():
             node_label = v.get('label')
             raw_id = v.get('raw_id', '')
-            # pass raw_id as `title` so tooltip shows the original identifier/name
             nodes.append(Node(id=k, label=node_label, color=v.get('color'), shape=v.get('shape'), size=25, title=str(raw_id)))
-        # convert edge dicts to streamlit_agraph Edge objects
         edges = []
         try:
             for e in edges_list:
@@ -752,13 +792,11 @@ with c1:
         except Exception:
             edges = []
 
-        # Shuffle node/edge order to encourage re-layout when requested
         if st.session_state.graph_epoch:
             rng = random.Random(st.session_state.graph_epoch)
             rng.shuffle(nodes)
             rng.shuffle(edges)
 
-        # Prefer a repulsion-based solver and larger spacing to avoid node collisions
         config = Config(
             width=900,
             height=700,
@@ -770,16 +808,13 @@ with c1:
             maxVelocity=50,
             stabilization=True,
             timestep=0.5,
-            # layout hints (nodeSpacing used if hierarchical mode is enabled, but keep larger default)
             nodeSpacing=200,
             levelSeparation=200,
         )
         clicked = agraph(nodes=nodes, edges=edges, config=config)
 
-        # 한방 쿼리(디버그용): 현재 검색어로 한 번에 Neo4j에서 노드+이웃을 가져오고 쿼리/결과를 표시
         try:
             if st.button("한방 Neo4j 쿼리 실행 (디버그)"):
-                # build simple search terms (include hanja mapping if available)
                 terms = [search_term]
                 if search_term in HANJA_MAP:
                     terms.append(HANJA_MAP[search_term])
@@ -805,7 +840,6 @@ with c1:
         except Exception:
             pass
         if clicked and clicked != search_term:
-            # Resolve clicked value to nodes_map key (clicked may be id, label, or raw_id)
             resolved_key = None
             if clicked in nodes_map:
                 resolved_key = clicked
@@ -817,12 +851,10 @@ with c1:
             if resolved_key is None:
                 resolved_key = clicked
 
-            # Prevent repeated fetch loops: only act if this click is new
             if st.session_state.get('last_clicked') == resolved_key:
                 pass
             else:
                 raw_name = nodes_map.get(resolved_key, {}).get('raw_id', clicked)
-                # set display name to raw_name so bottom panel shows human-friendly id
                 st.session_state.selected_node = raw_name
                 with st.spinner(f"'{raw_name}' 관련 Postgres 조회 중..."):
                     try:
@@ -833,16 +865,12 @@ with c1:
                 st.session_state.selected_node_rows = rows
                 st.session_state['last_clicked'] = resolved_key
                 st.rerun()
-        # clicked handling complete; do nothing if user didn't click
-        
     else:
         st.info("그래프를 구성할 데이터가 없습니다.")
 
 with c2:
     st.subheader("📜 도슨트 해설")
     pg_texts = st.session_state.get('pg_prefetch_texts') or []
-    
-    # 해설 생성 버튼을 눈에 띄게 상단에 배치
     generate_clicked = st.button("✨ 해설 생성", key="generate_explanation", type="primary", use_container_width=True)
     
     if evidences or pg_texts:
@@ -854,7 +882,6 @@ with c2:
                 context_str += "\n\n"
             context_str += "[PG 근거]\n" + "\n".join(f"- {t}" for t in pg_texts[:20])
             st.caption(f"PG 근거 {len(pg_texts)}건 반영")
-            # show which nodes were actually included in PG prefetch
             pg_rows = st.session_state.get('pg_prefetch_rows') or []
             node_list = []
             for r in pg_rows:
@@ -872,7 +899,6 @@ with c2:
         if generate_clicked:
             with st.status("해설 작성 중...", expanded=True) as status:
                 st.write("문헌 및 사료 근거를 분석하고 있습니다.")
-                # RAG: use local ollama if available, otherwise a simple fallback summary
                 idx, meta, dim = load_faiss_index()
                 prompt = (
                     f"당신은 역사 도슨트입니다. 다음 사료와 PG 근거를 바탕으로 '{search_term}'에 대해 "
@@ -883,7 +909,6 @@ with c2:
                     f"[사료/PG 근거]\n{context_str}"
                 )
 
-                # 저장: 생성에 사용된 입력(프롬프트, Neo4j evidences, PG 텍스트/행, 실행된 쿼리)
                 try:
                     st.session_state['last_generation_inputs'] = {
                         'prompt': prompt,
@@ -904,7 +929,6 @@ with c2:
                         t_model1 = time.monotonic()
                         st.session_state.last_explained_term = search_term
                         st.session_state.last_explanation = response['response']
-                        # log model timing and compose summary timings
                         try:
                             st.session_state['last_model_inference_seconds'] = round(t_model1 - t_model0, 3)
                             st.session_state['last_generation_timing'] = {
@@ -930,7 +954,6 @@ with c2:
             st.info(st.session_state.last_explanation)
         else:
             st.caption("해설 생성을 누르면 현재 근거로 설명을 생성합니다.")
-        # show generation inputs (prompt, PG/Neo4j data) for debugging/fallback inspection
         gen_inputs = st.session_state.get('last_generation_inputs')
         if gen_inputs:
             with st.expander('🧾 생성에 사용된 입력(프롬프트·쿼리·원자료)', expanded=False):
@@ -967,7 +990,6 @@ with c2:
     else:
         st.write("사료/PG 근거를 찾을 수 없습니다.")
 
-# Display selected node's Postgres rows (if any)
 if 'selected_node' in st.session_state and st.session_state.get('selected_node'):
     st.markdown('---')
     st.subheader(f"🔎 선택된 노드: {st.session_state['selected_node']}")
@@ -986,7 +1008,6 @@ if 'selected_node' in st.session_state and st.session_state.get('selected_node')
                     st.markdown('**TEI (요약)**')
                     tei = r['tei'] or ''
                     st.code((tei[:2000] + '...') if len(tei) > 2000 else tei, language='xml')
-        # Additionally, show raw rows for the first result's table for quick inspection
         try:
             first_table = rows[0]['table'] if rows else None
             last_raw = st.session_state.get('last_raw_rows', [])
@@ -1000,12 +1021,11 @@ if 'selected_node' in st.session_state and st.session_state.get('selected_node')
                         break
         except Exception:
             pass
-    # show executed queries for debugging (if any)
+
     def _format_query_with_params(q, params):
         try:
             out = str(q)
             for p in (params or []):
-                # represent strings with quotes for readability
                 rep = repr(p)
                 out = out.replace('%s', rep, 1)
             return out
@@ -1021,7 +1041,6 @@ if 'selected_node' in st.session_state and st.session_state.get('selected_node')
                 st.markdown(f"- SQL: ``{formatted.strip()}``")
                 st.markdown(f"  - raw SQL: ``{q.strip()}``")
                 st.markdown(f"  - params: {params}")
-            # show recent Neo4j queries (if any)
             last_neo = st.session_state.get('last_neo4j_queries', [])
             if last_neo:
                 st.markdown('---')
@@ -1032,7 +1051,6 @@ if 'selected_node' in st.session_state and st.session_state.get('selected_node')
                         st.markdown(f"- params: {e.get('params')}")
                     except Exception:
                         st.write(e)
-            # show raw returned rows for last queries (debug)
             last_raw = st.session_state.get('last_raw_rows', [])
             if last_raw:
                 st.markdown('---')
@@ -1041,7 +1059,6 @@ if 'selected_node' in st.session_state and st.session_state.get('selected_node')
                     st.markdown(f"**{item.get('table')}**")
                     for r in item.get('rows', [])[:5]:
                         st.write(r)
-            # Session debug snapshot (show key session_state vars)
             try:
                 st.markdown('---')
                 st.subheader('🧪 Session debug snapshot')
@@ -1055,15 +1072,11 @@ if 'selected_node' in st.session_state and st.session_state.get('selected_node')
                 st.json(sd)
             except Exception:
                 pass
-# -----------------------------------------------------------------------------
-# Bottom debug panel: always-visible recent Neo4j queries
-# -----------------------------------------------------------------------------
 try:
     recent_neo = st.session_state.get('last_neo4j_queries', [])
     if recent_neo:
         st.markdown('---')
         st.subheader('🔍 최근 Neo4j 쿼리 (하단)')
-        # 최근 10개를 내림차순(최신 먼저)으로 표시
         for entry in list(recent_neo[-10:])[::-1]:
             cy = entry.get('cypher', '') or ''
             params = entry.get('params') or {}
