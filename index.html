@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, shrink-to-fit=no"
+    />
+    <title>대한민국 역사 도슨트 (GitHub Pages)</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.63.1/build/stlite.css"
+    />
+  </head>
+  <body>
+    <div id="stlite"></div>
+    <script src="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.63.1/build/stlite.js"></script>
+    <script>
+      stlite.mount(
+        {
+          requirements: ["streamlit-agraph", "requests"], // 백엔드 의존성(psycopg2, neo4j)은 브라우저 제약상 제외하거나 대체 필요
+          entrypoint: "app.py",
+          files: {
+            "app.py": `
+import streamlit as st
+import requests
+import json
+import hashlib
+from streamlit_agraph import agraph, Node, Edge, Config
+
+# GitHub Pages(stlite) 환경에서는 secrets.toml 대신 직접 정의하거나 입력을 받습니다.
+DEEPSEEK_API_KEY = "sk-810a6e00c887402c9b34fabd55f924eb"
+
+st.set_page_config(layout="wide", page_title="역사 도슨트 (Static)")
+st.title("🇰🇷 대한민국 역사 도슨트 (Wasm Edition)")
+st.info("이 버전은 GitHub Pages에서 동작하도록 설계된 정적 웹 애플리케이션입니다.")
+
+# --- UI 섹션 ---
+with st.sidebar:
+    st.header("🔍 통합 검색")
+    search_term = st.text_input("검색어 입력", value="유관순")
+    
+    st.markdown("---")
+    st.caption("참고: 브라우저 환경(Wasm)에서는 데이터베이스(Neo4j/Postgres) 직접 연결에 제한이 있을 수 있습니다. 현재는 DeepSeek AI 해설 기능을 중심으로 동작합니다.")
+
+if st.button("탐색 및 해설 생성"):
+    if not search_term:
+        st.warning("검색어를 입력하세요.")
+    else:
+        # DeepSeek API 호출 (백엔드 서버 없이 브라우저에서 직접 호출)
+        with st.spinner("🧠 DeepSeek AI가 답변을 생성 중입니다..."):
+            try:
+                payload = {
+                    "model": "deepseek-v4-flash",
+                    "messages": [
+                        {"role": "system", "content": "당신은 대한민국 역사 전문가 도슨트입니다. 사용자의 질문에 대해 친절하고 전문적으로 설명해주세요."},
+                        {"role": "user", "content": f"'{search_term}'에 대해 설명해줘."}
+                    ],
+                    "temperature": 0.7
+                }
+                response = requests.post(
+                    "https://api.deepseek.com/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                        "Content-Type": "application/json"
+                    },
+                    json=payload,
+                    timeout=60
+                )
+                response.raise_for_status()
+                data = response.json()
+                explanation = data["choices"][0]["message"]["content"]
+                
+                st.subheader(f"📜 '{search_term}' 도슨트 해설")
+                st.write(explanation)
+                
+            except Exception as e:
+                st.error(f"API 호출 중 오류가 발생했습니다: {str(e)}")
+
+# --- 지식망 시각화 샘플 (정적 데이터) ---
+st.markdown("---")
+st.subheader("🕸️ 지식망 시각화 (예시)")
+nodes = [
+    Node(id="n1", label=search_term, color="#1CE1D4", size=25),
+    Node(id="n2", label="독립운동", color="#FF6B6B", size=20),
+]
+edges = [
+    Edge(source="n1", target="n2", label="관련됨"),
+]
+config = Config(width=800, height=400, directed=True, physics=True)
+agraph(nodes=nodes, edges=edges, config=config)
+            `,
+          },
+        },
+        document.getElementById("stlite")
+      );
+    </script>
+  </body>
+</html>
