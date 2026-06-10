@@ -1,104 +1,32 @@
 <!DOCTYPE html>
-<html>
-  <head>
-    <meta charset="UTF-8" />
-    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1, shrink-to-fit=no"
-    />
-    <title>대한민국 역사 도슨트 (GitHub Pages)</title>
-    <link
-      rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.63.1/build/stlite.css"
-    />
-  </head>
-  <body>
-    <div id="stlite"></div>
-    <script src="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.63.1/build/stlite.js"></script>
-    <script>
-      stlite.mount(
-        {
-          requirements: ["streamlit-agraph", "requests", "neo4j-driver"], 
-          entrypoint: "app.py",
-          files: {
-            "app.py": `
-import streamlit as st
-import requests
-import json
-import hashlib
-from streamlit_agraph import agraph, Node, Edge, Config
-try:
-    from neo4j import GraphDatabase
-except ImportError:
-    GraphDatabase = None
-
-st.set_page_config(layout="wide", page_title="역사 도슨트 (Static)")
-st.title("🇰🇷 대한민국 역사 도슨트 (Wasm Edition)")
-
-# --- Sidebar: Configuration ---
-with st.sidebar:
-    st.header("⚙️ 설정")
-    with st.expander("API 및 DB 인증 정보", expanded=False):
-        deepseek_key = st.text_input("DeepSeek API Key", value="sk-810a6e00c887402c9b34fabd55f924eb", type="password")
-        st.info("💡 브라우저 환경에서는 CORS 정책 때문에 DB 직접 연결이 제한될 수 있습니다.")
-        neo4j_uri = st.text_input("Neo4j URI", value="bolt://11e.kr:7687")
-        neo4j_user = st.text_input("Neo4j User", value="neo4j")
-        neo4j_pw = st.text_input("Neo4j Password", type="password")
-    
-    st.header("🔍 통합 검색")
-    search_term = st.text_input("검색어 입력", value="유관순")
-
-# --- Logic: Fetch Data ---
-if st.button("탐색 및 해설 생성"):
-    if not search_term:
-        st.warning("검색어를 입력하세요.")
-    else:
-        c1, c2 = st.columns([1, 1])
-        
-        with c1:
-            st.subheader("🕸️ 지식망 탐색")
-            # Neo4j Attempt
-            if GraphDatabase and neo4j_pw:
-                try:
-                    # 브라우저(Wasm) 환경에서는 bolt 대신 neo4j+s(HTTPS 기반)가 권장됩니다.
-                    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_pw))
-                    with driver.session() as session:
-                        # 단순화된 쿼리 예시
-                        result = session.run("MATCH (n)-[r]-(m) WHERE n.name CONTAINS $term RETURN n, r, m LIMIT 10", term=search_term)
-                        # ... 결과 처리 로직 (생략 가능 또는 샘플 데이터로 대체)
-                    driver.close()
-                    st.success("데이터베이스 연결 성공")
-                except Exception as e:
-                    st.error(f"DB 연결 실패 (CORS 또는 네트워크 제한): {str(e)}")
-                    st.info("💡 브라우저 보안 정책상 로컬/사설 DB 접속이 차단될 수 있습니다. 현재는 샘플 데이터를 표시합니다.")
-            
-            # Sample Data Fallback
-            nodes = [Node(id="n1", label=search_term, color="#1CE1D4", size=25), Node(id="n2", label="독립운동", color="#FF6B6B")]
-            edges = [Edge(source="n1", target="n2", label="관련됨")]
-            agraph(nodes=nodes, edges=edges, config=Config(width=600, height=400, directed=True))
-
-        with c2:
-            st.subheader("📜 도슨트 해설")
-            with st.spinner("DeepSeek AI가 응답 중..."):
-                try:
-                    payload = {
-                        "model": "deepseek-v4-flash",
-                        "messages": [{"role": "user", "content": f"'{search_term}'에 대해 역사 도슨트로서 설명해줘."}],
-                        "temperature": 0.7
-                    }
-                    resp = requests.post("https://api.deepseek.com/chat/completions",
-                                       headers={"Authorization": f"Bearer {deepseek_key}"},
-                                       json=payload, timeout=30)
-                    resp.raise_for_status()
-                    st.write(resp.json()["choices"][0]["message"]["content"])
-                except Exception as e:
-                    st.error(f"AI 해설 생성 실패: {str(e)}")
-            `,
-          },
-        },
-        document.getElementById("stlite")
-      );
-    </script>
-  </body>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>대한민국 역사 도슨트</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            width: 100%;
+            overflow: hidden;
+        }
+        iframe {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
+    </style>
+</head>
+<body>
+    <iframe 
+        src="https://docent-ccwtk62cpihxtc4scscov4.streamlit.app/?embed=true" 
+        allow="camera;microphone;geolocation;clipboard-read;clipboard-write;"
+        allowfullscreen>
+    </iframe>
+</body>
 </html>

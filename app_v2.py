@@ -758,7 +758,7 @@ def get_docent():
 # 3. UI 및 Gemma 4:26b 해설 파트
 # ==========================================
 st.set_page_config(layout="wide", page_title="역사 도슨트")
-st.title("🇰🇷 대한민국 역사 도슨트 (Gemma4:26b)")
+st.title("🇰🇷 대한민국 역사 도슨트")
 
 if "search_term" not in st.session_state:
     st.session_state.search_term = "유관순"
