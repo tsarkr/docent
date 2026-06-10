@@ -211,12 +211,26 @@ def _secret_or_env(key, default=""):
 
 
 # ==========================================
-# 1. Neo4j 접속 정보 (.streamlit/secrets.toml 또는 환경변수)
+# 1. 접속 정보 관리 (Streamlit Secrets / Env)
 # ==========================================
+def _get_config():
+    return {
+        "deepseek_api_key": _secret_or_env("DEEPSEEK_API_KEY", "sk-810a6e00c887402c9b34fabd55f924eb"),
+        "neo4j_uri": _secret_or_env("NEO4J_URI", "bolt://11e.kr:7687"),
+        "neo4j_user": _secret_or_env("NEO4J_USER", "neo4j"),
+        "neo4j_password": _secret_or_env("NEO4J_PASSWORD", ""),
+        "pg_host": _secret_or_env("PG_HOST", "localhost"),
+        "pg_port": _secret_or_env("PG_PORT", "5432"),
+        "pg_user": _secret_or_env("PG_USER", "postgres"),
+        "pg_password": _secret_or_env("PG_PASSWORD", ""),
+        "pg_database": _secret_or_env("PG_DATABASE", "postgres"),
+    }
+
+CONFIG = _get_config()
 NEO4J_CONFIG = {
-    "uri": _secret_or_env("NEO4J_URI", "bolt://11e.kr:7687"),
-    "user": _secret_or_env("NEO4J_USER", "neo4j"),
-    "password": _secret_or_env("NEO4J_PASSWORD", "")  # secrets.toml에서만 로드
+    "uri": CONFIG["neo4j_uri"],
+    "user": CONFIG["neo4j_user"],
+    "password": CONFIG["neo4j_password"]
 }
 
 # optional user-provided Hangul->Hanja mapping (data/hangul_to_hanja.json)

@@ -19,7 +19,7 @@
     <script>
       stlite.mount(
         {
-          requirements: ["streamlit-agraph", "requests"], // 백엔드 의존성(psycopg2, neo4j)은 브라우저 제약상 제외하거나 대체 필요
+          requirements: ["streamlit-agraph", "requests", "neo4j-driver"], 
           entrypoint: "app.py",
           files: {
             "app.py": `
@@ -28,68 +28,72 @@ import requests
 import json
 import hashlib
 from streamlit_agraph import agraph, Node, Edge, Config
-
-# GitHub Pages(stlite) 환경에서는 secrets.toml 대신 직접 정의하거나 입력을 받습니다.
-DEEPSEEK_API_KEY = "sk-810a6e00c887402c9b34fabd55f924eb"
+try:
+    from neo4j import GraphDatabase
+except ImportError:
+    GraphDatabase = None
 
 st.set_page_config(layout="wide", page_title="역사 도슨트 (Static)")
 st.title("🇰🇷 대한민국 역사 도슨트 (Wasm Edition)")
-st.info("이 버전은 GitHub Pages에서 동작하도록 설계된 정적 웹 애플리케이션입니다.")
 
-# --- UI 섹션 ---
+# --- Sidebar: Configuration ---
 with st.sidebar:
+    st.header("⚙️ 설정")
+    with st.expander("API 및 DB 인증 정보", expanded=False):
+        deepseek_key = st.text_input("DeepSeek API Key", value="sk-810a6e00c887402c9b34fabd55f924eb", type="password")
+        st.info("💡 브라우저 환경에서는 CORS 정책 때문에 DB 직접 연결이 제한될 수 있습니다.")
+        neo4j_uri = st.text_input("Neo4j URI", value="bolt://11e.kr:7687")
+        neo4j_user = st.text_input("Neo4j User", value="neo4j")
+        neo4j_pw = st.text_input("Neo4j Password", type="password")
+    
     st.header("🔍 통합 검색")
     search_term = st.text_input("검색어 입력", value="유관순")
-    
-    st.markdown("---")
-    st.caption("참고: 브라우저 환경(Wasm)에서는 데이터베이스(Neo4j/Postgres) 직접 연결에 제한이 있을 수 있습니다. 현재는 DeepSeek AI 해설 기능을 중심으로 동작합니다.")
 
+# --- Logic: Fetch Data ---
 if st.button("탐색 및 해설 생성"):
     if not search_term:
         st.warning("검색어를 입력하세요.")
     else:
-        # DeepSeek API 호출 (백엔드 서버 없이 브라우저에서 직접 호출)
-        with st.spinner("🧠 DeepSeek AI가 답변을 생성 중입니다..."):
-            try:
-                payload = {
-                    "model": "deepseek-v4-flash",
-                    "messages": [
-                        {"role": "system", "content": "당신은 대한민국 역사 전문가 도슨트입니다. 사용자의 질문에 대해 친절하고 전문적으로 설명해주세요."},
-                        {"role": "user", "content": f"'{search_term}'에 대해 설명해줘."}
-                    ],
-                    "temperature": 0.7
-                }
-                response = requests.post(
-                    "https://api.deepseek.com/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-                        "Content-Type": "application/json"
-                    },
-                    json=payload,
-                    timeout=60
-                )
-                response.raise_for_status()
-                data = response.json()
-                explanation = data["choices"][0]["message"]["content"]
-                
-                st.subheader(f"📜 '{search_term}' 도슨트 해설")
-                st.write(explanation)
-                
-            except Exception as e:
-                st.error(f"API 호출 중 오류가 발생했습니다: {str(e)}")
+        c1, c2 = st.columns([1, 1])
+        
+        with c1:
+            st.subheader("🕸️ 지식망 탐색")
+            # Neo4j Attempt
+            if GraphDatabase and neo4j_pw:
+                try:
+                    # 브라우저(Wasm) 환경에서는 bolt 대신 neo4j+s(HTTPS 기반)가 권장됩니다.
+                    driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_pw))
+                    with driver.session() as session:
+                        # 단순화된 쿼리 예시
+                        result = session.run("MATCH (n)-[r]-(m) WHERE n.name CONTAINS $term RETURN n, r, m LIMIT 10", term=search_term)
+                        # ... 결과 처리 로직 (생략 가능 또는 샘플 데이터로 대체)
+                    driver.close()
+                    st.success("데이터베이스 연결 성공")
+                except Exception as e:
+                    st.error(f"DB 연결 실패 (CORS 또는 네트워크 제한): {str(e)}")
+                    st.info("💡 브라우저 보안 정책상 로컬/사설 DB 접속이 차단될 수 있습니다. 현재는 샘플 데이터를 표시합니다.")
+            
+            # Sample Data Fallback
+            nodes = [Node(id="n1", label=search_term, color="#1CE1D4", size=25), Node(id="n2", label="독립운동", color="#FF6B6B")]
+            edges = [Edge(source="n1", target="n2", label="관련됨")]
+            agraph(nodes=nodes, edges=edges, config=Config(width=600, height=400, directed=True))
 
-# --- 지식망 시각화 샘플 (정적 데이터) ---
-st.markdown("---")
-st.subheader("🕸️ 지식망 시각화 (예시)")
-nodes = [
-    Node(id="n1", label=search_term, color="#1CE1D4", size=25),
-    Node(id="n2", label="독립운동", color="#FF6B6B", size=20),
-]
-edges = [
-    Edge(source="n1", target="n2", label="관련됨"),
-]
-config = Config(width=800, height=400, directed=True, physics=True)
-agraph(nodes=nodes, edges=edges, config=config)
+        with c2:
+            st.subheader("📜 도슨트 해설")
+            with st.spinner("DeepSeek AI가 응답 중..."):
+                try:
+                    payload = {
+                        "model": "deepseek-v4-flash",
+                        "messages": [{"role": "user", "content": f"'{search_term}'에 대해 역사 도슨트로서 설명해줘."}],
+                        "temperature": 0.7
+                    }
+                    resp = requests.post("https://api.deepseek.com/chat/completions",
+                                       headers={"Authorization": f"Bearer {deepseek_key}"},
+                                       json=payload, timeout=30)
+                    resp.raise_for_status()
+                    st.write(resp.json()["choices"][0]["message"]["content"])
+                except Exception as e:
+                    st.error(f"AI 해설 생성 실패: {str(e)}")
             `,
           },
         },
