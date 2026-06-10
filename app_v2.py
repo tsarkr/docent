@@ -6,6 +6,7 @@ import json
 import hashlib
 import random
 import time
+import requests
 
 try:
     import psycopg2
@@ -27,7 +28,43 @@ except Exception:
     ollama = None
 
 
-def analyze_user_query(sentence, model="gemma4:26b"):
+def _get_deepseek_config():
+    return {
+        "api_key": _secret_or_env("DEEPSEEK_API_KEY", ""),
+        "base_url": _secret_or_env("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+        "model": _secret_or_env("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+    }
+
+
+def _chat_completion_deepseek(messages, model=None, response_format=None, temperature=0.0):
+    config = _get_deepseek_config()
+    api_key = config["api_key"]
+    if not api_key:
+        raise RuntimeError("DEEPSEEK_API_KEY가 설정되지 않았습니다.")
+
+    payload = {
+        "model": model or config["model"],
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if response_format:
+        payload["response_format"] = response_format
+
+    response = requests.post(
+        f"{config['base_url'].rstrip('/')}/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=120,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return data["choices"][0]["message"]["content"]
+
+
+def analyze_user_query(sentence, model="deepseek-v4-flash"):
     """
     사용자의 질문을 분석하여 의도(intent)와 핵심 키워드를 추출합니다.
     """
@@ -46,33 +83,44 @@ def analyze_user_query(sentence, model="gemma4:26b"):
         "부가적인 설명 없이 JSON만 반환하십시오."
     )
     try:
-        if ollama is None:
-            raise RuntimeError("ollama not available")
-        resp = ollama.chat(
-            model=model,
-            messages=[
+        content = _chat_completion_deepseek(
+            [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": str(sentence or "").strip()},
             ],
-            format="json"
+            model=model,
+            response_format={"type": "json_object"},
         )
-        content = ""
-        if isinstance(resp, dict):
-            content = resp.get("message", {}).get("content", "") or ""
-        
         data = json.loads(content)
         return data
     except Exception as e:
-        # Fallback for errors or missing ollama
-        return {
-            "intent": "ENTITY_SEARCH",
-            "keywords": [str(sentence or "").strip()],
-            "focus": "unknown",
-            "explanation": f"분석 실패로 인한 기본 검색 (에러: {str(e)})"
-        }
+        # Fallback for errors, missing API key, or incompatible DeepSeek response
+        try:
+            if ollama is None:
+                raise RuntimeError("ollama not available")
+            resp = ollama.chat(
+                model="gemma4:26b",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": str(sentence or "").strip()},
+                ],
+                format="json"
+            )
+            content = ""
+            if isinstance(resp, dict):
+                content = resp.get("message", {}).get("content", "") or ""
+
+            return json.loads(content)
+        except Exception:
+            return {
+                "intent": "ENTITY_SEARCH",
+                "keywords": [str(sentence or "").strip()],
+                "focus": "unknown",
+                "explanation": f"분석 실패로 인한 기본 검색 (에러: {str(e)})"
+            }
 
 
-def extract_keywords_from_sentence(sentence, model="gemma4:26b"):
+def extract_keywords_from_sentence(sentence, model="deepseek-v4-flash"):
     # 하위 호환성을 위해 유지하되 analyze_user_query를 호출
     analysis = analyze_user_query(sentence, model)
     return analysis.get("keywords", [sentence])
@@ -921,34 +969,43 @@ with c2:
                 except Exception:
                     pass
 
-                if ollama is not None:
+                try:
+                    st.write("DeepSeek 모델(deepseek-v4-flash)로 해설을 생성하고 있습니다...")
+                    t_model0 = time.monotonic()
+                    deepseek_response = _chat_completion_deepseek(
+                        [
+                            {"role": "system", "content": "당신은 역사 도슨트입니다. 중립적이고 간결한 한국어 해설만 작성하십시오."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        model="deepseek-v4-flash",
+                    )
+                    t_model1 = time.monotonic()
+                    st.session_state.last_explained_term = search_term
+                    st.session_state.last_explanation = deepseek_response
                     try:
-                        st.write("로컬 모델(Gemma4:26b)로 해설을 생성하고 있습니다...")
-                        t_model0 = time.monotonic()
-                        response = ollama.generate(model="gemma4:26b", prompt=prompt)
-                        t_model1 = time.monotonic()
-                        st.session_state.last_explained_term = search_term
-                        st.session_state.last_explanation = response['response']
-                        try:
-                            st.session_state['last_model_inference_seconds'] = round(t_model1 - t_model0, 3)
-                            st.session_state['last_generation_timing'] = {
-                                'model_seconds': st.session_state.get('last_model_inference_seconds'),
-                                'pg_prefetch_seconds': st.session_state.get('last_pg_prefetch_seconds'),
-                                'neo4j': st.session_state.get('last_neo4j_timings')
-                            }
-                        except Exception:
-                            pass
-                        status.update(label="해설 생성이 완료되었습니다!", state="complete", expanded=False)
-                    except Exception as e:
-                        st.write(f"Ollama 연결 실패: {e}. 간단 요약으로 대체합니다.")
+                        st.session_state['last_model_inference_seconds'] = round(t_model1 - t_model0, 3)
+                        st.session_state['last_generation_timing'] = {
+                            'model_seconds': st.session_state.get('last_model_inference_seconds'),
+                            'pg_prefetch_seconds': st.session_state.get('last_pg_prefetch_seconds'),
+                            'neo4j': st.session_state.get('last_neo4j_timings')
+                        }
+                    except Exception:
+                        pass
+                    status.update(label="해설 생성이 완료되었습니다!", state="complete", expanded=False)
+                except Exception as e:
+                    st.write(f"DeepSeek 연결 실패: {e}. Ollama 또는 간단 요약으로 대체합니다.")
+                    try:
+                        if ollama is not None:
+                            response = ollama.generate(model="gemma4:26b", prompt=prompt)
+                            st.session_state.last_explained_term = search_term
+                            st.session_state.last_explanation = response['response']
+                            status.update(label="해설 생성이 완료되었습니다!", state="complete", expanded=False)
+                        else:
+                            raise RuntimeError("ollama not available")
+                    except Exception:
                         st.session_state.last_explained_term = search_term
                         st.session_state.last_explanation = simple_fallback_summary(search_term, evidences, retrieved=pg_texts)
                         status.update(label="해설 생성 완료 (간단 요약)", state="complete", expanded=False)
-                else:
-                    st.write("Ollama 모듈이 없습니다. 간단 요약으로 대체합니다.")
-                    st.session_state.last_explained_term = search_term
-                    st.session_state.last_explanation = simple_fallback_summary(search_term, evidences, retrieved=pg_texts)
-                    status.update(label="해설 생성 완료 (간단 요약)", state="complete", expanded=False)
 
         if st.session_state.last_explained_term == search_term and st.session_state.last_explanation:
             st.info(st.session_state.last_explanation)
