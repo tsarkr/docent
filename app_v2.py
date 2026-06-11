@@ -807,7 +807,7 @@ with st.sidebar:
     
     st.markdown("---")
     st.subheader("💡 추천 키워드")
-    examples = ["유관순", "안중근", "김구", "3.1 운동", "임시정부", "독립신문"]
+    examples = ["유관순", "안중근", "3.1 운동", "시위","임시정부", "독립신문"]
     for ex in examples:
         if st.button(f"📌 {ex}", use_container_width=True):
             st.session_state.search_term = ex
