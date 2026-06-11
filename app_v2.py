@@ -761,7 +761,7 @@ st.set_page_config(layout="wide", page_title="역사 도슨트")
 st.title("🇰🇷 대한민국 역사 도슨트")
 
 if "search_term" not in st.session_state:
-    st.session_state.search_term = "유관순"
+    st.session_state.search_term = ""
 if "last_explained_term" not in st.session_state:
     st.session_state.last_explained_term = ""
 if "last_explanation" not in st.session_state:
@@ -771,14 +771,25 @@ if "graph_epoch" not in st.session_state:
 
 with st.sidebar:
     st.header("🔍 통합 검색")
-    term_input = st.text_input("검색어 입력", value=st.session_state.search_term)
-    if st.button("탐색"):
+    term_input = st.text_input("검색어 입력", value=st.session_state.search_term, placeholder="예: 유관순, 안중근, 3.1 운동")
+    if st.button("탐색", use_container_width=True):
         st.session_state.search_term = term_input
         st.rerun()
+    
+    st.markdown("---")
+    st.subheader("💡 추천 키워드")
+    examples = ["유관순", "안중근", "김구", "3.1 운동", "임시정부", "홍범도", "독립신문"]
+    for ex in examples:
+        if st.button(f"📌 {ex}", use_container_width=True):
+            st.session_state.search_term = ex
+            st.rerun()
 
 search_term = st.session_state.search_term.strip()
 if len(search_term) < 2:
-    st.warning("검색어는 2글자 이상 입력해 주세요.")
+    if not search_term:
+        st.info("👋 안녕하세요! 왼쪽 사이드바에서 검색어를 입력하거나 추천 키워드를 선택하여 대한민국 역사를 탐색해 보세요.")
+    else:
+        st.warning("⚠️ 검색어는 2글자 이상 입력해 주세요.")
     st.stop()
 
 docent = get_docent()
