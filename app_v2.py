@@ -36,7 +36,7 @@ def _get_deepseek_config():
     }
 
 
-def _chat_completion_deepseek(messages, model=None, response_format=None, temperature=0.0):
+def _chat_completion_deepseek(messages, model="model", response_format=None, temperature=0.0):
     config = _get_deepseek_config()
     api_key = config["api_key"]
     if not api_key:
@@ -215,8 +215,8 @@ def _secret_or_env(key, default=""):
 # ==========================================
 def _get_config():
     return {
-        "deepseek_api_key": _secret_or_env("DEEPSEEK_API_KEY", "sk-810a6e00c887402c9b34fabd55f924eb"),
-        "neo4j_uri": _secret_or_env("NEO4J_URI", "bolt://11e.kr:7687"),
+        "deepseek_api_key": _secret_or_env("DEEPSEEK_API_KEY", ""),
+        "neo4j_uri": _secret_or_env("NEO4J_URI", "bolt://localhost:7687"),
         "neo4j_user": _secret_or_env("NEO4J_USER", "neo4j"),
         "neo4j_password": _secret_or_env("NEO4J_PASSWORD", ""),
         "pg_host": _secret_or_env("PG_HOST", "localhost"),

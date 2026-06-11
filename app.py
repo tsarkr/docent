@@ -145,7 +145,7 @@ def _secret_or_env(key, default=""):
 # 1. Neo4j 접속 정보 (.streamlit/secrets.toml 또는 환경변수)
 # ==========================================
 NEO4J_CONFIG = {
-    "uri": _secret_or_env("NEO4J_URI", "bolt://11e.kr:7687"),
+    "uri": _secret_or_env("NEO4J_URI", "bolt://localhost:7687"),
     "user": _secret_or_env("NEO4J_USER", "neo4j"),
     "password": _secret_or_env("NEO4J_PASSWORD", "")  # secrets.toml에서만 로드
 }

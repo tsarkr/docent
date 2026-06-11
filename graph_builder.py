@@ -74,15 +74,15 @@ def _split_names(val):
     return [p for p in parts if p and p.lower() != 'none' and p.lower() != 'nan']
 
 PG_CONFIG = {
-    "host": _secret_or_env("PG_HOST", "11e.kr", SECRETS),
+    "host": _secret_or_env("PG_HOST", "localhost", SECRETS),
     "port": _secret_or_env("PG_PORT", "5432", SECRETS),
-    "database": _secret_or_env("PG_DATABASE", "historical", SECRETS),
+    "database": _secret_or_env("PG_DATABASE", "postgres", SECRETS),
     "user": _secret_or_env("PG_USER", "postgres", SECRETS),
     "password": _secret_or_env("PG_PASSWORD", "", SECRETS),
 }
 
 NEO4J_CONFIG = {
-    "uri": _secret_or_env("NEO4J_URI", "bolt://11e.kr:7687", SECRETS),
+    "uri": _secret_or_env("NEO4J_URI", "bolt://localhost:7687", SECRETS),
     "user": _secret_or_env("NEO4J_USER", "neo4j", SECRETS),
     "password": _secret_or_env("NEO4J_PASSWORD", "", SECRETS),
 }
