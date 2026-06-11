@@ -378,16 +378,16 @@ class HybridHistoryDocent:
                     if '문건' in labels:
                         evidences.append({
                             "doc": node.get('제목', '제목 미상'),
-                            "quote": node.get('설명', '')[:100],
+                            "quote": node.get('설명', '')[:500],
                             "concept": node_id,
-                            "text": node.get('설명', '')[:200]
+                            "text": node.get('설명', '')[:1000]
                         })
                     elif '사건' in labels:
                         evidences.append({
                             "doc": node.get('사건명', '사건명 미상'),
                             "quote": node.get('날짜', ''),
                             "concept": node_id,
-                            "text": f"날짜: {node.get('날짜', '')}"
+                            "text": f"날짜: {node.get('날짜', '')}\n설명: {node.get('설명', '')[:1000]}"
                         })
         except Exception as e:
             st.warning(f"⚠️ Neo4j 초기 검색 실패: {e}")
@@ -684,7 +684,7 @@ def fetch_pg_rows_for_node(name, limit_per_table=10, max_text_cols=6, conn=None)
     return out
 
 
-def fetch_pg_rows_for_nodes(names, limit_per_table=2, max_nodes=10):
+def fetch_pg_rows_for_nodes(names, limit_per_table=5, max_nodes=20):
     """Prefetch PG rows for multiple node names with simple session cache and connection reuse."""
     if not names:
         return []
@@ -737,7 +737,7 @@ def _compact_row_snippets(rowdict, max_fields=6):
     return "; ".join(fields)
 
 
-def build_pg_context(pg_rows, max_rows=20):
+def build_pg_context(pg_rows, max_rows=50):
     """Create compact PG-derived context strings for storytelling."""
     if not pg_rows:
         return []
@@ -849,7 +849,7 @@ try:
     if raw_ids and st.session_state.get('pg_prefetch_term') != search_term:
         with st.spinner('PG 근거를 빠르게 수집 중...'):
             t_pg0 = time.monotonic()
-            pg_rows = fetch_pg_rows_for_nodes(raw_ids, limit_per_table=2, max_nodes=12)
+            pg_rows = fetch_pg_rows_for_nodes(raw_ids, limit_per_table=5, max_nodes=20)
             t_pg1 = time.monotonic()
         st.session_state['pg_prefetch_term'] = search_term
         st.session_state['pg_prefetch_rows'] = pg_rows
@@ -978,11 +978,11 @@ with c2:
     if evidences or pg_texts:
         context_str = ""
         if evidences:
-            context_str = "\n".join([f"- 문서: {e['doc']}\n  내용: {e['text']}...\n  (주석: {e['quote']})" for e in evidences[:5]])
+            context_str = "\n".join([f"- 문서: {e['doc']}\n  내용: {e['text']}...\n  (주석: {e['quote']})" for e in evidences[:20]])
         if pg_texts:
             if context_str:
                 context_str += "\n\n"
-            context_str += "[PG 근거]\n" + "\n".join(f"- {t}" for t in pg_texts[:20])
+            context_str += "[PG 근거]\n" + "\n".join(f"- {t}" for t in pg_texts[:50])
             st.caption(f"PG 근거 {len(pg_texts)}건 반영")
             pg_rows = st.session_state.get('pg_prefetch_rows') or []
             node_list = []
