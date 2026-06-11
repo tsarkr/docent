@@ -473,27 +473,34 @@ def _pg_conn():
         return None
 
 
-def fetch_pg_rows_for_node(name, limit_per_table=10, max_text_cols=6):
+def fetch_pg_rows_for_node(name, limit_per_table=10, max_text_cols=6, conn=None):
     """Search all tables with a `tei` column for rows matching `name`."""
-    conn = _pg_conn()
+    should_close = False
+    if conn is None:
+        conn = _pg_conn()
+        should_close = True
+    
     if conn is None:
         return []
+        
     cur = conn.cursor()
     out = []
     queries_log = []
     try:
-        cur.execute("""
-        SELECT table_schema, table_name
-        FROM information_schema.columns
-        WHERE column_name = 'tei'
-          AND table_schema NOT IN ('pg_catalog', 'information_schema')
-        GROUP BY table_schema, table_name
-        """)
-        queries_log.append(("SELECT table_schema, table_name FROM information_schema.columns WHERE column_name = 'tei' AND table_schema NOT IN ('pg_catalog', 'information_schema') GROUP BY table_schema, table_name", None))
-        tables = cur.fetchall()
-        for schema, table in tables:
-            fq = f'"{schema}"."{table}"' if schema and schema != 'public' else f'"{table}"'
-            try:
+        # Cache table metadata in session state to avoid redundant information_schema queries
+        if 'pg_tables_metadata' not in st.session_state:
+            cur.execute("""
+            SELECT table_schema, table_name
+            FROM information_schema.columns
+            WHERE column_name = 'tei'
+              AND table_schema NOT IN ('pg_catalog', 'information_schema')
+            GROUP BY table_schema, table_name
+            """)
+            tables = cur.fetchall()
+            
+            tables_metadata = []
+            for schema, table in tables:
+                # Find ID column
                 cur.execute("""
                 SELECT column_name
                 FROM information_schema.columns
@@ -503,11 +510,8 @@ def fetch_pg_rows_for_node(name, limit_per_table=10, max_text_cols=6):
                 """, (schema or 'public', table))
                 first_col_res = cur.fetchone()
                 id_col = first_col_res[0] if first_col_res else 'rowid'
-            except Exception:
-                id_col = 'rowid'
-
-            text_cols = []
-            try:
+                
+                # Find Text columns
                 cur.execute("""
                 SELECT column_name
                 FROM information_schema.columns
@@ -515,16 +519,31 @@ def fetch_pg_rows_for_node(name, limit_per_table=10, max_text_cols=6):
                   AND data_type IN ('character varying','text','character')
                 ORDER BY ordinal_position ASC
                 """, (schema or 'public', table))
-                for (cname,) in cur.fetchall():
-                    if cname not in text_cols:
-                        text_cols.append(cname)
-                for cname in ['명칭', '사건명', '제목']:
+                text_cols = [c[0] for c in cur.fetchall()]
+                
+                # Priority columns
+                for cname in reversed(['명칭', '사건명', '제목']):
                     if cname in text_cols:
                         text_cols.remove(cname)
                         text_cols.insert(0, cname)
-            except Exception:
-                text_cols = []
-
+                
+                tables_metadata.append({
+                    'schema': schema,
+                    'table': table,
+                    'id_col': id_col,
+                    'text_cols': text_cols
+                })
+            st.session_state['pg_tables_metadata'] = tables_metadata
+        
+        tables_metadata = st.session_state['pg_tables_metadata']
+        
+        for meta in tables_metadata:
+            schema, table = meta['schema'], meta['table']
+            id_col = meta['id_col']
+            text_cols = meta['text_cols']
+            
+            fq = f'"{schema}"."{table}"' if schema and schema != 'public' else f'"{table}"'
+            
             search_cols = [id_col]
             if 'tei' not in search_cols:
                 search_cols.append('tei')
@@ -566,14 +585,15 @@ def fetch_pg_rows_for_node(name, limit_per_table=10, max_text_cols=6):
                     raw_rows.append(raw_row)
                     out.append(rowdict)
                 try:
-                    st.session_state.setdefault('last_raw_rows', []).extend([{'table': table, 'rows': raw_rows}])
+                    st.session_state.setdefault('last_raw_rows', []).append({'table': table, 'rows': raw_rows})
                 except Exception:
                     pass
             except Exception:
                 continue
     finally:
         cur.close()
-        conn.close()
+        if should_close:
+            conn.close()
         try:
             st.session_state['last_queries'] = queries_log
         except Exception:
@@ -582,26 +602,35 @@ def fetch_pg_rows_for_node(name, limit_per_table=10, max_text_cols=6):
 
 
 def fetch_pg_rows_for_nodes(names, limit_per_table=2, max_nodes=10):
-    """Prefetch PG rows for multiple node names with simple session cache."""
+    """Prefetch PG rows for multiple node names with simple session cache and connection reuse."""
     if not names:
         return []
     cache = st.session_state.setdefault('pg_cache', {})
     out = []
     seen = set()
-    for name in names:
-        if not name or name in seen:
-            continue
-        seen.add(name)
-        if len(seen) > max_nodes:
-            break
-        if name in cache:
-            rows = cache[name]
-        else:
-            rows = fetch_pg_rows_for_node(name, limit_per_table=limit_per_table)
-            cache[name] = rows
-        for r in rows:
-            r['node_id'] = name
-        out.extend(rows)
+    
+    conn = _pg_conn()
+    if conn is None:
+        return []
+        
+    try:
+        for name in names:
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            if len(seen) > max_nodes:
+                break
+            if name in cache:
+                rows = cache[name]
+            else:
+                rows = fetch_pg_rows_for_node(name, limit_per_table=limit_per_table, conn=conn)
+                cache[name] = rows
+            for r in rows:
+                r['node_id'] = name
+            out.extend(rows)
+    finally:
+        conn.close()
+        
     return out
 
 
