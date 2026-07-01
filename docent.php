@@ -178,10 +178,24 @@ if (isset($_GET['ajax'])) {
         if ($action === 'pg_prefetch') {
             $names = json_decode($_POST['names'] ?? '[]', true);
             $pdo = get_pg();
-            if (!$pdo) { echo json_encode([], JSON_UNESCAPED_UNICODE); exit; }
+            if (!$pdo) {
+                http_response_code(500);
+                echo json_encode([
+                    "error" => "PostgreSQL 연결 실패: PG_HOST, PG_PORT, PG_DATABASE, PG_USER, PG_PASSWORD 설정을 확인하세요"
+                ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+                exit;
+            }
 
             $all_rows = [];
-            $tables_meta = get_pg_tables_metadata($pdo);
+            try {
+                $tables_meta = get_pg_tables_metadata($pdo);
+            } catch (Throwable $e) {
+                http_response_code(500);
+                echo json_encode([
+                    "error" => "PostgreSQL 테이블 메타데이터 조회 실패: " . $e->getMessage()
+                ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+                exit;
+            }
             $seen = [];
 
             foreach ((array)$names as $name) {
@@ -255,9 +269,12 @@ function get_pg() {
         $user = get_cfg('PG_USER', 'postgres');
         $pass = get_cfg('PG_PASSWORD', '');
         
-        if (empty($pass)) return null;
         $dsn = "pgsql:host={$host};port={$port};dbname={$dbname}";
-        return new PDO($dsn, $user, $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        $options = [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION];
+        if ($pass !== '') {
+            return new PDO($dsn, $user, $pass, $options);
+        }
+        return new PDO($dsn, $user, null, $options);
     } catch (Exception $e) {
         return null;
     }
@@ -347,26 +364,35 @@ function _get_rel_label($rtype) {
 }
 
 function get_pg_tables_metadata($pdo) {
-    $stmt = $pdo->query("SELECT table_schema, table_name FROM information_schema.columns WHERE column_name = 'tei' AND table_schema NOT IN ('pg_catalog', 'information_schema') GROUP BY table_schema, table_name");
+    $stmt = $pdo->query("SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema') AND table_type = 'BASE TABLE' AND table_name LIKE 'raw_%' ORDER BY table_schema, table_name");
     $tables = $stmt->fetchAll(PDO::FETCH_ASSOC);
     $meta = [];
 
     foreach ($tables as $t) {
-        $schema = $t['table_schema']; $table = $t['table_name'];
-        $s1 = $pdo->prepare("SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position ASC LIMIT 1");
-        $s1->execute([$schema, $table]);
-        $id_col = $s1->fetchColumn() ?: 'rowid';
+        try {
+            $schema = $t['table_schema']; $table = $t['table_name'];
+            $s1 = $pdo->prepare("SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position ASC");
+            $s1->execute([$schema, $table]);
+            $all_cols = $s1->fetchAll(PDO::FETCH_COLUMN);
 
-        $s2 = $pdo->prepare("SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ? AND data_type IN ('character varying','text','character') ORDER BY ordinal_position ASC");
-        $s2->execute([$schema, $table]);
-        $text_cols = $s2->fetchAll(PDO::FETCH_COLUMN);
-
-        foreach (['명칭', '사건명', '제목'] as $p) {
-            if (($idx = array_search($p, $text_cols)) !== false) {
-                array_splice($text_cols, $idx, 1); array_unshift($text_cols, $p);
+            if (empty($all_cols) || !in_array('tei', $all_cols, true)) {
+                continue;
             }
+
+            $id_col = $all_cols[0] ?: 'rowid';
+            $s2 = $pdo->prepare("SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ? AND data_type IN ('character varying','text','character') ORDER BY ordinal_position ASC");
+            $s2->execute([$schema, $table]);
+            $text_cols = $s2->fetchAll(PDO::FETCH_COLUMN);
+
+            foreach (['명칭', '사건명', '제목'] as $p) {
+                if (($idx = array_search($p, $text_cols, true)) !== false) {
+                    array_splice($text_cols, $idx, 1); array_unshift($text_cols, $p);
+                }
+            }
+            $meta[] = ['schema' => $schema, 'table' => $table, 'id_col' => $id_col, 'text_cols' => array_slice($text_cols, 0, 6)];
+        } catch (Throwable $e) {
+            continue;
         }
-        $meta[] = ['schema' => $schema, 'table' => $table, 'id_col' => $id_col, 'text_cols' => array_slice($text_cols, 0, 6)];
     }
     return $meta;
 }
