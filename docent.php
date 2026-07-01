@@ -186,6 +186,8 @@ if (isset($_GET['ajax'])) {
                 exit;
             }
 
+            @set_time_limit(30);
+
             $all_rows = [];
             try {
                 $tables_meta = get_pg_tables_metadata($pdo);
@@ -197,19 +199,38 @@ if (isset($_GET['ajax'])) {
                 exit;
             }
             $seen = [];
+            $max_names = 12;
+            $max_total_rows = 80;
+            $truncated = false;
+            $processed_names = 0;
 
             foreach ((array)$names as $name) {
                 if (empty($name) || isset($seen[$name])) continue;
                 $seen[$name] = true;
+                $processed_names++;
+                if ($processed_names > $max_names) {
+                    $truncated = true;
+                    break;
+                }
 
                 $rows = fetch_pg_rows_for_name($pdo, $name, $tables_meta);
                 foreach ($rows as $r) {
                     $r['node_id'] = $name;
                     $all_rows[] = $r;
+                    if (count($all_rows) >= $max_total_rows) {
+                        $truncated = true;
+                        break 2;
+                    }
                 }
             }
 
-            echo json_encode($all_rows, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+            echo json_encode([
+                'rows' => $all_rows,
+                'truncated' => $truncated,
+                'limit' => $max_total_rows,
+                'count' => count($all_rows),
+                'processed_names' => min($processed_names, $max_names)
+            ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
             exit;
         }
 
@@ -405,7 +426,9 @@ function fetch_pg_rows_for_name($pdo, $name, $tables_meta) {
         foreach ($m['text_cols'] as $c) if (!in_array($c, $search_cols)) $search_cols[] = $c;
 
         $clauses = []; foreach ($search_cols as $c) $clauses[] = "\"{$c}\"::text ILIKE ?";
-        $q = "SELECT * FROM {$fq} WHERE (" . implode(" OR ", $clauses) . ") LIMIT 5";
+        $q = "SELECT * FROM {$fq} WHERE (" . implode(" OR ", $clauses) . ") LIMIT 2";
+        $select_cols = array_values(array_unique(array_filter(array_merge([$m['id_col'], 'tei'], array_slice($m['text_cols'], 0, 3)))));
+        $q = "SELECT " . implode(", ", array_map(fn($c) => "\"{$c}\"", $select_cols)) . " FROM {$fq} WHERE (" . implode(" OR ", $clauses) . ") LIMIT 1";
         
         try {
             $stmt = $pdo->prepare($q);
@@ -414,8 +437,19 @@ function fetch_pg_rows_for_name($pdo, $name, $tables_meta) {
 
             foreach ($rows as $row) {
                 $snippets = [];
-                foreach ($row as $k => $v) if ($k !== $m['id_col'] && $k !== 'tei') $snippets[$k] = $v !== null ? strval($v) : '';
-                $out[] = ['table' => $m['table'], 'schema' => $m['schema'], 'rowid' => $row[$m['id_col']] ?? null, 'id_col' => $m['id_col'], 'match_cols' => $search_cols, 'tei' => $row['tei'] ?? null, 'snippets' => $snippets];
+                foreach ($row as $k => $v) {
+                    if ($k === $m['id_col'] || $k === 'tei') continue;
+                    $value = $v !== null ? strval($v) : '';
+                    if ($value !== '' && mb_strlen($value) > 400) {
+                        $value = mb_substr($value, 0, 400) . '…';
+                    }
+                    $snippets[$k] = $value;
+                }
+                $tei_preview = isset($row['tei']) && $row['tei'] !== null ? strval($row['tei']) : '';
+                if ($tei_preview !== '' && mb_strlen($tei_preview) > 500) {
+                    $tei_preview = mb_substr($tei_preview, 0, 500) . '…';
+                }
+                $out[] = ['table' => $m['table'], 'schema' => $m['schema'], 'rowid' => $row[$m['id_col']] ?? null, 'id_col' => $m['id_col'], 'match_cols' => $search_cols, 'tei' => $tei_preview, 'snippets' => $snippets];
             }
         } catch (Exception $e) { continue; }
     }
@@ -620,12 +654,17 @@ async function performSearch() {
         if (nodeNames.length > 0) {
             setStatus('<span class="spinner-border spinner-border-sm"></span> PostgreSQL 사료 원문 연동 중...');
             const pgRows = await api('pg_prefetch', { names: JSON.stringify(nodeNames) });
+            const pgList = Array.isArray(pgRows) ? pgRows : (pgRows.rows || []);
             
-            pgPrefetchTexts = pgRows.map(r => {
+            pgPrefetchTexts = pgList.map(r => {
                 let sStr = [];
                 for(let k in r.snippets) { if(r.snippets[k]) sStr.push(`${k}: ${r.snippets[k]}`); }
                 return `[${r.schema}.${r.table}] node=${r.node_id} rowid=${r.rowid} :: ${sStr.join('; ')}`;
             });
+
+            if (pgRows && typeof pgRows === 'object' && pgRows.truncated) {
+                setStatus(`PG 근거가 많아 ${pgRows.count}건까지만 불러왔습니다.`);
+            }
         }
 
         document.getElementById('search-title').innerText = `'${term}' 지식망 탐색 완료`;
@@ -737,7 +776,7 @@ function showNodeInfo(node) {
         relatedEvidences.forEach(ev => {
             html += `<div class="mb-2 p-2 bg-light border rounded small">
                 <strong class="text-dark">${ev.doc}</strong><br>
-                <span class="text-muted">${ev.text.substring(0, 150)}...</span>
+                <div class="text-muted" style="white-space: pre-wrap;">${escapeHtml(ev.text)}</div>
             </div>`;
         });
     }
@@ -750,10 +789,13 @@ function showNodeInfo(node) {
             // DB 출처 정보 강조 (예: [public.서지정보_260410])
             const parts = txt.split('::');
             const source = parts[0];
-            const detail = parts[1] ? parts[1].substring(0, 150) : '';
+            const detail = parts[1] ? parts[1] : '';
             html += `<div class="mb-2 p-2 bg-light border rounded small">
-                <strong class="text-success">${source.replace(/\[|\]/g, '')}</strong><br>
-                <span class="text-muted">${detail}...</span>
+                <strong class="text-success">${escapeHtml(source.replace(/\[|\]/g, ''))}</strong><br>
+                <details class="mt-1" open>
+                    <summary class="text-muted">원문 전체 보기</summary>
+                    <div class="text-muted mt-2" style="white-space: pre-wrap;">${escapeHtml(detail)}</div>
+                </details>
             </div>`;
         });
     }
