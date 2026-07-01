@@ -25,6 +25,9 @@ function get_cfg($key, $default = '') {
     return $default;
 }
 
+$gtm_id = get_cfg('GTM_ID');
+$ga_measurement_id = get_cfg('GA_MEASUREMENT_ID');
+
 // 2. API Logic (AJAX Handlers)
 if (isset($_GET['ajax'])) {
     header('Content-Type: application/json; charset=utf-8');
@@ -180,12 +183,10 @@ if (isset($_GET['ajax'])) {
             $all_rows = [];
             $tables_meta = get_pg_tables_metadata($pdo);
             $seen = [];
-            $count = 0;
 
             foreach ((array)$names as $name) {
                 if (empty($name) || isset($seen[$name])) continue;
                 $seen[$name] = true;
-                if (++$count > 20) break;
 
                 $rows = fetch_pg_rows_for_name($pdo, $name, $tables_meta);
                 foreach ($rows as $r) {
@@ -206,13 +207,13 @@ if (isset($_GET['ajax'])) {
 
             $context_str = "";
             if (!empty($evidences)) {
-                foreach (array_slice($evidences, 0, 20) as $e) {
+                foreach ($evidences as $e) {
                     $context_str .= "- 문서: {$e['doc']}\n  내용: {$e['text']}...\n";
                 }
             }
             if (!empty($pg_texts)) {
                 if ($context_str) $context_str .= "\n\n";
-                $context_str .= "[PG 근거]\n" . implode("\n", array_map(fn($t) => "- " . $t, array_slice($pg_texts, 0, 50)));
+                $context_str .= "[PG 근거]\n" . implode("\n", array_map(fn($t) => "- " . $t, $pg_texts));
             }
 
             $prompt = "당신은 역사 도슨트입니다. 다음 사료와 PG 근거를 바탕으로 '{$term}'에 대해 균형잡힌 해설을 작성하세요.\n"
@@ -268,7 +269,7 @@ function call_deepseek($msgs, $is_json = false) {
 
     $ch = curl_init(rtrim(get_cfg('DEEPSEEK_BASE_URL', 'https://api.deepseek.com'), '/') . '/chat/completions');
     $payload = [
-        "model" => get_cfg('DEEPSEEK_MODEL', 'deepseek-chat'),
+        "model" => get_cfg('DEEPSEEK_MODEL', 'deepseek-v4-flash'),
         "messages" => $msgs,
         "temperature" => 0.0
     ];
@@ -401,6 +402,26 @@ function fetch_pg_rows_for_name($pdo, $name, $tables_meta) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>3.1 운동 역사 도슨트</title>
+    <?php if (!empty($gtm_id)): ?>
+    <!-- Google Tag Manager -->
+    <script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+    new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+    j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+    'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+    })(window,document,'script','dataLayer','<?= htmlspecialchars($gtm_id, ENT_QUOTES, 'UTF-8') ?>');</script>
+    <!-- End Google Tag Manager -->
+    <?php endif; ?>
+
+    <?php if (!empty($ga_measurement_id)): ?>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=<?= urlencode($ga_measurement_id) ?>"></script>
+    <script>
+        window.dataLayer = window.dataLayer || [];
+        function gtag(){dataLayer.push(arguments);}
+        gtag('js', new Date());
+        gtag('config', '<?= htmlspecialchars($ga_measurement_id, ENT_QUOTES, 'UTF-8') ?>');
+    </script>
+    <?php endif; ?>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
     <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
@@ -420,10 +441,16 @@ function fetch_pg_rows_for_name($pdo, $name, $tables_meta) {
     </style>
 </head>
 <body>
+<?php if (!empty($gtm_id)): ?>
+<!-- Google Tag Manager (noscript) -->
+<noscript><iframe src="https://www.googletagmanager.com/ns.html?id=<?= urlencode($gtm_id) ?>"
+height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+<!-- End Google Tag Manager (noscript) -->
+<?php endif; ?>
 <div class="container-fluid">
     <div class="row">
         <div class="col-md-2 sidebar">
-            <h4 class="mb-4 fw-bold text-primary">🇰🇷 역사 도슨트</h4>
+            <h4 class="mb-4 fw-bold text-primary">🇰🇷 3.1 운동 역사 도슨트</h4>
             <div class="mb-4">
                 <label class="form-label small fw-bold text-muted">통합 검색</label>
                 <div class="input-group input-group-sm">
@@ -489,6 +516,7 @@ function fetch_pg_rows_for_name($pdo, $name, $tables_meta) {
                         
                         <div id="rag-section" style="display:none">
                             <h6 class="fw-bold mt-5 mb-3 border-top pt-3"><i class="bi bi-journal-text"></i> 수집된 사료/PG 근거</h6>
+                            <div id="rag-summary" class="small mb-3"></div>
                             <div id="rag-evidence-list" class="small" style="max-height: 320px; overflow-y: auto;"></div>
                         </div>
                     </div>
@@ -578,17 +606,46 @@ async function performSearch() {
         document.getElementById('explanation-content').innerHTML = "지식 구조 및 근거 수집 완료. <strong>'해설 생성'</strong> 버튼을 클릭하면 RAG 분석이 시작됩니다.";
         document.getElementById('explainBtn').style.display = 'inline-block';
 
+        const ragUsedDocCount = lastEvidences.length;
+        const ragUsedPgCount = pgPrefetchTexts.length;
+        const hasNeo4jDocs = ragUsedDocCount > 0;
+        const targetLabels = [...new Set(lastEvidences.map(ev => `${ev.doc} (대상: ${ev.concept})`))];
+
+        let summaryHtml = `<div class="p-2 bg-light border rounded">
+            <div class="fw-bold text-dark mb-2"><i class="bi bi-info-circle"></i> 근거 사용 현황</div>`;
+
+        if (hasNeo4jDocs) {
+            summaryHtml += `<div class="mb-1">검색된 사료 수: <span class="badge bg-warning text-dark">${lastEvidences.length}</span></div>
+            <div class="mb-1">RAG 사용 사료 수: <span class="badge bg-primary">${ragUsedDocCount}</span></div>`;
+        } else {
+            summaryHtml += `<div class="mb-1 text-muted"><i class="bi bi-info-circle"></i> 이번 결과는 Neo4j 사료 없이 PG 근거 중심으로 구성되었습니다.</div>`;
+        }
+
+        summaryHtml += `
+            <div class="mb-1">검색된 PG 근거 수: <span class="badge bg-success">${pgPrefetchTexts.length}</span></div>
+            <div class="mb-2">RAG 사용 PG 근거 수: <span class="badge bg-primary">${ragUsedPgCount}</span></div>`;
+
+        if (hasNeo4jDocs && targetLabels.length > 0) {
+            const targetPreview = targetLabels.slice(0, 6).map(label => `<span class="badge text-bg-light border me-1 mb-1">${escapeHtml(label)}</span>`).join('');
+            const remain = targetLabels.length > 6 ? `<div class="text-muted mt-1">외 ${targetLabels.length - 6}건</div>` : '';
+            summaryHtml += `<div class="mt-2"><div class="fw-semibold mb-1">대상 사료</div>${targetPreview}${remain}</div>`;
+        }
+        summaryHtml += `</div>`;
+        document.getElementById('rag-summary').innerHTML = summaryHtml;
+
         let ragHtml = '';
-        lastEvidences.forEach(ev => {
+        lastEvidences.forEach((ev) => {
+            const usageBadge = '<span class="badge bg-primary ms-2">RAG 사용</span>';
             ragHtml += `<div class="p-2 mb-2 bg-light border-start border-warning border-3 rounded small">
-                <div class="fw-bold text-dark">📜 ${ev.doc} (개체: ${ev.concept})</div>
-                <div class="text-muted mt-1">${ev.text.substring(0, 300)}...</div>
+                <div class="fw-bold text-dark">📜 ${escapeHtml(ev.doc)} <span class="text-muted">(대상: ${escapeHtml(ev.concept)})</span>${usageBadge}</div>
+                <div class="text-muted mt-1">${escapeHtml(ev.text).substring(0, 300)}...</div>
             </div>`;
         });
-        pgPrefetchTexts.forEach(txt => {
+        pgPrefetchTexts.forEach((txt) => {
+            const usageBadge = '<span class="badge bg-primary ms-2">RAG 사용</span>';
             ragHtml += `<div class="p-2 mb-2 bg-light border-start border-success border-3 rounded small">
-                <div class="fw-bold text-dark"><i class="bi bi-database"></i> PostgreSQL 사료</div>
-                <div class="text-muted mt-1">${txt}</div>
+                <div class="fw-bold text-dark"><i class="bi bi-database"></i> PostgreSQL 사료${usageBadge}</div>
+                <div class="text-muted mt-1">${escapeHtml(txt)}</div>
             </div>`;
         });
 
@@ -623,6 +680,15 @@ async function generateExplanation() {
 
 function setStatus(html) {
     document.getElementById('status-text').innerHTML = html;
+}
+
+function escapeHtml(value) {
+    return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 // ✨ 노드 정보를 패널에 렌더링하는 함수
