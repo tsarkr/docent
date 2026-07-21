@@ -323,7 +323,6 @@ function call_deepseek($msgs, $is_json = false) {
     ]);
     
     $res = curl_exec($ch);
-    curl_close($ch);
     
     $data = json_decode($res, true);
     $content = $data['choices'][0]['message']['content'] ?? '';
