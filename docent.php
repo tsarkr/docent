@@ -25,8 +25,17 @@ function get_cfg($key, $default = '') {
     return $default;
 }
 
-$gtm_id = get_cfg('GTM_ID');
-$ga_measurement_id = get_cfg('GA_MEASUREMENT_ID');
+function docent_lang() {
+    return defined('DOCENT_LANG') ? DOCENT_LANG : 'ko';
+}
+
+function docent_is_english() {
+    return docent_lang() === 'en';
+}
+
+function docent_t($ko, $en) {
+    return docent_is_english() ? $en : $ko;
+}
 
 // 2. API Logic (AJAX Handlers)
 if (isset($_GET['ajax'])) {
@@ -37,14 +46,25 @@ if (isset($_GET['ajax'])) {
         // [Action 1] 의도 분석
         if ($action === 'analyze') {
             $term = $_POST['term'] ?? '';
-            $system_prompt = "당신은 역사 지식 검색을 위한 전문 분석가입니다. 사용자의 질문을 분석하여 다음 JSON 형식으로만 답하십시오.\n"
-                           . "{\n"
-                           . "  \"intent\": \"ENTITY_SEARCH\",\n"
-                           . "  \"keywords\": [\"" . addslashes($term) . "\"],\n"
-                           . "  \"focus\": \"인물\",\n"
-                           . "  \"explanation\": \"검색어 기반 분석 수행\"\n"
-                           . "}\n"
-                           . "부가적인 설명 없이 JSON만 반환하십시오.";
+            if (docent_is_english()) {
+                $system_prompt = "You are a specialist analyst for historical knowledge search. Analyze the user's query and reply only in the following JSON format.\n"
+                               . "{\n"
+                               . "  \"intent\": \"ENTITY_SEARCH\",\n"
+                               . "  \"keywords\": [\"" . addslashes($term) . "\"],\n"
+                               . "  \"focus\": \"Person\",\n"
+                               . "  \"explanation\": \"Keyword-based analysis completed\"\n"
+                               . "}\n"
+                               . "Return JSON only, without additional explanation.";
+            } else {
+                $system_prompt = "당신은 역사 지식 검색을 위한 전문 분석가입니다. 사용자의 질문을 분석하여 다음 JSON 형식으로만 답하십시오.\n"
+                               . "{\n"
+                               . "  \"intent\": \"ENTITY_SEARCH\",\n"
+                               . "  \"keywords\": [\"" . addslashes($term) . "\"],\n"
+                               . "  \"focus\": \"인물\",\n"
+                               . "  \"explanation\": \"검색어 기반 분석 수행\"\n"
+                               . "}\n"
+                               . "부가적인 설명 없이 JSON만 반환하십시오.";
+            }
 
             $res = call_deepseek([
                 ["role" => "system", "content" => $system_prompt],
@@ -55,8 +75,8 @@ if (isset($_GET['ajax'])) {
             $output = [
                 "intent" => $parsed['intent'] ?? 'ENTITY_SEARCH',
                 "keywords" => $parsed['keywords'] ?? [$term],
-                "focus" => $parsed['focus'] ?? '인물',
-                "explanation" => $parsed['explanation'] ?? '분석 완료'
+                "focus" => $parsed['focus'] ?? (docent_is_english() ? 'Person' : '인물'),
+                "explanation" => $parsed['explanation'] ?? (docent_is_english() ? 'Analysis complete' : '분석 완료')
             ];
             
             echo json_encode($output, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
@@ -154,8 +174,8 @@ if (isset($_GET['ajax'])) {
                     if ($e && $p) {
                         $e_nid = add_node_to_map($nodes, $e, $rec->get('e_labels'));
                         $p_nid = add_node_to_map($nodes, $p, $rec->get('p_labels'));
-                        if ($n_nid && $e_nid) $edges[] = ["from" => $n_nid, "to" => $e_nid, "label" => "수행/참여"];
-                        if ($e_nid && $p_nid) $edges[] = ["from" => $e_nid, "to" => $p_nid, "label" => "수행/참여"];
+                        if ($n_nid && $e_nid) $edges[] = ["from" => $n_nid, "to" => $e_nid, "label" => docent_t("수행/참여", "Performed/Participated")];
+                        if ($e_nid && $p_nid) $edges[] = ["from" => $e_nid, "to" => $p_nid, "label" => docent_t("수행/참여", "Performed/Participated")];
                     }
                 }
             }
@@ -178,59 +198,26 @@ if (isset($_GET['ajax'])) {
         if ($action === 'pg_prefetch') {
             $names = json_decode($_POST['names'] ?? '[]', true);
             $pdo = get_pg();
-            if (!$pdo) {
-                http_response_code(500);
-                echo json_encode([
-                    "error" => "PostgreSQL 연결 실패: PG_HOST, PG_PORT, PG_DATABASE, PG_USER, PG_PASSWORD 설정을 확인하세요"
-                ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
-                exit;
-            }
-
-            @set_time_limit(30);
+            if (!$pdo) { echo json_encode([], JSON_UNESCAPED_UNICODE); exit; }
 
             $all_rows = [];
-            try {
-                $tables_meta = get_pg_tables_metadata($pdo);
-            } catch (Throwable $e) {
-                http_response_code(500);
-                echo json_encode([
-                    "error" => "PostgreSQL 테이블 메타데이터 조회 실패: " . $e->getMessage()
-                ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
-                exit;
-            }
+            $tables_meta = get_pg_tables_metadata($pdo);
             $seen = [];
-            $max_names = 12;
-            $max_total_rows = 80;
-            $truncated = false;
-            $processed_names = 0;
+            $count = 0;
 
             foreach ((array)$names as $name) {
                 if (empty($name) || isset($seen[$name])) continue;
                 $seen[$name] = true;
-                $processed_names++;
-                if ($processed_names > $max_names) {
-                    $truncated = true;
-                    break;
-                }
+                if (++$count > 20) break;
 
                 $rows = fetch_pg_rows_for_name($pdo, $name, $tables_meta);
                 foreach ($rows as $r) {
                     $r['node_id'] = $name;
                     $all_rows[] = $r;
-                    if (count($all_rows) >= $max_total_rows) {
-                        $truncated = true;
-                        break 2;
-                    }
                 }
             }
 
-            echo json_encode([
-                'rows' => $all_rows,
-                'truncated' => $truncated,
-                'limit' => $max_total_rows,
-                'count' => count($all_rows),
-                'processed_names' => min($processed_names, $max_names)
-            ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+            echo json_encode($all_rows, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
             exit;
         }
 
@@ -242,25 +229,42 @@ if (isset($_GET['ajax'])) {
 
             $context_str = "";
             if (!empty($evidences)) {
-                foreach ($evidences as $e) {
-                    $context_str .= "- 문서: {$e['doc']}\n  내용: {$e['text']}...\n";
+                foreach (array_slice($evidences, 0, 20) as $e) {
+                    $context_str .= docent_is_english()
+                        ? "- Document: {$e['doc']}\n  Content: {$e['text']}...\n"
+                        : "- 문서: {$e['doc']}\n  내용: {$e['text']}...\n";
                 }
             }
             if (!empty($pg_texts)) {
                 if ($context_str) $context_str .= "\n\n";
-                $context_str .= "[PG 근거]\n" . implode("\n", array_map(fn($t) => "- " . $t, $pg_texts));
+                $context_str .= docent_is_english()
+                    ? "[PG Evidence]\n" . implode("\n", array_map(fn($t) => "- " . $t, array_slice($pg_texts, 0, 50)))
+                    : "[PG 근거]\n" . implode("\n", array_map(fn($t) => "- " . $t, array_slice($pg_texts, 0, 50)));
             }
 
-            $prompt = "당신은 역사 도슨트입니다. 다음 사료와 PG 근거를 바탕으로 '{$term}'에 대해 균형잡힌 해설을 작성하세요.\n"
-                    . "- 사실/추정/논쟁 지점을 구분해 서술합니다.\n"
-                    . "- 감정적·과장 표현을 피하고 중립적 톤을 유지합니다.\n"
-                    . "- 근거가 부족한 부분은 명확히 한계를 밝힙니다.\n\n"
-                    . "[사료/PG 근거]\n{$context_str}";
+            if (docent_is_english()) {
+                $prompt = "You are a history docent. Based on the following sources and PG evidence, write a balanced explanation about '{$term}'.\n"
+                        . "- Distinguish facts, inferences, and contested points.\n"
+                        . "- Avoid emotional or exaggerated language and keep a neutral tone.\n"
+                        . "- Clearly state the limits where evidence is insufficient.\n\n"
+                        . "[Sources / PG Evidence]\n{$context_str}";
 
-            $res = call_deepseek([
-                ["role" => "system", "content" => "당신은 역사 도슨트입니다. 한국어 해설만 작성하십시오."],
-                ["role" => "user", "content" => $prompt]
-            ], false);
+                $res = call_deepseek([
+                    ["role" => "system", "content" => "You are a history docent. Write the explanation in English only."],
+                    ["role" => "user", "content" => $prompt]
+                ], false);
+            } else {
+                $prompt = "당신은 역사 도슨트입니다. 다음 사료와 PG 근거를 바탕으로 '{$term}'에 대해 균형잡힌 해설을 작성하세요.\n"
+                        . "- 사실/추정/논쟁 지점을 구분해 서술합니다.\n"
+                        . "- 감정적·과장 표현을 피하고 중립적 톤을 유지합니다.\n"
+                        . "- 근거가 부족한 부분은 명확히 한계를 밝힙니다.\n\n"
+                        . "[사료/PG 근거]\n{$context_str}";
+
+                $res = call_deepseek([
+                    ["role" => "system", "content" => "당신은 역사 도슨트입니다. 한국어 해설만 작성하십시오."],
+                    ["role" => "user", "content" => $prompt]
+                ], false);
+            }
 
             echo json_encode(["text" => $res], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
             exit;
@@ -290,12 +294,9 @@ function get_pg() {
         $user = get_cfg('PG_USER', 'postgres');
         $pass = get_cfg('PG_PASSWORD', '');
         
+        if (empty($pass)) return null;
         $dsn = "pgsql:host={$host};port={$port};dbname={$dbname}";
-        $options = [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION];
-        if ($pass !== '') {
-            return new PDO($dsn, $user, $pass, $options);
-        }
-        return new PDO($dsn, $user, null, $options);
+        return new PDO($dsn, $user, $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
     } catch (Exception $e) {
         return null;
     }
@@ -303,7 +304,7 @@ function get_pg() {
 
 function call_deepseek($msgs, $is_json = false) {
     $api_key = get_cfg('DEEPSEEK_API_KEY');
-    if (!$api_key) return $is_json ? '{"explanation":"API Key missing"}' : "API Key가 설정되지 않았습니다.";
+    if (!$api_key) return $is_json ? '{"explanation":"API Key missing"}' : docent_t("API Key가 설정되지 않았습니다.", "API key is not configured.");
 
     $ch = curl_init(rtrim(get_cfg('DEEPSEEK_BASE_URL', 'https://api.deepseek.com'), '/') . '/chat/completions');
     $payload = [
@@ -328,7 +329,7 @@ function call_deepseek($msgs, $is_json = false) {
     $content = $data['choices'][0]['message']['content'] ?? '';
 
     if ($is_json) return $content ?: '{"explanation":"JSON Content empty"}';
-    return $content ?: "해설을 생성할 수 없습니다.";
+    return $content ?: docent_t("해설을 생성할 수 없습니다.", "Unable to generate an explanation.");
 }
 
 function add_node_to_map(&$map, $node, $labels_iterable) {
@@ -380,40 +381,32 @@ function add_node_to_map(&$map, $node, $labels_iterable) {
 }
 
 function _get_rel_label($rtype) {
-    $map = ["P14_carried_out_by" => "수행(참여)", "P7_took_place_at" => "발생 장소", "P152_has_parent" => "가족 관계", "foaf:knows" => "동지/지인", "foaf:member" => "소속 기구", "P11_had_participant" => "참여 인물", "P108_has_produced" => "생성/저작", "P102_has_title" => "명칭/제목", "소속" => "소속"];
-    return $map[$rtype] ?? $rtype;
+    $ko = ["P14_carried_out_by" => "수행(참여)", "P7_took_place_at" => "발생 장소", "P152_has_parent" => "가족 관계", "foaf:knows" => "동지/지인", "foaf:member" => "소속 기구", "P11_had_participant" => "참여 인물", "P108_has_produced" => "생성/저작", "P102_has_title" => "명칭/제목", "소속" => "소속"];
+    $en = ["P14_carried_out_by" => "Performed/Participated", "P7_took_place_at" => "Location", "P152_has_parent" => "Family relation", "foaf:knows" => "Comrade/Acquaintance", "foaf:member" => "Affiliated organization", "P11_had_participant" => "Participant", "P108_has_produced" => "Created/Produced", "P102_has_title" => "Title", "소속" => "Affiliation"];
+    return docent_is_english() ? ($en[$rtype] ?? $rtype) : ($ko[$rtype] ?? $rtype);
 }
 
 function get_pg_tables_metadata($pdo) {
-    $stmt = $pdo->query("SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema') AND table_type = 'BASE TABLE' AND table_name LIKE 'raw_%' ORDER BY table_schema, table_name");
+    $stmt = $pdo->query("SELECT table_schema, table_name FROM information_schema.columns WHERE column_name = 'tei' AND table_schema NOT IN ('pg_catalog', 'information_schema') GROUP BY table_schema, table_name");
     $tables = $stmt->fetchAll(PDO::FETCH_ASSOC);
     $meta = [];
 
     foreach ($tables as $t) {
-        try {
-            $schema = $t['table_schema']; $table = $t['table_name'];
-            $s1 = $pdo->prepare("SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position ASC");
-            $s1->execute([$schema, $table]);
-            $all_cols = $s1->fetchAll(PDO::FETCH_COLUMN);
+        $schema = $t['table_schema']; $table = $t['table_name'];
+        $s1 = $pdo->prepare("SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position ASC LIMIT 1");
+        $s1->execute([$schema, $table]);
+        $id_col = $s1->fetchColumn() ?: 'rowid';
 
-            if (empty($all_cols) || !in_array('tei', $all_cols, true)) {
-                continue;
+        $s2 = $pdo->prepare("SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ? AND data_type IN ('character varying','text','character') ORDER BY ordinal_position ASC");
+        $s2->execute([$schema, $table]);
+        $text_cols = $s2->fetchAll(PDO::FETCH_COLUMN);
+
+        foreach (['명칭', '사건명', '제목'] as $p) {
+            if (($idx = array_search($p, $text_cols)) !== false) {
+                array_splice($text_cols, $idx, 1); array_unshift($text_cols, $p);
             }
-
-            $id_col = $all_cols[0] ?: 'rowid';
-            $s2 = $pdo->prepare("SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ? AND data_type IN ('character varying','text','character') ORDER BY ordinal_position ASC");
-            $s2->execute([$schema, $table]);
-            $text_cols = $s2->fetchAll(PDO::FETCH_COLUMN);
-
-            foreach (['명칭', '사건명', '제목'] as $p) {
-                if (($idx = array_search($p, $text_cols, true)) !== false) {
-                    array_splice($text_cols, $idx, 1); array_unshift($text_cols, $p);
-                }
-            }
-            $meta[] = ['schema' => $schema, 'table' => $table, 'id_col' => $id_col, 'text_cols' => array_slice($text_cols, 0, 6)];
-        } catch (Throwable $e) {
-            continue;
         }
+        $meta[] = ['schema' => $schema, 'table' => $table, 'id_col' => $id_col, 'text_cols' => array_slice($text_cols, 0, 6)];
     }
     return $meta;
 }
@@ -426,9 +419,7 @@ function fetch_pg_rows_for_name($pdo, $name, $tables_meta) {
         foreach ($m['text_cols'] as $c) if (!in_array($c, $search_cols)) $search_cols[] = $c;
 
         $clauses = []; foreach ($search_cols as $c) $clauses[] = "\"{$c}\"::text ILIKE ?";
-        $q = "SELECT * FROM {$fq} WHERE (" . implode(" OR ", $clauses) . ") LIMIT 2";
-        $select_cols = array_values(array_unique(array_filter(array_merge([$m['id_col'], 'tei'], array_slice($m['text_cols'], 0, 3)))));
-        $q = "SELECT " . implode(", ", array_map(fn($c) => "\"{$c}\"", $select_cols)) . " FROM {$fq} WHERE (" . implode(" OR ", $clauses) . ") LIMIT 1";
+        $q = "SELECT * FROM {$fq} WHERE (" . implode(" OR ", $clauses) . ") LIMIT 5";
         
         try {
             $stmt = $pdo->prepare($q);
@@ -437,19 +428,8 @@ function fetch_pg_rows_for_name($pdo, $name, $tables_meta) {
 
             foreach ($rows as $row) {
                 $snippets = [];
-                foreach ($row as $k => $v) {
-                    if ($k === $m['id_col'] || $k === 'tei') continue;
-                    $value = $v !== null ? strval($v) : '';
-                    if ($value !== '' && mb_strlen($value) > 400) {
-                        $value = mb_substr($value, 0, 400) . '…';
-                    }
-                    $snippets[$k] = $value;
-                }
-                $tei_preview = isset($row['tei']) && $row['tei'] !== null ? strval($row['tei']) : '';
-                if ($tei_preview !== '' && mb_strlen($tei_preview) > 500) {
-                    $tei_preview = mb_substr($tei_preview, 0, 500) . '…';
-                }
-                $out[] = ['table' => $m['table'], 'schema' => $m['schema'], 'rowid' => $row[$m['id_col']] ?? null, 'id_col' => $m['id_col'], 'match_cols' => $search_cols, 'tei' => $tei_preview, 'snippets' => $snippets];
+                foreach ($row as $k => $v) if ($k !== $m['id_col'] && $k !== 'tei') $snippets[$k] = $v !== null ? strval($v) : '';
+                $out[] = ['table' => $m['table'], 'schema' => $m['schema'], 'rowid' => $row[$m['id_col']] ?? null, 'id_col' => $m['id_col'], 'match_cols' => $search_cols, 'tei' => $row['tei'] ?? null, 'snippets' => $snippets];
             }
         } catch (Exception $e) { continue; }
     }
@@ -462,26 +442,17 @@ function fetch_pg_rows_for_name($pdo, $name, $tables_meta) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>3.1 운동 역사 도슨트</title>
-    <?php if (!empty($gtm_id)): ?>
-    <!-- Google Tag Manager -->
-    <script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
-    new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
-    j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
-    'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
-    })(window,document,'script','dataLayer','<?= htmlspecialchars($gtm_id, ENT_QUOTES, 'UTF-8') ?>');</script>
-    <!-- End Google Tag Manager -->
-    <?php endif; ?>
-
-    <?php if (!empty($ga_measurement_id)): ?>
     <!-- Google tag (gtag.js) -->
-    <script async src="https://www.googletagmanager.com/gtag/js?id=<?= urlencode($ga_measurement_id) ?>"></script>
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-GRES32XWER"></script>
     <script>
         window.dataLayer = window.dataLayer || [];
-        function gtag(){dataLayer.push(arguments);}
+        function gtag(){dataLayer.push(arguments);} 
         gtag('js', new Date());
-        gtag('config', '<?= htmlspecialchars($ga_measurement_id, ENT_QUOTES, 'UTF-8') ?>');
+        gtag('config', 'G-GRES32XWER', {
+            send_page_view: true,
+            page_path: window.location.pathname
+        });
     </script>
-    <?php endif; ?>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
     <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
@@ -501,12 +472,6 @@ function fetch_pg_rows_for_name($pdo, $name, $tables_meta) {
     </style>
 </head>
 <body>
-<?php if (!empty($gtm_id)): ?>
-<!-- Google Tag Manager (noscript) -->
-<noscript><iframe src="https://www.googletagmanager.com/ns.html?id=<?= urlencode($gtm_id) ?>"
-height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
-<!-- End Google Tag Manager (noscript) -->
-<?php endif; ?>
 <div class="container-fluid">
     <div class="row">
         <div class="col-md-2 sidebar">
@@ -576,7 +541,6 @@ height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
                         
                         <div id="rag-section" style="display:none">
                             <h6 class="fw-bold mt-5 mb-3 border-top pt-3"><i class="bi bi-journal-text"></i> 수집된 사료/PG 근거</h6>
-                            <div id="rag-summary" class="small mb-3"></div>
                             <div id="rag-evidence-list" class="small" style="max-height: 320px; overflow-y: auto;"></div>
                         </div>
                     </div>
@@ -595,6 +559,12 @@ let currentNodes = []; // ✨ 검색된 노드 목록 보관용
 function setQuery(q) {
     document.getElementById('q').value = q;
     performSearch();
+}
+
+function trackAnalyticsEvent(name, params = {}) {
+    if (typeof gtag === 'function') {
+        gtag('event', name, params);
+    }
 }
 
 async function api(act, data = {}) {
@@ -623,6 +593,8 @@ async function api(act, data = {}) {
 async function performSearch() {
     const term = document.getElementById('q').value.trim();
     if (term.length < 2) return alert('2글자 이상 입력하세요.');
+
+    trackAnalyticsEvent('search', { search_term: term });
 
     document.getElementById('analysis-box').style.display = 'none';
     document.getElementById('explainBtn').style.display = 'none';
@@ -654,63 +626,29 @@ async function performSearch() {
         if (nodeNames.length > 0) {
             setStatus('<span class="spinner-border spinner-border-sm"></span> PostgreSQL 사료 원문 연동 중...');
             const pgRows = await api('pg_prefetch', { names: JSON.stringify(nodeNames) });
-            const pgList = Array.isArray(pgRows) ? pgRows : (pgRows.rows || []);
             
-            pgPrefetchTexts = pgList.map(r => {
+            pgPrefetchTexts = pgRows.map(r => {
                 let sStr = [];
                 for(let k in r.snippets) { if(r.snippets[k]) sStr.push(`${k}: ${r.snippets[k]}`); }
                 return `[${r.schema}.${r.table}] node=${r.node_id} rowid=${r.rowid} :: ${sStr.join('; ')}`;
             });
-
-            if (pgRows && typeof pgRows === 'object' && pgRows.truncated) {
-                setStatus(`PG 근거가 많아 ${pgRows.count}건까지만 불러왔습니다.`);
-            }
         }
 
         document.getElementById('search-title').innerText = `'${term}' 지식망 탐색 완료`;
         document.getElementById('explanation-content').innerHTML = "지식 구조 및 근거 수집 완료. <strong>'해설 생성'</strong> 버튼을 클릭하면 RAG 분석이 시작됩니다.";
         document.getElementById('explainBtn').style.display = 'inline-block';
 
-        const ragUsedDocCount = lastEvidences.length;
-        const ragUsedPgCount = pgPrefetchTexts.length;
-        const hasNeo4jDocs = ragUsedDocCount > 0;
-        const targetLabels = [...new Set(lastEvidences.map(ev => `${ev.doc} (대상: ${ev.concept})`))];
-
-        let summaryHtml = `<div class="p-2 bg-light border rounded">
-            <div class="fw-bold text-dark mb-2"><i class="bi bi-info-circle"></i> 근거 사용 현황</div>`;
-
-        if (hasNeo4jDocs) {
-            summaryHtml += `<div class="mb-1">검색된 사료 수: <span class="badge bg-warning text-dark">${lastEvidences.length}</span></div>
-            <div class="mb-1">RAG 사용 사료 수: <span class="badge bg-primary">${ragUsedDocCount}</span></div>`;
-        } else {
-            summaryHtml += `<div class="mb-1 text-muted"><i class="bi bi-info-circle"></i> 이번 결과는 Neo4j 사료 없이 PG 근거 중심으로 구성되었습니다.</div>`;
-        }
-
-        summaryHtml += `
-            <div class="mb-1">검색된 PG 근거 수: <span class="badge bg-success">${pgPrefetchTexts.length}</span></div>
-            <div class="mb-2">RAG 사용 PG 근거 수: <span class="badge bg-primary">${ragUsedPgCount}</span></div>`;
-
-        if (hasNeo4jDocs && targetLabels.length > 0) {
-            const targetPreview = targetLabels.slice(0, 6).map(label => `<span class="badge text-bg-light border me-1 mb-1">${escapeHtml(label)}</span>`).join('');
-            const remain = targetLabels.length > 6 ? `<div class="text-muted mt-1">외 ${targetLabels.length - 6}건</div>` : '';
-            summaryHtml += `<div class="mt-2"><div class="fw-semibold mb-1">대상 사료</div>${targetPreview}${remain}</div>`;
-        }
-        summaryHtml += `</div>`;
-        document.getElementById('rag-summary').innerHTML = summaryHtml;
-
         let ragHtml = '';
-        lastEvidences.forEach((ev) => {
-            const usageBadge = '<span class="badge bg-primary ms-2">RAG 사용</span>';
+        lastEvidences.forEach(ev => {
             ragHtml += `<div class="p-2 mb-2 bg-light border-start border-warning border-3 rounded small">
-                <div class="fw-bold text-dark">📜 ${escapeHtml(ev.doc)} <span class="text-muted">(대상: ${escapeHtml(ev.concept)})</span>${usageBadge}</div>
-                <div class="text-muted mt-1">${escapeHtml(ev.text).substring(0, 300)}...</div>
+                <div class="fw-bold text-dark">📜 ${ev.doc} (개체: ${ev.concept})</div>
+                <div class="text-muted mt-1">${ev.text.substring(0, 300)}...</div>
             </div>`;
         });
-        pgPrefetchTexts.forEach((txt) => {
-            const usageBadge = '<span class="badge bg-primary ms-2">RAG 사용</span>';
+        pgPrefetchTexts.forEach(txt => {
             ragHtml += `<div class="p-2 mb-2 bg-light border-start border-success border-3 rounded small">
-                <div class="fw-bold text-dark"><i class="bi bi-database"></i> PostgreSQL 사료${usageBadge}</div>
-                <div class="text-muted mt-1">${escapeHtml(txt)}</div>
+                <div class="fw-bold text-dark"><i class="bi bi-database"></i> PostgreSQL 사료</div>
+                <div class="text-muted mt-1">${txt}</div>
             </div>`;
         });
 
@@ -729,6 +667,11 @@ async function performSearch() {
 
 async function generateExplanation() {
     const term = document.getElementById('q').value.trim();
+    trackAnalyticsEvent('generate_explanation', {
+        search_term: term,
+        evidence_count: lastEvidences.length,
+        pg_count: pgPrefetchTexts.length
+    });
     document.getElementById('explanation-content').innerHTML = '<div class="text-center p-4"><div class="spinner-border text-primary" role="status"></div><br><small class="text-muted mt-2 d-inline-block">해설 생성중...</small></div>';
     
     try {
@@ -745,15 +688,6 @@ async function generateExplanation() {
 
 function setStatus(html) {
     document.getElementById('status-text').innerHTML = html;
-}
-
-function escapeHtml(value) {
-    return String(value || '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#39;');
 }
 
 // ✨ 노드 정보를 패널에 렌더링하는 함수
@@ -776,7 +710,7 @@ function showNodeInfo(node) {
         relatedEvidences.forEach(ev => {
             html += `<div class="mb-2 p-2 bg-light border rounded small">
                 <strong class="text-dark">${ev.doc}</strong><br>
-                <div class="text-muted" style="white-space: pre-wrap;">${escapeHtml(ev.text)}</div>
+                <span class="text-muted">${ev.text.substring(0, 150)}...</span>
             </div>`;
         });
     }
@@ -789,13 +723,10 @@ function showNodeInfo(node) {
             // DB 출처 정보 강조 (예: [public.서지정보_260410])
             const parts = txt.split('::');
             const source = parts[0];
-            const detail = parts[1] ? parts[1] : '';
+            const detail = parts[1] ? parts[1].substring(0, 150) : '';
             html += `<div class="mb-2 p-2 bg-light border rounded small">
-                <strong class="text-success">${escapeHtml(source.replace(/\[|\]/g, ''))}</strong><br>
-                <details class="mt-1" open>
-                    <summary class="text-muted">원문 전체 보기</summary>
-                    <div class="text-muted mt-2" style="white-space: pre-wrap;">${escapeHtml(detail)}</div>
-                </details>
+                <strong class="text-success">${source.replace(/\[|\]/g, '')}</strong><br>
+                <span class="text-muted">${detail}...</span>
             </div>`;
         });
     }
@@ -825,6 +756,10 @@ function draw(nodes, edges) {
             const nodeId = params.nodes[0];
             const clickedNode = currentNodes.find(n => n.id === nodeId);
             if (clickedNode) {
+                trackAnalyticsEvent('node_click', {
+                    node_id: clickedNode.raw_id || nodeId,
+                    node_labels: (clickedNode.labels || []).join('|')
+                });
                 showNodeInfo(clickedNode);
             }
         } else {
