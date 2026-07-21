@@ -64,10 +64,23 @@ ob_start(function ($buffer) {
         '참여 인물' => 'Participant',
         '생성/저작' => 'Created/Produced',
         '명칭/제목' => 'Title',
-        '소속' => 'Affiliation'
+        '소속' => 'Affiliation',
+        '유관순' => 'Ryu Gwan-sun',
+        '안중근' => 'An Jung-geun',
+        '3.1 운동' => 'March 1st Movement',
+        '시위' => 'Protest',
+        '임시정부' => 'Provisional Government',
+        '2글자 이상 입력하세요.' => 'Please enter at least 2 characters.',
+        '분석 중...' => 'Analyzing...',
+        '지식망 탐색 완료' => 'Knowledge Graph Search Completed',
+        '단계 오류] ' => 'stage error] ',
+        '서버 오류' => 'Server error',
+        '단계 500 에러] ' => 'stage 500 error] ',
+        '단계 JSON 파싱 실패] ' => 'stage JSON parsing failed] ',
+        '원문: ' => 'Raw text: '
     ];
 
     return str_replace(array_keys($replacements), array_values($replacements), $buffer);
 });
 
-require_once __DIR__ . '/docent.php';
+require_once __DIR__ . '/index.php';

@@ -10,6 +10,12 @@
         const lang = params.get('lang') === 'en' ? 'en' : 'ko';
         document.documentElement.lang = lang;
         window.__DOCENT_LANG__ = lang;
+
+        function changeLanguage(targetLang) {
+            const url = new URL(window.location.href);
+            url.searchParams.set('lang', targetLang);
+            window.location.href = url.toString();
+        }
     </script>
     <style>
         body,
@@ -69,14 +75,14 @@
 
 <body>
     <div class="lang-switcher" aria-label="Language switcher">
-        <a id="lang-ko" href="https://11e.kr/index.php?lang=ko">Korean</a>
-        <a id="lang-en" href="https://11e.kr/index.php?lang=en">English</a>
+        <a id="lang-ko" href="#" onclick="changeLanguage('ko'); return false;">Korean</a>
+        <a id="lang-en" href="#" onclick="changeLanguage('en'); return false;">English</a>
     </div>
     <iframe id="docent-frame" allow="camera;microphone;geolocation;clipboard-read;clipboard-write;" allowfullscreen>
     </iframe>
     <script>
         const frame = document.getElementById('docent-frame');
-        frame.src = window.__DOCENT_LANG__ === 'en' ? 'docent_eng.php' : 'docent.php';
+        frame.src = window.__DOCENT_LANG__ === 'en' ? 'https://11e.kr/docent_eng.php' : 'https://11e.kr/index.php';
         document.getElementById(`lang-${window.__DOCENT_LANG__}`).classList.add('active');
     </script>
 </body>

@@ -243,14 +243,14 @@ if (isset($_GET['ajax'])) {
             }
 
             if (docent_is_english()) {
-                $prompt = "You are a history docent. Based on the following sources and PG evidence, write a balanced explanation about '{$term}'.\n"
+                $prompt = "You are a history docent. Based on the following Korean sources and PG evidence, write a balanced explanation about '{$term}' COMPLETELY IN ENGLISH. Do not use any Korean characters in your output. Translate any relevant information from the Korean sources into English inside the explanation.\n"
                         . "- Distinguish facts, inferences, and contested points.\n"
                         . "- Avoid emotional or exaggerated language and keep a neutral tone.\n"
                         . "- Clearly state the limits where evidence is insufficient.\n\n"
-                        . "[Sources / PG Evidence]\n{$context_str}";
+                        . "[Sources / PG Evidence (in Korean, please translate and explain in English)]\n{$context_str}";
 
                 $res = call_deepseek([
-                    ["role" => "system", "content" => "You are a history docent. Write the explanation in English only."],
+                    ["role" => "system", "content" => "You are a professional historical docent. You MUST write the entire response in English. Under no circumstances should you output Korean. Even if the source texts (PG Evidence) are in Korean, you must translate the key information and explain it completely in English."],
                     ["role" => "user", "content" => $prompt]
                 ], false);
             } else {
@@ -576,16 +576,16 @@ async function api(act, data = {}) {
     if (!response.ok) {
         try {
             const err = JSON.parse(rawText);
-            throw new Error(`[${act} 단계 오류] ` + (err.error || '서버 오류'));
+            throw new Error('[' + act + ' ' + '단계 오류] ' + (err.error || '서버 오류'));
         } catch(e) {
-            throw new Error(`[${act} 단계 500 에러] ` + rawText.substring(0, 150));
+            throw new Error('[' + act + ' ' + '단계 500 에러] ' + rawText.substring(0, 150));
         }
     }
     
     try {
         return JSON.parse(rawText);
     } catch (e) {
-        throw new Error(`[${act} 단계 JSON 파싱 실패] 원문: ` + rawText.substring(0, 150));
+        throw new Error('[' + act + ' ' + '단계 JSON 파싱 실패] ' + '원문: ' + rawText.substring(0, 150));
     }
 }
 
@@ -603,7 +603,7 @@ async function performSearch() {
     currentNodes = [];
 
     setStatus('<span class="spinner-border spinner-border-sm"></span> 의도 분석 중...');
-    document.getElementById('search-title').innerText = `'${term}' 분석 중...`;
+    document.getElementById('search-title').innerText = `'${term}' ` + '분석 중...';
     
     try {
         const analysis = await api('analyze', { term });
@@ -633,7 +633,7 @@ async function performSearch() {
             });
         }
 
-        document.getElementById('search-title').innerText = `'${term}' 지식망 탐색 완료`;
+        document.getElementById('search-title').innerText = `'${term}' ` + '지식망 탐색 완료';
         document.getElementById('explanation-content').innerHTML = "지식 구조 및 근거 수집 완료. <strong>'해설 생성'</strong> 버튼을 클릭하면 RAG 분석이 시작됩니다.";
         document.getElementById('explainBtn').style.display = 'inline-block';
 
@@ -659,7 +659,7 @@ async function performSearch() {
 
     } catch (e) {
         console.error(e);
-        setStatus(`<span class="text-danger"><i class="bi bi-exclamation-triangle"></i> 에러: ${e.message}</span>`);
+        setStatus('<span class="text-danger"><i class="bi bi-exclamation-triangle"></i> ' + '에러: ' + e.message + '</span>');
         document.getElementById('explanation-content').innerHTML = "데이터 탐색 과정에서 실패했습니다. 에러 내용을 확인해 주세요.";
     }
 }
