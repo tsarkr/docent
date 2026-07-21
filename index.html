@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="ko">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -11,7 +12,8 @@
         window.__DOCENT_LANG__ = lang;
     </script>
     <style>
-        body, html {
+        body,
+        html {
             margin: 0;
             padding: 0;
             height: 100%;
@@ -19,6 +21,7 @@
             overflow: hidden;
             background: #f0f2f6;
         }
+
         .lang-switcher {
             position: fixed;
             top: 16px;
@@ -33,6 +36,7 @@
             box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
             backdrop-filter: blur(10px);
         }
+
         .lang-switcher a {
             text-decoration: none;
             color: #495057;
@@ -41,14 +45,17 @@
             border-radius: 999px;
             transition: all 0.18s ease;
         }
+
         .lang-switcher a:hover {
             color: #0d6efd;
             background: #eef4ff;
         }
+
         .lang-switcher a.active {
             background: #0d6efd;
             color: #fff;
         }
+
         iframe {
             position: absolute;
             top: 0;
@@ -59,15 +66,13 @@
         }
     </style>
 </head>
+
 <body>
     <div class="lang-switcher" aria-label="Language switcher">
-        <a id="lang-ko" href="?lang=ko">Korean</a>
-        <a id="lang-en" href="?lang=en">English</a>
+        <a id="lang-ko" href="https://11e.kr/index.php?lang=ko">Korean</a>
+        <a id="lang-en" href="https://11e.kr/index.php?lang=en">English</a>
     </div>
-    <iframe
-        id="docent-frame"
-        allow="camera;microphone;geolocation;clipboard-read;clipboard-write;"
-        allowfullscreen>
+    <iframe id="docent-frame" allow="camera;microphone;geolocation;clipboard-read;clipboard-write;" allowfullscreen>
     </iframe>
     <script>
         const frame = document.getElementById('docent-frame');
@@ -75,4 +80,5 @@
         document.getElementById(`lang-${window.__DOCENT_LANG__}`).classList.add('active');
     </script>
 </body>
+
 </html>
