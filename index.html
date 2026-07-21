@@ -4,6 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>3.1 Movement History Docent</title>
+    <script>
+        const params = new URLSearchParams(window.location.search);
+        const lang = params.get('lang') === 'en' ? 'en' : 'ko';
+        document.documentElement.lang = lang;
+        window.__DOCENT_LANG__ = lang;
+    </script>
     <style>
         body, html {
             margin: 0;
@@ -11,6 +17,37 @@
             height: 100%;
             width: 100%;
             overflow: hidden;
+            background: #f0f2f6;
+        }
+        .lang-switcher {
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            z-index: 10;
+            display: flex;
+            gap: 8px;
+            padding: 8px;
+            background: rgba(255, 255, 255, 0.92);
+            border: 1px solid rgba(0, 0, 0, 0.08);
+            border-radius: 999px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+            backdrop-filter: blur(10px);
+        }
+        .lang-switcher a {
+            text-decoration: none;
+            color: #495057;
+            font: 600 14px/1.2 system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            padding: 8px 14px;
+            border-radius: 999px;
+            transition: all 0.18s ease;
+        }
+        .lang-switcher a:hover {
+            color: #0d6efd;
+            background: #eef4ff;
+        }
+        .lang-switcher a.active {
+            background: #0d6efd;
+            color: #fff;
         }
         iframe {
             position: absolute;
@@ -23,10 +60,19 @@
     </style>
 </head>
 <body>
+    <div class="lang-switcher" aria-label="Language switcher">
+        <a id="lang-ko" href="?lang=ko">Korean</a>
+        <a id="lang-en" href="?lang=en">English</a>
+    </div>
     <iframe
-        src="https://11e.kr/index.php" 
+        id="docent-frame"
         allow="camera;microphone;geolocation;clipboard-read;clipboard-write;"
         allowfullscreen>
     </iframe>
+    <script>
+        const frame = document.getElementById('docent-frame');
+        frame.src = window.__DOCENT_LANG__ === 'en' ? 'docent_eng.php' : 'docent.php';
+        document.getElementById(`lang-${window.__DOCENT_LANG__}`).classList.add('active');
+    </script>
 </body>
 </html>
