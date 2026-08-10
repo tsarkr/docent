@@ -753,18 +753,21 @@ function showNodeInfo(node) {
     const relatedEvidences = lastEvidences.filter(ev => ev.concept === node.raw_id || ev.concept === node.id);
     if (relatedEvidences.length > 0) {
         html += `<hr><h6 class="fw-bold text-warning mb-2"><i class="bi bi-journal-bookmark-fill"></i> Neo4j 관련 사료 기록</h6>`;
+        html += `<div style="max-height: 220px; overflow-y: auto; padding-right: 4px;">`;
         relatedEvidences.forEach(ev => {
-            html += `<div class="mb-2 p-2 bg-light border rounded small">
+            html += `<div class="mb-2 p-2 bg-light border rounded small" style="white-space: pre-wrap; word-break: break-word;">
                 <strong class="text-dark">${ev.doc}</strong><br>
                 <span class="text-muted">${ev.text.substring(0, 150)}...</span>
             </div>`;
         });
+        html += `</div>`;
     }
 
     // 관련된 PostgreSQL 근거 텍스트 찾기
     const relatedPg = pgPrefetchTexts.filter(txt => txt.includes(`node=${node.raw_id}`));
     if (relatedPg.length > 0) {
         html += `<hr><h6 class="fw-bold text-success mb-2"><i class="bi bi-database-fill"></i> PostgreSQL 관련 근거</h6>`;
+        html += `<div style="max-height: 220px; overflow-y: auto; padding-right: 4px;">`;
         relatedPg.forEach(txt => {
             // DB 출처 정보 강조 (예: [public.서지정보_260410])
             const parts = txt.split('::');
@@ -775,6 +778,7 @@ function showNodeInfo(node) {
                 <div class="text-muted" style="max-height: 120px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;">${detail}</div>
             </div>`;
         });
+        html += `</div>`;
     }
 
     if (relatedEvidences.length === 0 && relatedPg.length === 0) {
