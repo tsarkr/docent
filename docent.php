@@ -224,25 +224,27 @@ if (isset($_GET['ajax'])) {
         // [Action 4] AI RAG 도슨트 해설 생성
         if ($action === 'explain') {
             $term = $_POST['term'] ?? '';
+            $explain_lang = $_POST['lang'] ?? (docent_is_english() ? 'en' : 'ko');
+            $use_english = ($explain_lang === 'en');
             $evidences = json_decode($_POST['evidences'] ?? '[]', true) ?? [];
             $pg_texts = json_decode($_POST['pg_texts'] ?? '[]', true) ?? [];
 
             $context_str = "";
             if (!empty($evidences)) {
                 foreach (array_slice($evidences, 0, 20) as $e) {
-                    $context_str .= docent_is_english()
+                    $context_str .= $use_english
                         ? "- Document: {$e['doc']}\n  Content: {$e['text']}...\n"
                         : "- 문서: {$e['doc']}\n  내용: {$e['text']}...\n";
                 }
             }
             if (!empty($pg_texts)) {
                 if ($context_str) $context_str .= "\n\n";
-                $context_str .= docent_is_english()
+                $context_str .= $use_english
                     ? "[PG Evidence]\n" . implode("\n", array_map(fn($t) => "- " . $t, array_slice($pg_texts, 0, 50)))
                     : "[PG 근거]\n" . implode("\n", array_map(fn($t) => "- " . $t, array_slice($pg_texts, 0, 50)));
             }
 
-            if (docent_is_english()) {
+            if ($use_english) {
                 $prompt = "You are a history docent. Based on the following Korean sources and PG evidence, write a balanced explanation about '{$term}' COMPLETELY IN ENGLISH. Do not use any Korean characters in your output. Translate any relevant information from the Korean sources into English inside the explanation.\n"
                         . "- Distinguish facts, inferences, and contested points.\n"
                         . "- Avoid emotional or exaggerated language and keep a neutral tone.\n"
@@ -487,7 +489,7 @@ function fetch_pg_rows_for_name($pdo, $name, $tables_meta) {
                 <label class="form-label small fw-bold text-muted">추천 키워드</label>
                 <div class="d-grid gap-2">
                     <?php foreach (["유관순", "안중근", "3.1 운동", "시위", "임시정부"] as $kw): ?>
-                        <button onclick="setQuery('<?= $kw ?>')" class="btn btn-outline-secondary btn-sm text-start">📌 <?= $kw ?></button>
+                        <button onclick="setQuery('<?= $kw ?>')" class="btn btn-outline-secondary btn-sm text-start keyword-btn" data-ko-label="<?= $kw ?>">📌 <?= $kw ?></button>
                     <?php endforeach; ?>
                 </div>
             </div>
@@ -508,6 +510,12 @@ function fetch_pg_rows_for_name($pdo, $name, $tables_meta) {
             <h3 id="search-title" class="mb-4 fw-bold">역사를 탐색해 보세요.</h3>
             <div class="row">
                 <div class="col-lg-6">
+                    <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
+                        <div class="small fw-bold text-muted">지식그래프</div>
+                        <button type="button" class="btn btn-sm btn-outline-primary" onclick="centerGraph()">
+                            <i class="bi bi-bullseye"></i> 가운데로 다시 불러오기
+                        </button>
+                    </div>
                     <div id="graph"></div>
                     <div class="d-flex justify-content-center gap-3 mb-4 flex-wrap">
                         <div class="legend-item"><div class="legend-color" style="background: #F7A01F;"></div> 사료</div>
@@ -528,14 +536,25 @@ function fetch_pg_rows_for_name($pdo, $name, $tables_meta) {
 
                 <div class="col-lg-6">
                     <div class="docent-card">
-                        <div class="d-flex justify-content-between align-items-center mb-4">
+                        <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
                             <h5 class="fw-bold m-0"><i class="bi bi-chat-dots-fill text-primary"></i> 도슨트 해설</h5>
                             <button id="explainBtn" onclick="generateExplanation()" class="btn btn-sm btn-primary" style="display:none;">
                                 <i class="bi bi-stars"></i> 해설 생성
                             </button>
                         </div>
-                        <div id="explanation-content" class="text-secondary" style="line-height: 1.7; min-height: 100px;">
-                            검색어를 입력하고 탐색 버튼을 누르면 인프라가 작동합니다.
+                        <div class="border rounded-3 bg-light p-3 mb-3">
+                            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
+                                <div class="small fw-bold text-muted">해설 언어</div>
+                                <div class="btn-group btn-group-sm" role="group" aria-label="해설 언어 토글">
+                                    <input type="radio" class="btn-check" name="explanation-lang" id="explanation-lang-ko" value="ko" <?php echo docent_is_english() ? '' : 'checked'; ?>>
+                                    <label class="btn btn-outline-primary" for="explanation-lang-ko">한국어</label>
+                                    <input type="radio" class="btn-check" name="explanation-lang" id="explanation-lang-en" value="en" <?php echo docent_is_english() ? 'checked' : ''; ?>>
+                                    <label class="btn btn-outline-primary" for="explanation-lang-en">English</label>
+                                </div>
+                            </div>
+                            <div id="explanation-content" class="text-secondary" style="line-height: 1.7; min-height: 100px;">
+                                검색어를 입력하고 탐색 버튼을 누르면 인프라가 작동합니다.
+                            </div>
                         </div>
                         
                         <div id="rag-section" style="display:none">
@@ -554,6 +573,16 @@ let network = null;
 let lastEvidences = [];
 let pgPrefetchTexts = [];
 let currentNodes = []; // ✨ 검색된 노드 목록 보관용
+
+function restoreSuggestedKeywords() {
+    if (document.documentElement.lang !== 'en') return;
+    document.querySelectorAll('.keyword-btn').forEach((button) => {
+        const label = button.dataset.koLabel || button.textContent.replace(/^📌\s*/, '');
+        button.textContent = `📌 ${label}`;
+    });
+}
+
+restoreSuggestedKeywords();
 
 function setQuery(q) {
     document.getElementById('q').value = q;
@@ -666,16 +695,20 @@ async function performSearch() {
 
 async function generateExplanation() {
     const term = document.getElementById('q').value.trim();
+    const langInput = document.querySelector('input[name="explanation-lang"]:checked');
+    const lang = langInput ? langInput.value : 'ko';
     trackAnalyticsEvent('generate_explanation', {
         search_term: term,
         evidence_count: lastEvidences.length,
-        pg_count: pgPrefetchTexts.length
+        pg_count: pgPrefetchTexts.length,
+        explanation_lang: lang
     });
     document.getElementById('explanation-content').innerHTML = '<div class="text-center p-4"><div class="spinner-border text-primary" role="status"></div><br><small class="text-muted mt-2 d-inline-block">해설 생성중...</small></div>';
     
     try {
         const res = await api('explain', {
             term,
+            lang,
             evidences: JSON.stringify(lastEvidences),
             pg_texts: JSON.stringify(pgPrefetchTexts)
         });
@@ -683,6 +716,20 @@ async function generateExplanation() {
     } catch (e) {
         document.getElementById('explanation-content').innerHTML = `<span class='text-danger'>해설 생성 중 오류: ${e.message}</span>`;
     }
+}
+
+function centerGraph() {
+    if (!network) {
+        setStatus('먼저 지식그래프를 탐색해 주세요.');
+        return;
+    }
+
+    network.fit({
+        animation: {
+            duration: 600,
+            easingFunction: 'easeInOutQuad'
+        }
+    });
 }
 
 function setStatus(html) {
@@ -722,10 +769,10 @@ function showNodeInfo(node) {
             // DB 출처 정보 강조 (예: [public.서지정보_260410])
             const parts = txt.split('::');
             const source = parts[0];
-            const detail = parts[1] ? parts[1].substring(0, 150) : '';
+            const detail = parts[1] ? parts[1] : '';
             html += `<div class="mb-2 p-2 bg-light border rounded small">
                 <strong class="text-success">${source.replace(/\[|\]/g, '')}</strong><br>
-                <span class="text-muted">${detail}...</span>
+                <div class="text-muted" style="max-height: 120px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;">${detail}</div>
             </div>`;
         });
     }
