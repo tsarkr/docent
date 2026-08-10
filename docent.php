@@ -37,6 +37,81 @@ function docent_t($ko, $en) {
     return docent_is_english() ? $en : $ko;
 }
 
+function infer_focus($term, $is_english = false) {
+    $text = trim((string)$term);
+    if ($text === '') {
+        return $is_english ? 'Person' : '인물';
+    }
+
+    $normalized = strtolower($text);
+    $person_markers = ['인물','사람','인명','주인공','영웅','독립운동가','지도자','장군','장수','leader','person','hero','revolutionary','activist','politician','general'];
+    $event_markers = ['사건','시위','운동','봉기','폭동','재판','전쟁','전투','혁명','incident','event','protest','movement','uprising','trial','war','battle'];
+    $place_markers = ['장소','지역','도시','마을','곳','서울','부산','대구','인천','광주','대전','울산','경기','강원','충청','전라','경상','제주','만주','한양','평양','place','city','town','region','location','province','capital'];
+    $org_markers = ['기관','단체','정부','청','학교','협회','조직','군대','경찰','헌병','academy','company','organization','government','police','army','military','association'];
+
+    foreach ($person_markers as $marker) {
+        if (strpos($normalized, $marker) !== false) {
+            return $is_english ? 'Person' : '인물';
+        }
+    }
+    foreach ($event_markers as $marker) {
+        if (strpos($normalized, $marker) !== false) {
+            return $is_english ? 'Event' : '사건';
+        }
+    }
+    foreach ($place_markers as $marker) {
+        if (strpos($normalized, $marker) !== false) {
+            return $is_english ? 'Place' : '장소';
+        }
+    }
+    foreach ($org_markers as $marker) {
+        if (strpos($normalized, $marker) !== false) {
+            return $is_english ? 'Organization' : '기관';
+        }
+    }
+
+    if (preg_match('/^[\p{Hangul}]{2,4}$/u', $text) || preg_match('/^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*$/', $text)) {
+        return $is_english ? 'Person' : '인물';
+    }
+
+    if (preg_match('/\b(운동|시위|사건|전쟁|봉기|재판)\b/u', $text)) {
+        return $is_english ? 'Event' : '사건';
+    }
+
+    if (preg_match('/\b(서울|부산|대구|인천|광주|대전|울산|경기|강원|충청|전라|경상|제주|만주|한양|평양)\b/u', $text)) {
+        return $is_english ? 'Place' : '장소';
+    }
+
+    return $is_english ? 'Person' : '인물';
+}
+
+function normalize_focus($focus, $is_english = false) {
+    $value = trim((string)($focus ?? ''));
+    if ($value === '') {
+        return infer_focus('', $is_english);
+    }
+
+    $normalized = strtolower($value);
+    $map = [
+        'person' => 'Person',
+        'people' => 'Person',
+        '인물' => '인물',
+        'event' => 'Event',
+        '사건' => '사건',
+        'place' => 'Place',
+        '장소' => '장소',
+        'organization' => 'Organization',
+        'org' => 'Organization',
+        '기관' => '기관',
+    ];
+
+    if (isset($map[$normalized])) {
+        return $map[$normalized];
+    }
+
+    return $is_english ? 'Person' : '인물';
+}
+
 // 2. API Logic (AJAX Handlers)
 if (isset($_GET['ajax'])) {
     header('Content-Type: application/json; charset=utf-8');
@@ -46,24 +121,26 @@ if (isset($_GET['ajax'])) {
         // [Action 1] 의도 분석
         if ($action === 'analyze') {
             $term = $_POST['term'] ?? '';
+            $initial_focus = infer_focus($term, docent_is_english());
+
             if (docent_is_english()) {
                 $system_prompt = "You are a specialist analyst for historical knowledge search. Analyze the user's query and reply only in the following JSON format.\n"
                                . "{\n"
                                . "  \"intent\": \"ENTITY_SEARCH\",\n"
                                . "  \"keywords\": [\"" . addslashes($term) . "\"],\n"
-                               . "  \"focus\": \"Person\",\n"
+                               . "  \"focus\": \"" . addslashes($initial_focus) . "\",\n"
                                . "  \"explanation\": \"Keyword-based analysis completed\"\n"
                                . "}\n"
-                               . "Return JSON only, without additional explanation.";
+                               . "Choose the most relevant focus from Person, Event, Place, or Organization based on the question. Return JSON only, without additional explanation.";
             } else {
                 $system_prompt = "당신은 역사 지식 검색을 위한 전문 분석가입니다. 사용자의 질문을 분석하여 다음 JSON 형식으로만 답하십시오.\n"
                                . "{\n"
                                . "  \"intent\": \"ENTITY_SEARCH\",\n"
                                . "  \"keywords\": [\"" . addslashes($term) . "\"],\n"
-                               . "  \"focus\": \"인물\",\n"
+                               . "  \"focus\": \"" . addslashes($initial_focus) . "\",\n"
                                . "  \"explanation\": \"검색어 기반 분석 수행\"\n"
                                . "}\n"
-                               . "부가적인 설명 없이 JSON만 반환하십시오.";
+                               . "focus는 질문 내용에 가장 적합한 값인 '인물', '사건', '장소', '기관' 중 하나로 결정하십시오. 부가적인 설명 없이 JSON만 반환하십시오.";
             }
 
             $res = call_deepseek([
@@ -75,7 +152,7 @@ if (isset($_GET['ajax'])) {
             $output = [
                 "intent" => $parsed['intent'] ?? 'ENTITY_SEARCH',
                 "keywords" => $parsed['keywords'] ?? [$term],
-                "focus" => $parsed['focus'] ?? (docent_is_english() ? 'Person' : '인물'),
+                "focus" => normalize_focus($parsed['focus'] ?? $initial_focus, docent_is_english()),
                 "explanation" => $parsed['explanation'] ?? (docent_is_english() ? 'Analysis complete' : '분석 완료')
             ];
             
@@ -361,10 +438,10 @@ function add_node_to_map(&$map, $node, $labels_iterable) {
         $color = "#999999"; $icon = "";
         $lstr = implode(' ', $labels_list);
         if (strpos($lstr, '문건') !== false || strpos($lstr, '사료') !== false) { $color = "#F7A01F"; $icon = "📜\n"; }
-        elseif (strpos($lstr, '인물') !== false) { $color = "#1CE1D4"; $icon = "👤\n"; }
-        elseif (strpos($lstr, '사건') !== false) { $color = "#FF6B6B"; $icon = "🔥\n"; }
-        elseif (strpos($lstr, '장소') !== false) { $color = "#4ECDC4"; $icon = "📍\n"; }
-        elseif (strpos($lstr, '기관') !== false) { $color = "#95E1D3"; $icon = "🏢\n"; }
+        elseif (strpos($lstr, '인물') !== false) { $color = "#2563EB"; $icon = "👤\n"; }
+        elseif (strpos($lstr, '사건') !== false) { $color = "#DC2626"; $icon = "🔥\n"; }
+        elseif (strpos($lstr, '장소') !== false) { $color = "#16A34A"; $icon = "📍\n"; }
+        elseif (strpos($lstr, '기관') !== false) { $color = "#7C3AED"; $icon = "🏢\n"; }
 
         $map[$nid] = [
             "id" => $nid,
@@ -519,10 +596,10 @@ function fetch_pg_rows_for_name($pdo, $name, $tables_meta) {
                     <div id="graph"></div>
                     <div class="d-flex justify-content-center gap-3 mb-4 flex-wrap">
                         <div class="legend-item"><div class="legend-color" style="background: #F7A01F;"></div> 사료</div>
-                        <div class="legend-item"><div class="legend-color" style="background: #1CE1D4;"></div> 인물</div>
-                        <div class="legend-item"><div class="legend-color" style="background: #FF6B6B;"></div> 사건</div>
-                        <div class="legend-item"><div class="legend-color" style="background: #4ECDC4;"></div> 장소</div>
-                        <div class="legend-item"><div class="legend-color" style="background: #95E1D3;"></div> 기관</div>
+                        <div class="legend-item"><div class="legend-color" style="background: #2563EB;"></div> 인물</div>
+                        <div class="legend-item"><div class="legend-color" style="background: #DC2626;"></div> 사건</div>
+                        <div class="legend-item"><div class="legend-color" style="background: #16A34A;"></div> 장소</div>
+                        <div class="legend-item"><div class="legend-color" style="background: #7C3AED;"></div> 기관</div>
                     </div>
                     
                     <div id="node-info-panel" class="card mb-4" style="display:none;">
