@@ -37,6 +37,117 @@ function docent_t($ko, $en) {
     return docent_is_english() ? $en : $ko;
 }
 
+function docent_sanitize_text($value, $max_len = 255, $allow_newlines = false) {
+    $text = trim((string)($value ?? ''));
+    if ($text === '') return '';
+    $text = preg_replace('/[\x00-\x1F\x7F]+/u', ' ', $text);
+    if (!$allow_newlines) {
+        $text = preg_replace('/\s+/u', ' ', $text);
+    }
+    $text = str_replace(["\r", "\n"], ' ', $text);
+    if ($max_len > 0) {
+        $text = mb_substr($text, 0, $max_len, 'UTF-8');
+    }
+    return trim($text);
+}
+
+function docent_decode_json_array($key, $max_items = 50, $max_len = 500) {
+    $raw = $_POST[$key] ?? '[]';
+    if (!is_string($raw)) {
+        return [];
+    }
+
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded)) {
+        return [];
+    }
+
+    $items = [];
+    foreach ($decoded as $item) {
+        if (is_array($item)) {
+            $item = json_encode($item, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+        }
+        $val = docent_sanitize_text((string)$item, $max_len, false);
+        if ($val !== '') {
+            $items[] = $val;
+        }
+        if (count($items) >= $max_items) {
+            break;
+        }
+    }
+    return $items;
+}
+
+function docent_valid_identifier($value, $default = '') {
+    $sanitized = preg_replace('/[^A-Za-z0-9_]/', '', (string)($value ?? $default));
+    return $sanitized !== '' ? $sanitized : $default;
+}
+
+function docent_check_same_origin() {
+    $origin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
+    if ($origin === '') return true;
+
+    $origin_parts = parse_url($origin);
+    if (!is_array($origin_parts) || !isset($origin_parts['host'])) {
+        return false;
+    }
+
+    $origin_scheme = strtolower((string)($origin_parts['scheme'] ?? ''));
+    $origin_host = strtolower((string)$origin_parts['host']);
+    $origin_port = isset($origin_parts['port']) ? (int)$origin_parts['port'] : null;
+
+    $forwarded_host = trim((string)($_SERVER['HTTP_X_FORWARDED_HOST'] ?? ''));
+    if ($forwarded_host !== '' && str_contains($forwarded_host, ',')) {
+        $forwarded_host = trim(explode(',', $forwarded_host)[0]);
+    }
+
+    $host_candidates = [];
+    foreach ([$forwarded_host, $_SERVER['HTTP_HOST'] ?? '', $_SERVER['SERVER_NAME'] ?? ''] as $candidate) {
+        $value = strtolower(trim((string)$candidate));
+        if ($value !== '') {
+            $host_candidates[] = preg_replace('/:\d+$/', '', $value);
+        }
+    }
+    $host_candidates = array_values(array_unique(array_filter($host_candidates, static fn($v) => $v !== null && $v !== '')));
+    $proto_header = trim((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? ''));
+    if ($proto_header !== '' && str_contains($proto_header, ',')) {
+        $proto_header = trim(explode(',', $proto_header)[0]);
+    }
+    $https = strtolower((string)($_SERVER['HTTPS'] ?? ''));
+    $request_scheme = strtolower((string)($_SERVER['REQUEST_SCHEME'] ?? ''));
+    if ($request_scheme === '') {
+        $request_scheme = ($https !== '' && $https !== 'off') ? 'https' : 'http';
+    }
+    if ($proto_header !== '') {
+        $request_scheme = strtolower($proto_header);
+    }
+
+    $request_port = isset($_SERVER['SERVER_PORT']) ? (int)$_SERVER['SERVER_PORT'] : null;
+    if (isset($_SERVER['HTTP_X_FORWARDED_PORT']) && is_numeric($_SERVER['HTTP_X_FORWARDED_PORT'])) {
+        $request_port = (int)$_SERVER['HTTP_X_FORWARDED_PORT'];
+    }
+
+    $is_local_origin = in_array($origin_host, ['localhost', '127.0.0.1', '::1'], true);
+    $is_local_host = in_array('localhost', $host_candidates, true) || in_array('127.0.0.1', $host_candidates, true) || in_array('::1', $host_candidates, true);
+    if ($is_local_origin && $is_local_host) {
+        return true;
+    }
+
+    if (!in_array($origin_host, $host_candidates, true)) {
+        return false;
+    }
+
+    if ($origin_scheme !== '' && $request_scheme !== '' && $origin_scheme !== $request_scheme) {
+        return false;
+    }
+
+    if ($origin_port !== null && $request_port !== null && $origin_port !== $request_port) {
+        return false;
+    }
+
+    return true;
+}
+
 function infer_focus($term, $is_english = false) {
     $text = trim((string)$term);
     if ($text === '') {
@@ -115,12 +226,26 @@ function normalize_focus($focus, $is_english = false) {
 // 2. API Logic (AJAX Handlers)
 if (isset($_GET['ajax'])) {
     header('Content-Type: application/json; charset=utf-8');
-    $action = $_GET['ajax'];
+    header('X-Content-Type-Options: nosniff');
+    header('X-Frame-Options: SAMEORIGIN');
+
+    $action = strtolower((string)($_GET['ajax'] ?? ''));
+    $allowed_actions = ['analyze', 'graph', 'pg_prefetch', 'explain'];
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        http_response_code(405);
+        echo json_encode(['error' => 'Method not allowed.'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+        exit;
+    }
+    if (!in_array($action, $allowed_actions, true) || !docent_check_same_origin()) {
+        http_response_code(400);
+        echo json_encode(['error' => 'Invalid request.'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+        exit;
+    }
     
     try {
         // [Action 1] 의도 분석
         if ($action === 'analyze') {
-            $term = $_POST['term'] ?? '';
+            $term = docent_sanitize_text($_POST['term'] ?? '', 180, false);
             $initial_focus = infer_focus($term, docent_is_english());
 
             if (docent_is_english()) {
@@ -162,8 +287,10 @@ if (isset($_GET['ajax'])) {
 
         // [Action 2] Neo4j 지식망 및 증거 탐색 (Closure Safe & Edge Fix)
         if ($action === 'graph') {
-            $term = $_POST['term'] ?? '';
-            $keywords = json_decode($_POST['keywords'] ?? '[]', true);
+            $term = docent_sanitize_text($_POST['term'] ?? '', 180, false);
+            $keywords = docent_decode_json_array('keywords', 20, 180);
+            if (empty($keywords)) $keywords = [$term];
+            $keywords = array_values(array_filter(array_map(fn($kw) => docent_sanitize_text($kw, 180, false), $keywords)));
             if (empty($keywords)) $keywords = [$term];
             
             $client = get_neo4j();
@@ -173,6 +300,13 @@ if (isset($_GET['ajax'])) {
             $found_ids = [];
 
             $search_query = "
+                CALL db.index.fulltext.queryNodes('namesIndex', \$term) YIELD node, score
+                RETURN DISTINCT node as n, labels(node) as labels, score
+                ORDER BY score DESC
+                LIMIT 50
+            ";
+
+            $fallback_search_query = "
                 MATCH (n)
                 WHERE any(k IN ['명칭','한글독음','한글명칭','제목','사건명','id','name','title','uid'] 
                           WHERE n[k] IS NOT NULL AND toLower(toString(n[k])) CONTAINS toLower(\$term))
@@ -182,7 +316,11 @@ if (isset($_GET['ajax'])) {
             
             foreach ($keywords as $kw) {
                 if (empty($kw)) continue;
-                $res1 = $client->run($search_query, ['term' => $kw]);
+                try {
+                    $res1 = $client->run($search_query, ['term' => $kw]);
+                } catch (Throwable $fulltextError) {
+                    $res1 = $client->run($fallback_search_query, ['term' => $kw]);
+                }
                 
                 foreach ($res1 as $record) {
                     $node = $record->get('n');
@@ -207,19 +345,28 @@ if (isset($_GET['ajax'])) {
                     add_node_to_map($nodes, $node, $labels_iterable);
 
                     if (in_array('문건', $labels) || in_array('사료', $labels)) {
-                        $evidences[(string)$node_id] = [
+                        add_fact_evidence($evidences, 'node', [
+                            (string)$node_id,
+                            (string)($props['제목'] ?? $props['사건명'] ?? ''),
+                            (string)($props['설명'] ?? '')
+                        ], [
                             "doc" => (string)($props['제목'] ?? '제목 미상'),
                             "quote" => mb_substr((string)($props['설명'] ?? ''), 0, 500),
                             "concept" => (string)$node_id,
                             "text" => mb_substr((string)($props['설명'] ?? ''), 0, 1000)
-                        ];
+                        ], 30);
                     } elseif (in_array('사건', $labels)) {
-                        $evidences[(string)$node_id] = [
+                        add_fact_evidence($evidences, 'node', [
+                            (string)$node_id,
+                            (string)($props['제목'] ?? $props['사건명'] ?? ''),
+                            (string)($props['날짜'] ?? ''),
+                            (string)($props['설명'] ?? '')
+                        ], [
                             "doc" => (string)($props['사건명'] ?? '사건명 미상'),
                             "quote" => (string)($props['날짜'] ?? ''),
                             "concept" => (string)$node_id,
                             "text" => "날짜: " . ($props['날짜'] ?? '') . "\n설명: " . mb_substr((string)($props['설명'] ?? ''), 0, 1000)
-                        ];
+                        ], 30);
                     }
                 }
             }
@@ -233,19 +380,39 @@ if (isset($_GET['ajax'])) {
                     WITH n, r, m, labels(n) as n_labels, labels(m) as m_labels
                     OPTIONAL MATCH (n)-[:P14_carried_out_by|P11_had_participant]-(e:사건)-[:P14_carried_out_by|P11_had_participant]-(p:인물)
                     WHERE n:인물 AND n <> p
-                    RETURN DISTINCT n, r, m, n_labels, m_labels, e, p, labels(e) as e_labels, labels(p) as p_labels
+                    RETURN DISTINCT n, r, m, n_labels, m_labels, e, p, labels(e) as e_labels, labels(p) as p_labels, r.context as rel_context
+                    LIMIT 100
                 ";
 
                 $res2 = $client->run($graph_query, ['search_ids' => $found_ids]);
                 foreach ($res2 as $rec) {
                     $n = $rec->get('n'); $m = $rec->get('m'); $r = $rec->get('r');
                     $e = $rec->get('e'); $p = $rec->get('p');
+                    $rel_context = $rec->get('rel_context');
 
                     $n_nid = add_node_to_map($nodes, $n, $rec->get('n_labels'));
                     $m_nid = $m ? add_node_to_map($nodes, $m, $rec->get('m_labels')) : null;
 
                     if ($r && $n_nid && $m_nid) {
-                        $edges[] = ["from" => $n_nid, "to" => $m_nid, "label" => _get_rel_label(method_exists($r, 'getType') ? $r->getType() : '연결')];
+                        $rel_type = method_exists($r, 'getType') ? $r->getType() : '연결';
+                        $edges[] = ["from" => $n_nid, "to" => $m_nid, "label" => _get_rel_label($rel_type)];
+
+                        $rel_context_text = trim(mb_substr((string)($rel_context ?? ''), 0, 1000));
+                        if ($rel_context_text !== '') {
+                            $n_raw_id = $nodes[$n_nid]['raw_id'] ?? $n_nid;
+                            $m_raw_id = $nodes[$m_nid]['raw_id'] ?? $m_nid;
+                            add_fact_evidence($evidences, 'rel', [
+                                $n_raw_id,
+                                $m_raw_id,
+                                $rel_type,
+                                $rel_context_text
+                            ], [
+                                "doc" => "[EDGE] {$n_raw_id} - {$rel_type} - {$m_raw_id}",
+                                "quote" => mb_substr($rel_context_text, 0, 500),
+                                "concept" => (string)$n_raw_id,
+                                "text" => $rel_context_text
+                            ], 30);
+                        }
                     }
 
                     if ($e && $p) {
@@ -263,35 +430,37 @@ if (isset($_GET['ajax'])) {
                 $unique_edges[$key] = $e;
             }
 
+            $prefetch_names = select_prefetch_names_by_degree($nodes, array_values($unique_edges));
+
             echo json_encode([
                 "nodes" => array_values($nodes),
                 "edges" => array_values($unique_edges),
-                "evidences" => array_values($evidences)
+                "evidences" => array_values($evidences),
+                "prefetch_names" => $prefetch_names
             ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
             exit;
         }
 
         // [Action 3] PostgreSQL 동적 연관 사료 수집
         if ($action === 'pg_prefetch') {
-            $names = json_decode($_POST['names'] ?? '[]', true);
+            $names = docent_decode_json_array('names', 20, 200);
             $pdo = get_pg();
             if (!$pdo) { echo json_encode([], JSON_UNESCAPED_UNICODE); exit; }
 
             $all_rows = [];
             $tables_meta = get_pg_tables_metadata($pdo);
+            $filtered_names = [];
             $seen = [];
-            $count = 0;
-
             foreach ((array)$names as $name) {
-                if (empty($name) || isset($seen[$name])) continue;
+                $name = docent_sanitize_text($name, 200, false);
+                if ($name === '' || isset($seen[$name])) continue;
                 $seen[$name] = true;
-                if (++$count > 20) break;
+                $filtered_names[] = $name;
+                if (count($filtered_names) >= 15) break;
+            }
 
-                $rows = fetch_pg_rows_for_name($pdo, $name, $tables_meta);
-                foreach ($rows as $r) {
-                    $r['node_id'] = $name;
-                    $all_rows[] = $r;
-                }
+            if (!empty($filtered_names)) {
+                $all_rows = fetch_pg_rows_for_names($pdo, $filtered_names, $tables_meta);
             }
 
             echo json_encode($all_rows, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
@@ -300,41 +469,38 @@ if (isset($_GET['ajax'])) {
 
         // [Action 4] AI RAG 도슨트 해설 생성
         if ($action === 'explain') {
-            $term = $_POST['term'] ?? '';
-            $explain_lang = $_POST['lang'] ?? (docent_is_english() ? 'en' : 'ko');
+            $term = docent_sanitize_text($_POST['term'] ?? '', 180, false);
+            $explain_lang = in_array(strtolower((string)($_POST['lang'] ?? '')), ['en', 'ko'], true) ? strtolower((string)$_POST['lang']) : (docent_is_english() ? 'en' : 'ko');
             $use_english = ($explain_lang === 'en');
-            $evidences = json_decode($_POST['evidences'] ?? '[]', true) ?? [];
-            $pg_texts = json_decode($_POST['pg_texts'] ?? '[]', true) ?? [];
-
-            $context_str = "";
-            if (!empty($evidences)) {
-                foreach (array_slice($evidences, 0, 20) as $e) {
-                    $context_str .= $use_english
-                        ? "- Document: {$e['doc']}\n  Content: {$e['text']}...\n"
-                        : "- 문서: {$e['doc']}\n  내용: {$e['text']}...\n";
-                }
-            }
-            if (!empty($pg_texts)) {
-                if ($context_str) $context_str .= "\n\n";
-                $context_str .= $use_english
-                    ? "[PG Evidence]\n" . implode("\n", array_map(fn($t) => "- " . $t, array_slice($pg_texts, 0, 50)))
-                    : "[PG 근거]\n" . implode("\n", array_map(fn($t) => "- " . $t, array_slice($pg_texts, 0, 50)));
-            }
+            $evidences = json_decode($_POST['evidences'] ?? '[]', true);
+            $pg_texts = json_decode($_POST['pg_texts'] ?? '[]', true);
+            if (!is_array($evidences)) $evidences = [];
+            if (!is_array($pg_texts)) $pg_texts = [];
+            $evidence_context = build_budgeted_evidence_context($evidences, $use_english, 16, 220, 420, 4200);
+            $pg_context = build_budgeted_pg_context($pg_texts, $use_english, 10, 140, 240, 1600);
+            $context_str = trim($evidence_context . ($evidence_context && $pg_context ? "\n\n" : "") . $pg_context);
 
             if ($use_english) {
-                $prompt = "You are a history docent. Based on the following Korean sources and PG evidence, write a balanced explanation about '{$term}' COMPLETELY IN ENGLISH. Do not use any Korean characters in your output. Translate any relevant information from the Korean sources into English inside the explanation.\n"
-                        . "- Distinguish facts, inferences, and contested points.\n"
-                        . "- Avoid emotional or exaggerated language and keep a neutral tone.\n"
-                        . "- Clearly state the limits where evidence is insufficient.\n\n"
+                $prompt = "You are a history docent following a GraphRAG-style claim synthesis process.\n"
+                        . "- Target response length should fit within about 2,000 output tokens.\n"
+                        . "- Distinguish verified facts, inferences, and contested points.\n"
+                        . "- Prioritize high-degree graph entities when establishing the narrative backbone.\n"
+                        . "- Cite concrete evidence details from edge contexts and node evidence.\n"
+                        . "- Avoid emotional or exaggerated language and keep a neutral academic tone.\n"
+                        . "- Clearly state evidence limits when claims are weak.\n"
+                        . "- Write COMPLETELY IN ENGLISH and translate Korean source details into English.\n\n"
                         . "[Sources / PG Evidence (in Korean, please translate and explain in English)]\n{$context_str}";
 
                 $res = call_deepseek([
-                    ["role" => "system", "content" => "You are a professional historical docent. You MUST write the entire response in English. Under no circumstances should you output Korean. Even if the source texts (PG Evidence) are in Korean, you must translate the key information and explain it completely in English."],
+                    ["role" => "system", "content" => "You are a professional historical docent. Synthesize claim-level evidence faithfully, keep uncertainty explicit, and write only in English."],
                     ["role" => "user", "content" => $prompt]
-                ], false);
+                ], false, 2000);
             } else {
-                $prompt = "당신은 역사 도슨트입니다. 다음 사료와 PG 근거를 바탕으로 '{$term}'에 대해 균형잡힌 해설을 작성하세요.\n"
+                $prompt = "당신은 GraphRAG 방식으로 주장(Claim) 단위 근거를 종합하는 역사 도슨트입니다. '{$term}'에 대해 해설하세요.\n"
+                        . "- 응답 분량은 약 2,000 토큰 이내로 구성합니다.\n"
                         . "- 사실/추정/논쟁 지점을 구분해 서술합니다.\n"
+                        . "- 연결 차수가 높은 핵심 개체를 우선 서사 축으로 삼습니다.\n"
+                        . "- 엣지 문맥과 노드 사료에서 확인되는 근거를 구체적으로 제시합니다.\n"
                         . "- 감정적·과장 표현을 피하고 중립적 톤을 유지합니다.\n"
                         . "- 근거가 부족한 부분은 명확히 한계를 밝힙니다.\n\n"
                         . "[사료/PG 근거]\n{$context_str}";
@@ -342,7 +508,7 @@ if (isset($_GET['ajax'])) {
                 $res = call_deepseek([
                     ["role" => "system", "content" => "당신은 역사 도슨트입니다. 한국어 해설만 작성하십시오."],
                     ["role" => "user", "content" => $prompt]
-                ], false);
+                ], false, 2000);
             }
 
             echo json_encode(["text" => $res], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
@@ -381,33 +547,299 @@ function get_pg() {
     }
 }
 
-function call_deepseek($msgs, $is_json = false) {
+function call_deepseek($msgs, $is_json = false, $max_tokens = null) {
     $api_key = get_cfg('DEEPSEEK_API_KEY');
     if (!$api_key) return $is_json ? '{"explanation":"API Key missing"}' : docent_t("API Key가 설정되지 않았습니다.", "API key is not configured.");
 
-    $ch = curl_init(rtrim(get_cfg('DEEPSEEK_BASE_URL', 'https://api.deepseek.com'), '/') . '/chat/completions');
+    $base_url = rtrim(get_cfg('DEEPSEEK_BASE_URL', 'https://api.deepseek.com'), '/');
+    $parsed = parse_url($base_url);
+    if (!isset($parsed['scheme'], $parsed['host']) || !in_array(strtolower($parsed['scheme']), ['http', 'https'], true)) {
+        return $is_json ? '{"explanation":"Invalid DeepSeek base URL"}' : docent_t("AI 서버 주소가 올바르지 않습니다.", "The AI server URL is invalid.");
+    }
+
+    $model = docent_sanitize_text(get_cfg('DEEPSEEK_MODEL', 'deepseek-v4-flash'), 120, false);
+    if ($model === '') {
+        $model = 'deepseek-v4-flash';
+    }
+
+    $ch = curl_init($base_url . '/chat/completions');
     $payload = [
-        "model" => get_cfg('DEEPSEEK_MODEL', 'deepseek-v4-flash'),
+        "model" => $model,
         "messages" => $msgs,
         "temperature" => 0.0
     ];
     if ($is_json) $payload["response_format"] = ["type" => "json_object"];
+    if ($max_tokens !== null) $payload["max_tokens"] = (int)max(1, min(4000, $max_tokens));
 
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_POST => true,
-        CURLOPT_POSTFIELDS => json_encode($payload),
-        CURLOPT_HTTPHEADER => ["Authorization: Bearer " . $api_key, "Content-Type: application/json"],
-        CURLOPT_TIMEOUT => 120
+        CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE),
+        CURLOPT_HTTPHEADER => ["Authorization: Bearer " . preg_replace('/\s+/', '', $api_key), "Content-Type: application/json"],
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_TIMEOUT => 35,
+        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_SSL_VERIFYHOST => 2,
+        CURLOPT_HEADER => false,
+        CURLOPT_FOLLOWLOCATION => false
     ]);
-    
+
     $res = curl_exec($ch);
-    
+    $timeout_notice = docent_t(
+        "사료 검색은 완료되었으나, AI 해설 응답 시간이 초과되었습니다. 수집된 사료 근거를 먼저 확인해 주세요.",
+        "Source retrieval is complete, but the AI explanation timed out. Please review the gathered evidence first."
+    );
+    $curl_errno = curl_errno($ch);
+    $curl_error = curl_error($ch);
+    $http_code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    curl_close($ch);
+
+    if ($res === false || $curl_errno !== 0 || $http_code >= 500 || $http_code === 0) {
+        $transport_msg = $timeout_notice;
+        if ($curl_errno !== 0 && $curl_error !== '') {
+            $transport_msg = docent_t("AI 요청 전송 실패", "AI request transport failed") . " (cURL {$curl_errno}): " . $curl_error;
+        }
+        if ($is_json) {
+            return json_encode(["explanation" => $transport_msg], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+        }
+        return $transport_msg;
+    }
+
     $data = json_decode($res, true);
-    $content = $data['choices'][0]['message']['content'] ?? '';
+    if ($http_code >= 400) {
+        $api_error = '';
+        if (is_array($data)) {
+            if (isset($data['error'])) {
+                if (is_array($data['error'])) {
+                    $api_error = (string)($data['error']['message'] ?? $data['error']['type'] ?? '');
+                } else {
+                    $api_error = (string)$data['error'];
+                }
+            }
+            if ($api_error === '') {
+                $api_error = (string)($data['message'] ?? '');
+            }
+        }
+        if ($api_error === '') {
+            $api_error = mb_substr(normalize_whitespace_text((string)$res), 0, 180);
+        }
+        if ($api_error === '') {
+            $api_error = docent_t("원인을 확인할 수 없습니다.", "Unknown API error.");
+        }
+
+        $error_message = docent_t("AI 요청 실패", "AI request failed") . " (HTTP {$http_code}): {$api_error}";
+        if ($is_json) {
+            return json_encode(["explanation" => $error_message], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+        }
+        return $error_message;
+    }
+
+    if (!is_array($data)) {
+        $decode_message = docent_t("AI 응답 JSON 파싱 실패", "Failed to parse AI response JSON");
+        return $is_json
+            ? json_encode(["explanation" => $decode_message], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE)
+            : $decode_message;
+    }
+
+    $content = extract_deepseek_text($data);
 
     if ($is_json) return $content ?: '{"explanation":"JSON Content empty"}';
-    return $content ?: docent_t("해설을 생성할 수 없습니다.", "Unable to generate an explanation.");
+    if ($content === '') {
+        return docent_t(
+            "AI 응답 본문이 비어 있습니다. DEEPSEEK_MODEL 또는 요청 길이를 확인해 주세요. (권장 모델: deepseek-chat)",
+            "AI returned an empty response body. Please check DEEPSEEK_MODEL or request length. (Recommended model: deepseek-chat)"
+        );
+    }
+    return $content;
+}
+
+function extract_deepseek_text($data) {
+    if (!is_array($data)) return '';
+
+    $candidates = [];
+
+    if (isset($data['choices'][0])) {
+        $choice = $data['choices'][0];
+        if (is_array($choice)) {
+            if (isset($choice['message']) && is_array($choice['message'])) {
+                $message = $choice['message'];
+                if (isset($message['content'])) $candidates[] = $message['content'];
+                if (isset($message['reasoning_content'])) $candidates[] = $message['reasoning_content'];
+            }
+            if (isset($choice['text'])) $candidates[] = $choice['text'];
+            if (isset($choice['content'])) $candidates[] = $choice['content'];
+        }
+    }
+
+    if (isset($data['output_text'])) $candidates[] = $data['output_text'];
+    if (isset($data['content'])) $candidates[] = $data['content'];
+
+    foreach ($candidates as $candidate) {
+        $text = normalize_deepseek_candidate($candidate);
+        if ($text !== '') return $text;
+    }
+
+    return '';
+}
+
+function normalize_deepseek_candidate($candidate) {
+    if (is_string($candidate)) {
+        return trim($candidate);
+    }
+    if (is_scalar($candidate)) {
+        return trim((string)$candidate);
+    }
+    if (!is_array($candidate)) {
+        return '';
+    }
+
+    $parts = [];
+    foreach ($candidate as $piece) {
+        if (is_string($piece) || is_scalar($piece)) {
+            $parts[] = (string)$piece;
+            continue;
+        }
+        if (!is_array($piece)) continue;
+
+        if (isset($piece['text']) && is_scalar($piece['text'])) {
+            $parts[] = (string)$piece['text'];
+            continue;
+        }
+        if (isset($piece['content']) && is_scalar($piece['content'])) {
+            $parts[] = (string)$piece['content'];
+            continue;
+        }
+        if (isset($piece['value']) && is_scalar($piece['value'])) {
+            $parts[] = (string)$piece['value'];
+            continue;
+        }
+    }
+
+    return trim(implode("\n", array_filter(array_map('trim', $parts), static fn($v) => $v !== '')));
+}
+
+function clamp_int($value, $min, $max) {
+    return max($min, min($max, (int)$value));
+}
+
+function dynamic_prefetch_ratio($node_count) {
+    if ($node_count <= 10) return 0.40;
+    if ($node_count >= 30) return 0.30;
+    return 0.40 - (($node_count - 10) * (0.10 / 20.0));
+}
+
+function select_prefetch_names_by_degree($nodes, $edges) {
+    $node_list = array_values($nodes);
+    $node_count = count($node_list);
+    if ($node_count === 0) return [];
+
+    $degree = [];
+    foreach ($node_list as $n) {
+        $degree[$n['id']] = 0;
+    }
+    foreach ($edges as $e) {
+        if (isset($degree[$e['from']])) $degree[$e['from']]++;
+        if (isset($degree[$e['to']])) $degree[$e['to']]++;
+    }
+
+    usort($node_list, function ($a, $b) use ($degree) {
+        $da = $degree[$a['id']] ?? 0;
+        $db = $degree[$b['id']] ?? 0;
+        if ($da === $db) {
+            return strcmp((string)($a['raw_id'] ?? $a['id']), (string)($b['raw_id'] ?? $b['id']));
+        }
+        return $db <=> $da;
+    });
+
+    $ratio = dynamic_prefetch_ratio($node_count);
+    $target = clamp_int((int)round($node_count * $ratio), 5, 15);
+    $target = min($node_count, $target);
+
+    $names = [];
+    foreach ($node_list as $n) {
+        $raw = trim((string)($n['raw_id'] ?? ''));
+        if ($raw === '' || isset($names[$raw])) continue;
+        $names[$raw] = true;
+        if (count($names) >= $target) break;
+    }
+    return array_keys($names);
+}
+
+function add_fact_evidence(&$evidences, $prefix, $hash_parts, $payload, $max_count = 30) {
+    if (count($evidences) >= $max_count) return false;
+    $hash_source = implode('|', array_map(fn($v) => (string)$v, $hash_parts));
+    $key = "{$prefix}-" . sha1($hash_source);
+    if (isset($evidences[$key])) return false;
+    $evidences[$key] = $payload;
+    return true;
+}
+
+function normalize_whitespace_text($text) {
+    $text = preg_replace('/\s+/u', ' ', (string)$text);
+    return trim($text ?? '');
+}
+
+function build_budgeted_evidence_context($evidences, $use_english, $max_items, $min_chars, $max_chars, $total_char_budget) {
+    $lines = [];
+    $used_chars = 0;
+    foreach ((array)$evidences as $e) {
+        if (count($lines) >= $max_items) break;
+        if (($total_char_budget - $used_chars) < ($min_chars + 80)) break;
+
+        $doc = mb_substr(normalize_whitespace_text($e['doc'] ?? ''), 0, 120);
+        $text = normalize_whitespace_text($e['text'] ?? '');
+        if ($text === '') continue;
+
+        $remaining = $total_char_budget - $used_chars;
+        $body_cap = max($min_chars, min($max_chars, $remaining - 80));
+        $body = mb_substr($text, 0, $body_cap);
+        $line = $use_english
+            ? "- Document: {$doc}\n  Evidence: {$body}\n"
+            : "- 문서: {$doc}\n  근거: {$body}\n";
+
+        $line_len = mb_strlen($line);
+        if ($line_len > $remaining) {
+            $trimmed_cap = max(120, $remaining - 80);
+            $body = mb_substr($text, 0, $trimmed_cap);
+            $line = $use_english
+                ? "- Document: {$doc}\n  Evidence: {$body}\n"
+                : "- 문서: {$doc}\n  근거: {$body}\n";
+            $line_len = mb_strlen($line);
+            if ($line_len > $remaining) break;
+        }
+
+        $lines[] = $line;
+        $used_chars += $line_len;
+    }
+    return implode('', $lines);
+}
+
+function build_budgeted_pg_context($pg_texts, $use_english, $max_items, $min_chars, $max_chars, $total_char_budget) {
+    $lines = [];
+    $used_chars = 0;
+    foreach ((array)$pg_texts as $t) {
+        if (count($lines) >= $max_items) break;
+        if (($total_char_budget - $used_chars) < ($min_chars + 20)) break;
+
+        $text = normalize_whitespace_text($t);
+        if ($text === '') continue;
+
+        $remaining = $total_char_budget - $used_chars;
+        $body_cap = max($min_chars, min($max_chars, $remaining - 20));
+        $line = "- " . mb_substr($text, 0, $body_cap);
+        $line_len = mb_strlen($line);
+        if ($line_len > $remaining) {
+            $line = "- " . mb_substr($text, 0, max(120, $remaining - 5));
+            $line_len = mb_strlen($line);
+            if ($line_len > $remaining) break;
+        }
+        $lines[] = $line;
+        $used_chars += $line_len;
+    }
+
+    if (empty($lines)) return '';
+    $header = $use_english ? "[PG Evidence]\n" : "[PG 근거]\n";
+    return $header . implode("\n", $lines);
 }
 
 function add_node_to_map(&$map, $node, $labels_iterable) {
@@ -465,19 +897,48 @@ function _get_rel_label($rtype) {
 }
 
 function get_pg_tables_metadata($pdo) {
+    $cache_dir = realpath(__DIR__);
+    $cache_file = ($cache_dir !== false ? $cache_dir : __DIR__) . '/.pg_meta_cache.json';
+    $cache_ttl = 60 * 60 * 24;
+    if (is_file($cache_file) && is_readable($cache_file)) {
+        $cache_raw = @file_get_contents($cache_file);
+        if (is_string($cache_raw) && $cache_raw !== '') {
+            $cache = json_decode($cache_raw, true);
+            if (
+                is_array($cache)
+                && isset($cache['cached_at'], $cache['meta'])
+                && (time() - (int)$cache['cached_at'] < $cache_ttl)
+                && is_array($cache['meta'])
+            ) {
+                return $cache['meta'];
+            }
+        }
+    }
+
     $stmt = $pdo->query("SELECT table_schema, table_name FROM information_schema.columns WHERE column_name = 'tei' AND table_schema NOT IN ('pg_catalog', 'information_schema') GROUP BY table_schema, table_name");
     $tables = $stmt->fetchAll(PDO::FETCH_ASSOC);
     $meta = [];
 
     foreach ($tables as $t) {
-        $schema = $t['table_schema']; $table = $t['table_name'];
+        $schema = (string)($t['table_schema'] ?? '');
+        $table = (string)($t['table_name'] ?? '');
+        if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $schema) || !preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $table)) {
+            continue;
+        }
+
         $s1 = $pdo->prepare("SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position ASC LIMIT 1");
         $s1->execute([$schema, $table]);
-        $id_col = $s1->fetchColumn() ?: 'rowid';
+        $id_col = (string)($s1->fetchColumn() ?: 'rowid');
+        if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $id_col)) {
+            $id_col = 'rowid';
+        }
 
         $s2 = $pdo->prepare("SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ? AND data_type IN ('character varying','text','character') ORDER BY ordinal_position ASC");
         $s2->execute([$schema, $table]);
-        $text_cols = $s2->fetchAll(PDO::FETCH_COLUMN);
+        $text_cols = array_values(array_filter(array_map(function ($col) {
+            $col = (string)$col;
+            return preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $col) ? $col : null;
+        }, $s2->fetchAll(PDO::FETCH_COLUMN))));
 
         foreach (['명칭', '사건명', '제목'] as $p) {
             if (($idx = array_search($p, $text_cols)) !== false) {
@@ -486,28 +947,98 @@ function get_pg_tables_metadata($pdo) {
         }
         $meta[] = ['schema' => $schema, 'table' => $table, 'id_col' => $id_col, 'text_cols' => array_slice($text_cols, 0, 6)];
     }
+
+    $cache_payload = json_encode(['cached_at' => time(), 'meta' => $meta], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+    if ($cache_payload !== false && is_dir(($cache_dir !== false ? $cache_dir : __DIR__))) {
+        @file_put_contents($cache_file, $cache_payload, LOCK_EX);
+    }
+
     return $meta;
 }
 
+function resolve_pg_row_node_id($row, $id_col, $search_cols, $names) {
+    $id_value = isset($row[$id_col]) ? (string)$row[$id_col] : '';
+    foreach ($names as $name) {
+        if ($id_value !== '' && $id_value === (string)$name) {
+            return (string)$name;
+        }
+    }
+
+    $haystack_parts = [];
+    foreach ($search_cols as $col) {
+        if (isset($row[$col]) && $row[$col] !== null) {
+            $haystack_parts[] = (string)$row[$col];
+        }
+    }
+    $haystack = mb_strtolower(implode(' ', $haystack_parts));
+    foreach ($names as $name) {
+        $needle = mb_strtolower((string)$name);
+        if ($needle !== '' && mb_strpos($haystack, $needle) !== false) {
+            return (string)$name;
+        }
+    }
+
+    return $names[0] ?? '';
+}
+
 function fetch_pg_rows_for_name($pdo, $name, $tables_meta) {
+    return fetch_pg_rows_for_names($pdo, [$name], $tables_meta);
+}
+
+function fetch_pg_rows_for_names($pdo, $names, $tables_meta) {
+    $names = array_values(array_filter(array_unique(array_map(fn($n) => trim((string)$n), (array)$names))));
+    if (empty($names)) return [];
+
     $out = [];
     foreach ($tables_meta as $m) {
-        $fq = ($m['schema'] && $m['schema'] !== 'public') ? "\"{$m['schema']}\".\"{$m['table']}\"" : "\"{$m['table']}\"";
-        $search_cols = [$m['id_col'], 'tei'];
-        foreach ($m['text_cols'] as $c) if (!in_array($c, $search_cols)) $search_cols[] = $c;
+        $schema = docent_valid_identifier($m['schema'] ?? '', 'public');
+        $table = docent_valid_identifier($m['table'] ?? '', '');
+        $id_col = docent_valid_identifier($m['id_col'] ?? '', 'id');
+        if ($table === '') continue;
 
-        $clauses = []; foreach ($search_cols as $c) $clauses[] = "\"{$c}\"::text ILIKE ?";
-        $q = "SELECT * FROM {$fq} WHERE (" . implode(" OR ", $clauses) . ") LIMIT 5";
+        $fq = ($schema !== '' && $schema !== 'public') ? "\"{$schema}\".\"{$table}\"" : "\"{$table}\"";
+        $search_cols = [$id_col, 'tei'];
+        foreach ((array)($m['text_cols'] ?? []) as $c) {
+            $safe_col = docent_valid_identifier($c, '');
+            if ($safe_col !== '' && !in_array($safe_col, $search_cols, true)) $search_cols[] = $safe_col;
+        }
+
+        $params = [];
+        $in_placeholders = implode(',', array_fill(0, count($names), '?'));
+        $id_match = "\"{$id_col}\"::text IN ({$in_placeholders})";
+        foreach ($names as $name) {
+            $params[] = $name;
+        }
+
+        $text_clauses = [];
+        foreach ($search_cols as $c) {
+            if ($c === $id_col) continue;
+            foreach ($names as $name) {
+                $text_clauses[] = "\"{$c}\"::text ILIKE ?";
+                $params[] = "%{$name}%";
+            }
+        }
+        $text_where = empty($text_clauses) ? '' : " OR (" . implode(" OR ", $text_clauses) . ")";
+        $q = "SELECT * FROM {$fq} WHERE ({$id_match}{$text_where}) LIMIT 25";
         
         try {
             $stmt = $pdo->prepare($q);
-            $stmt->execute(array_fill(0, count($clauses), "%{$name}%"));
+            $stmt->execute($params);
             $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
             foreach ($rows as $row) {
                 $snippets = [];
-                foreach ($row as $k => $v) if ($k !== $m['id_col'] && $k !== 'tei') $snippets[$k] = $v !== null ? strval($v) : '';
-                $out[] = ['table' => $m['table'], 'schema' => $m['schema'], 'rowid' => $row[$m['id_col']] ?? null, 'id_col' => $m['id_col'], 'match_cols' => $search_cols, 'tei' => $row['tei'] ?? null, 'snippets' => $snippets];
+                foreach ($row as $k => $v) if ($k !== $id_col && $k !== 'tei') $snippets[$k] = $v !== null ? strval($v) : '';
+                $out[] = [
+                    'table' => $table,
+                    'schema' => $schema,
+                    'rowid' => $row[$id_col] ?? null,
+                    'id_col' => $id_col,
+                    'match_cols' => $search_cols,
+                    'tei' => $row['tei'] ?? null,
+                    'snippets' => $snippets,
+                    'node_id' => resolve_pg_row_node_id($row, $id_col, $search_cols, $names)
+                ];
             }
         } catch (Exception $e) { continue; }
     }
@@ -727,7 +1258,9 @@ async function performSearch() {
         
         draw(graphData.nodes, graphData.edges);
 
-        const nodeNames = graphData.nodes.map(n => n.raw_id);
+        const nodeNames = Array.isArray(graphData.prefetch_names) && graphData.prefetch_names.length > 0
+            ? graphData.prefetch_names
+            : graphData.nodes.map(n => n.raw_id);
         if (nodeNames.length > 0) {
             setStatus('<span class="spinner-border spinner-border-sm"></span> PostgreSQL 사료 원문 연동 중...');
             const pgRows = await api('pg_prefetch', { names: JSON.stringify(nodeNames) });
