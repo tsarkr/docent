@@ -19,9 +19,9 @@ if (file_exists(__DIR__ . '/.env')) {
 // Utility to get config safely
 function get_cfg($key, $default = '') {
     $val = getenv($key);
-    if ($val !== false) return trim($val);
-    if (isset($_ENV[$key])) return trim($_ENV[$key]);
-    if (isset($_SERVER[$key])) return trim($_SERVER[$key]);
+    if ($val !== false) return trim($val, " \t\n\r\0\x0B\"'");
+    if (isset($_ENV[$key])) return trim($_ENV[$key], " \t\n\r\0\x0B\"'");
+    if (isset($_SERVER[$key])) return trim($_SERVER[$key], " \t\n\r\0\x0B\"'");
     return $default;
 }
 
@@ -268,7 +268,7 @@ if (isset($_GET['ajax'])) {
                                . "focus는 질문 내용에 가장 적합한 값인 '인물', '사건', '장소', '기관' 중 하나로 결정하십시오. 부가적인 설명 없이 JSON만 반환하십시오.";
             }
 
-            $res = call_deepseek([
+            $res = call_gemini([
                 ["role" => "system", "content" => $system_prompt],
                 ["role" => "user", "content" => (string)$term]
             ], true);
@@ -467,7 +467,7 @@ if (isset($_GET['ajax'])) {
             exit;
         }
 
-        // [Action 4] AI RAG 도슨트 해설 생성
+// [Action 4] AI RAG 도슨트 해설 생성
         if ($action === 'explain') {
             $term = docent_sanitize_text($_POST['term'] ?? '', 180, false);
             $explain_lang = in_array(strtolower((string)($_POST['lang'] ?? '')), ['en', 'ko'], true) ? strtolower((string)$_POST['lang']) : (docent_is_english() ? 'en' : 'ko');
@@ -481,40 +481,45 @@ if (isset($_GET['ajax'])) {
             $context_str = trim($evidence_context . ($evidence_context && $pg_context ? "\n\n" : "") . $pg_context);
 
             if ($use_english) {
-                $prompt = "You are a history docent following a GraphRAG-style claim synthesis process.\n"
-                        . "- Target response length should fit within about 2,000 output tokens.\n"
-                        . "- Distinguish verified facts, inferences, and contested points.\n"
-                        . "- Prioritize high-degree graph entities when establishing the narrative backbone.\n"
-                        . "- Cite concrete evidence details from edge contexts and node evidence.\n"
-                        . "- Avoid emotional or exaggerated language and keep a neutral academic tone.\n"
-                        . "- Clearly state evidence limits when claims are weak.\n"
-                        . "- Write COMPLETELY IN ENGLISH and translate Korean source details into English.\n\n"
-                        . "[Sources / PG Evidence (in Korean, please translate and explain in English)]\n{$context_str}";
+                $sys_prompt = "You are a professional historical docent synthesizing claim-level evidence. "
+                            . "Synthesize claim-level evidence faithfully, keep uncertainty explicit, and write only in English. "
+                            . "Provide a complete, well-structured, and fully finished narrative without cutting off sentences.";
+                
+                $user_prompt = "You are a history docent following a GraphRAG-style claim synthesis process. Explain about '{$term}'.\n"
+                             . "- Distinguish verified facts, inferences, and contested points.\n"
+                             . "- Prioritize high-degree graph entities when establishing the narrative backbone.\n"
+                             . "- Cite concrete evidence details from edge contexts and node evidence.\n"
+                             . "- Avoid emotional or exaggerated language and keep a neutral academic tone.\n"
+                             . "- Clearly state evidence limits when claims are weak.\n"
+                             . "- Write COMPLETELY IN ENGLISH and translate Korean source details into English.\n\n"
+                             . "[Sources / PG Evidence]\n{$context_str}";
 
-                $res = call_deepseek([
-                    ["role" => "system", "content" => "You are a professional historical docent. Synthesize claim-level evidence faithfully, keep uncertainty explicit, and write only in English."],
-                    ["role" => "user", "content" => $prompt]
-                ], false, 2000);
+                $res = call_gemini([
+                    ["role" => "system", "content" => $sys_prompt],
+                    ["role" => "user", "content" => $user_prompt]
+                ], false, 4096);
             } else {
-                $prompt = "당신은 GraphRAG 방식으로 주장(Claim) 단위 근거를 종합하는 역사 도슨트입니다. '{$term}'에 대해 해설하세요.\n"
-                        . "- 응답 분량은 약 2,000 토큰 이내로 구성합니다.\n"
-                        . "- 사실/추정/논쟁 지점을 구분해 서술합니다.\n"
-                        . "- 연결 차수가 높은 핵심 개체를 우선 서사 축으로 삼습니다.\n"
-                        . "- 엣지 문맥과 노드 사료에서 확인되는 근거를 구체적으로 제시합니다.\n"
-                        . "- 감정적·과장 표현을 피하고 중립적 톤을 유지합니다.\n"
-                        . "- 근거가 부족한 부분은 명확히 한계를 밝힙니다.\n\n"
-                        . "[사료/PG 근거]\n{$context_str}";
+                $sys_prompt = "당신은 역사 지식망(GraphRAG)을 기반으로 사료와 사실을 분석하는 전문 역사 도슨트입니다. "
+                            . "한국어 해설만 작성하되, 중간에 끊기지 않도록 완결된 문장 구조로 끝까지 작성하십시오.";
 
-                $res = call_deepseek([
-                    ["role" => "system", "content" => "당신은 역사 도슨트입니다. 한국어 해설만 작성하십시오."],
-                    ["role" => "user", "content" => $prompt]
-                ], false, 2000);
+                $user_prompt = "다음 사료 및 지식그래프 근거를 종합하여 '{$term}'에 대한 완결된 역사 해설을 작성해 주십시오.\n\n"
+                             . "- 서론, 본론, 결론을 갖춘 온전한 해설문 형태로 작성합니다.\n"
+                             . "- 사실/추정/논쟁 지점을 구분해 서술합니다.\n"
+                             . "- 연결 차수가 높은 핵심 개체를 우선 서사 축으로 삼습니다.\n"
+                             . "- 엣지 문맥과 노드 사료에서 확인되는 구체적인 사료 근거를 제시합니다.\n"
+                             . "- 감정적·과장 표현을 피하고 중립적 학술 어조를 유지합니다.\n"
+                             . "- 근거가 부족한 부분은 명확히 한계를 밝힙니다.\n\n"
+                             . "[사료/PG 근거]\n{$context_str}";
+
+                $res = call_gemini([
+                    ["role" => "system", "content" => $sys_prompt],
+                    ["role" => "user", "content" => $user_prompt]
+                ], false, 4096);
             }
 
             echo json_encode(["text" => $res], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
             exit;
         }
-
     } catch (Throwable $e) {
         http_response_code(500);
         echo json_encode([
@@ -547,176 +552,89 @@ function get_pg() {
     }
 }
 
-function call_deepseek($msgs, $is_json = false, $max_tokens = null) {
-    $api_key = get_cfg('DEEPSEEK_API_KEY');
+function call_gemini($msgs, $is_json = false, $max_tokens = null) {
+    $api_key = get_cfg('GEMINI_API_KEY');
+    if (!$api_key) {
+        $api_key = get_cfg('API_KEY');
+    }
     if (!$api_key) return $is_json ? '{"explanation":"API Key missing"}' : docent_t("API Key가 설정되지 않았습니다.", "API key is not configured.");
 
-    $base_url = rtrim(get_cfg('DEEPSEEK_BASE_URL', 'https://api.deepseek.com'), '/');
-    $parsed = parse_url($base_url);
-    if (!isset($parsed['scheme'], $parsed['host']) || !in_array(strtolower($parsed['scheme']), ['http', 'https'], true)) {
-        return $is_json ? '{"explanation":"Invalid DeepSeek base URL"}' : docent_t("AI 서버 주소가 올바르지 않습니다.", "The AI server URL is invalid.");
+    $model = trim(get_cfg('GEMINI_MODEL', 'gemini-2.5-flash'));
+    $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$api_key}";
+
+    $system_prompt = "";
+    $contents = [];
+    foreach ($msgs as $m) {
+        if ($m['role'] === 'system') {
+            $system_prompt = $m['content'];
+        } else {
+            $role = ($m['role'] === 'assistant') ? 'model' : 'user';
+            $contents[] = [
+                "role" => $role,
+                "parts" => [["text" => $m['content']]]
+            ];
+        }
     }
 
-    $model = docent_sanitize_text(get_cfg('DEEPSEEK_MODEL', 'deepseek-v4-flash'), 120, false);
-    if ($model === '') {
-        $model = 'deepseek-v4-flash';
-    }
-
-    $ch = curl_init($base_url . '/chat/completions');
     $payload = [
-        "model" => $model,
-        "messages" => $msgs,
-        "temperature" => 0.0
+        "contents" => $contents,
+        "generationConfig" => [
+            "temperature" => 0.0,
+            "maxOutputTokens" => $max_tokens ? (int)max(1, min(8192, $max_tokens)) : 4096,
+        ]
     ];
-    if ($is_json) $payload["response_format"] = ["type" => "json_object"];
-    if ($max_tokens !== null) $payload["max_tokens"] = (int)max(1, min(4000, $max_tokens));
 
+    if ($system_prompt !== "") {
+        $payload["system_instruction"] = [
+            "parts" => [["text" => $system_prompt]]
+        ];
+    }
+
+    if ($is_json) {
+        $payload["generationConfig"]["response_mime_type"] = "application/json";
+    }
+
+    $ch = curl_init($url);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_POST => true,
         CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE),
-        CURLOPT_HTTPHEADER => ["Authorization: Bearer " . preg_replace('/\s+/', '', $api_key), "Content-Type: application/json"],
+        CURLOPT_HTTPHEADER => ["Content-Type: application/json"],
         CURLOPT_CONNECTTIMEOUT => 10,
-        CURLOPT_TIMEOUT => 35,
+        CURLOPT_TIMEOUT => 60,
         CURLOPT_SSL_VERIFYPEER => true,
         CURLOPT_SSL_VERIFYHOST => 2,
-        CURLOPT_HEADER => false,
-        CURLOPT_FOLLOWLOCATION => false
     ]);
 
     $res = curl_exec($ch);
-    $timeout_notice = docent_t(
-        "사료 검색은 완료되었으나, AI 해설 응답 시간이 초과되었습니다. 수집된 사료 근거를 먼저 확인해 주세요.",
-        "Source retrieval is complete, but the AI explanation timed out. Please review the gathered evidence first."
-    );
     $curl_errno = curl_errno($ch);
     $curl_error = curl_error($ch);
     $http_code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
     curl_close($ch);
 
-    if ($res === false || $curl_errno !== 0 || $http_code >= 500 || $http_code === 0) {
-        $transport_msg = $timeout_notice;
-        if ($curl_errno !== 0 && $curl_error !== '') {
-            $transport_msg = docent_t("AI 요청 전송 실패", "AI request transport failed") . " (cURL {$curl_errno}): " . $curl_error;
-        }
-        if ($is_json) {
-            return json_encode(["explanation" => $transport_msg], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
-        }
-        return $transport_msg;
+    if ($res === false || $curl_errno !== 0 || $http_code !== 200) {
+        $error_msg = $curl_error ?: "HTTP $http_code";
+        return $is_json ? json_encode(["explanation" => "API Error: $error_msg"], JSON_UNESCAPED_UNICODE) : "AI 요청 실패: $error_msg";
     }
 
     $data = json_decode($res, true);
-    if ($http_code >= 400) {
-        $api_error = '';
-        if (is_array($data)) {
-            if (isset($data['error'])) {
-                if (is_array($data['error'])) {
-                    $api_error = (string)($data['error']['message'] ?? $data['error']['type'] ?? '');
-                } else {
-                    $api_error = (string)$data['error'];
-                }
-            }
-            if ($api_error === '') {
-                $api_error = (string)($data['message'] ?? '');
+    
+    // 복수 parts를 안전하게 전체 결합하여 누락 방지
+    $content = '';
+    if (isset($data['candidates'][0]['content']['parts']) && is_array($data['candidates'][0]['content']['parts'])) {
+        foreach ($data['candidates'][0]['content']['parts'] as $part) {
+            if (isset($part['text'])) {
+                $content .= $part['text'];
             }
         }
-        if ($api_error === '') {
-            $api_error = mb_substr(normalize_whitespace_text((string)$res), 0, 180);
-        }
-        if ($api_error === '') {
-            $api_error = docent_t("원인을 확인할 수 없습니다.", "Unknown API error.");
-        }
-
-        $error_message = docent_t("AI 요청 실패", "AI request failed") . " (HTTP {$http_code}): {$api_error}";
-        if ($is_json) {
-            return json_encode(["explanation" => $error_message], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
-        }
-        return $error_message;
     }
 
-    if (!is_array($data)) {
-        $decode_message = docent_t("AI 응답 JSON 파싱 실패", "Failed to parse AI response JSON");
-        return $is_json
-            ? json_encode(["explanation" => $decode_message], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE)
-            : $decode_message;
-    }
-
-    $content = extract_deepseek_text($data);
-
-    if ($is_json) return $content ?: '{"explanation":"JSON Content empty"}';
-    if ($content === '') {
-        return docent_t(
-            "AI 응답 본문이 비어 있습니다. DEEPSEEK_MODEL 또는 요청 길이를 확인해 주세요. (권장 모델: deepseek-chat)",
-            "AI returned an empty response body. Please check DEEPSEEK_MODEL or request length. (Recommended model: deepseek-chat)"
-        );
+    if (trim($content) === '') {
+        return $is_json ? '{"explanation":"Empty response"}' : "AI 응답 본문이 비어 있습니다.";
     }
     return $content;
 }
 
-function extract_deepseek_text($data) {
-    if (!is_array($data)) return '';
-
-    $candidates = [];
-
-    if (isset($data['choices'][0])) {
-        $choice = $data['choices'][0];
-        if (is_array($choice)) {
-            if (isset($choice['message']) && is_array($choice['message'])) {
-                $message = $choice['message'];
-                if (isset($message['content'])) $candidates[] = $message['content'];
-                if (isset($message['reasoning_content'])) $candidates[] = $message['reasoning_content'];
-            }
-            if (isset($choice['text'])) $candidates[] = $choice['text'];
-            if (isset($choice['content'])) $candidates[] = $choice['content'];
-        }
-    }
-
-    if (isset($data['output_text'])) $candidates[] = $data['output_text'];
-    if (isset($data['content'])) $candidates[] = $data['content'];
-
-    foreach ($candidates as $candidate) {
-        $text = normalize_deepseek_candidate($candidate);
-        if ($text !== '') return $text;
-    }
-
-    return '';
-}
-
-function normalize_deepseek_candidate($candidate) {
-    if (is_string($candidate)) {
-        return trim($candidate);
-    }
-    if (is_scalar($candidate)) {
-        return trim((string)$candidate);
-    }
-    if (!is_array($candidate)) {
-        return '';
-    }
-
-    $parts = [];
-    foreach ($candidate as $piece) {
-        if (is_string($piece) || is_scalar($piece)) {
-            $parts[] = (string)$piece;
-            continue;
-        }
-        if (!is_array($piece)) continue;
-
-        if (isset($piece['text']) && is_scalar($piece['text'])) {
-            $parts[] = (string)$piece['text'];
-            continue;
-        }
-        if (isset($piece['content']) && is_scalar($piece['content'])) {
-            $parts[] = (string)$piece['content'];
-            continue;
-        }
-        if (isset($piece['value']) && is_scalar($piece['value'])) {
-            $parts[] = (string)$piece['value'];
-            continue;
-        }
-    }
-
-    return trim(implode("\n", array_filter(array_map('trim', $parts), static fn($v) => $v !== '')));
-}
 
 function clamp_int($value, $min, $max) {
     return max($min, min($max, (int)$value));
@@ -1107,6 +1025,15 @@ function fetch_pg_rows_for_names($pdo, $names, $tables_meta) {
                 <div class="mb-1">🎯 <strong>의도:</strong> <span id="intent-val"></span></div>
                 <div class="mb-1">🔍 <strong>초점:</strong> <span id="focus-val"></span></div>
                 <div class="text-muted mt-1" id="explanation-val" style="font-size:0.75rem;"></div>
+            </div>
+
+            <div class="card bg-warning-subtle p-3 mb-3 small border-1 border-warning" style="border-radius: 10px;">
+                <div class="fw-bold mb-2"><i class="bi bi-info-circle"></i> 📋 기본정보</div>
+                <div class="text-muted small" style="line-height: 1.5;">
+                    <p class="mb-1"><strong>제작자:</strong> jo.gyungmin@gmail.com</p>
+                    <p class="mb-1"><strong>💰 AI API 비용:</strong> 개인 감당 / 적절한 사용 부탁</p>
+                    <p class="mb-0"><strong>🌐 English:</strong> Explanation only</p>
+                </div>
             </div>
 
             <div id="status-log" class="text-muted">
