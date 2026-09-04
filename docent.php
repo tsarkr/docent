@@ -1105,7 +1105,7 @@ function fetch_pg_rows_for_names($pdo, $names, $tables_meta) {
             <div class="mb-4">
                 <label class="form-label small fw-bold text-muted">추천 키워드</label>
                 <div class="d-grid gap-2">
-                    <?php foreach (["유관순", "안중근", "3.1 운동", "시위", "임시정부"] as $kw): ?>
+                    <?php foreach (["유관순", "안중근", "이동휘", "시위", "임시정부"] as $kw): ?>
                         <button onclick="setQuery('<?= $kw ?>')" class="btn btn-outline-secondary btn-sm text-start keyword-btn" data-ko-label="<?= $kw ?>">📌 <?= $kw ?></button>
                     <?php endforeach; ?>
                 </div>
