@@ -10,6 +10,26 @@ use Dotenv\Dotenv;
 use Laudis\Neo4j\ClientBuilder;
 use Laudis\Neo4j\Authentication\Authenticate;
 
+if (session_status() === PHP_SESSION_NONE) {
+    $forwarded_proto = trim(explode(',', (string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? ''))[0]);
+    $is_https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || strtolower($forwarded_proto) === 'https';
+    ini_set('session.use_strict_mode', '1');
+    session_cache_limiter('nocache');
+    session_set_cookie_params([
+        'lifetime' => 0,
+        'path' => '/',
+        'httponly' => true,
+        'secure' => $is_https,
+        'samesite' => $is_https ? 'None' : 'Lax'
+    ]);
+    session_start();
+}
+if (empty($_SESSION['docent_csrf'])) {
+    $_SESSION['docent_csrf'] = bin2hex(random_bytes(32));
+}
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
+
 // 1. Load Environment Variables
 if (file_exists(__DIR__ . '/.env')) {
     $dotenv = Dotenv::createImmutable(__DIR__);
@@ -87,6 +107,13 @@ function docent_check_same_origin() {
     $origin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
     if ($origin === '') return true;
 
+    $allowed_origins = array_filter(array_map('trim', explode(',', get_cfg('DOCENT_ALLOWED_ORIGINS', 'https://gyungmin.tsar.kr'))));
+    foreach ($allowed_origins as $allowed_origin) {
+        if (strcasecmp($origin, rtrim($allowed_origin, '/')) === 0) {
+            return true;
+        }
+    }
+
     $origin_parts = parse_url($origin);
     if (!is_array($origin_parts) || !isset($origin_parts['host'])) {
         return false;
@@ -146,6 +173,41 @@ function docent_check_same_origin() {
     }
 
     return true;
+}
+
+function docent_check_csrf() {
+    $request_token = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? ($_POST['csrf_token'] ?? '');
+    return is_string($request_token)
+        && isset($_SESSION['docent_csrf'])
+        && hash_equals((string)$_SESSION['docent_csrf'], $request_token);
+}
+
+function docent_rate_limit($action) {
+    $ip = (string)($_SERVER['REMOTE_ADDR'] ?? 'unknown');
+    $key = hash('sha256', $ip . '|' . $action);
+    $limit = $action === 'explain' ? 5 : 30;
+    $file = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'docent-rate-' . $key;
+    $handle = @fopen($file, 'c+');
+    if (!$handle) return true;
+
+    $allowed = true;
+    if (flock($handle, LOCK_EX)) {
+        $timestamps = json_decode(stream_get_contents($handle) ?: '[]', true);
+        if (!is_array($timestamps)) $timestamps = [];
+        $now = time();
+        $timestamps = array_values(array_filter($timestamps, static fn($timestamp) => is_int($timestamp) && $timestamp > ($now - 60)));
+        if (count($timestamps) >= $limit) {
+            $allowed = false;
+        } else {
+            $timestamps[] = $now;
+            ftruncate($handle, 0);
+            rewind($handle);
+            fwrite($handle, json_encode($timestamps));
+        }
+        flock($handle, LOCK_UN);
+    }
+    fclose($handle);
+    return $allowed;
 }
 
 function infer_focus($term, $is_english = false) {
@@ -236,9 +298,27 @@ if (isset($_GET['ajax'])) {
         echo json_encode(['error' => 'Method not allowed.'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
         exit;
     }
-    if (!in_array($action, $allowed_actions, true) || !docent_check_same_origin()) {
+    if (!in_array($action, $allowed_actions, true)) {
         http_response_code(400);
-        echo json_encode(['error' => 'Invalid request.'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+        echo json_encode(['error' => '허용되지 않은 요청입니다.'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+        exit;
+    }
+    if (!docent_check_same_origin()) {
+        error_log(sprintf('Docent request rejected: invalid origin for action %s', $action));
+        http_response_code(403);
+        echo json_encode(['error' => '접속 출처가 올바르지 않습니다. 페이지를 새로고침해 주세요.'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+        exit;
+    }
+    if (!docent_check_csrf()) {
+        error_log(sprintf('Docent request rejected: invalid CSRF token for action %s', $action));
+        http_response_code(403);
+        echo json_encode(['error' => '보안 토큰이 만료되었습니다. 페이지를 새로고침해 주세요.'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+        exit;
+    }
+    if (!docent_rate_limit($action)) {
+        http_response_code(429);
+        header('Retry-After: 60');
+        echo json_encode(['error' => '요청이 너무 많습니다. 잠시 후 다시 시도하세요.'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
         exit;
     }
     
@@ -521,9 +601,10 @@ if (isset($_GET['ajax'])) {
             exit;
         }
     } catch (Throwable $e) {
+        error_log(sprintf('Docent AJAX failure [%s]: %s in %s:%d', $action, $e->getMessage(), $e->getFile(), $e->getLine()));
         http_response_code(500);
         echo json_encode([
-            "error" => $e->getMessage() . " (Line: " . $e->getLine() . ")"
+            "error" => "서버 내부 오류가 발생했습니다."
         ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
         exit;
     }
@@ -559,8 +640,11 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null) {
     }
     if (!$api_key) return $is_json ? '{"explanation":"API Key missing"}' : docent_t("API Key가 설정되지 않았습니다.", "API key is not configured.");
 
-    $model = trim(get_cfg('GEMINI_MODEL', 'gemini-2.5-flash'));
-    $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$api_key}";
+    $model = trim(get_cfg('GEMINI_MODEL', 'gemini-3.5-flash-lite'));
+    if (!preg_match('/^[A-Za-z0-9._-]+$/', $model)) {
+        return $is_json ? '{"explanation":"Invalid model configuration"}' : "AI 모델 설정이 올바르지 않습니다.";
+    }
+    $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent";
 
     $system_prompt = "";
     $contents = [];
@@ -599,7 +683,7 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null) {
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_POST => true,
         CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE),
-        CURLOPT_HTTPHEADER => ["Content-Type: application/json"],
+        CURLOPT_HTTPHEADER => ["Content-Type: application/json", "x-goog-api-key: {$api_key}"],
         CURLOPT_CONNECTTIMEOUT => 10,
         CURLOPT_TIMEOUT => 60,
         CURLOPT_SSL_VERIFYPEER => true,
@@ -610,11 +694,18 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null) {
     $curl_errno = curl_errno($ch);
     $curl_error = curl_error($ch);
     $http_code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-    curl_close($ch);
 
     if ($res === false || $curl_errno !== 0 || $http_code !== 200) {
-        $error_msg = $curl_error ?: "HTTP $http_code";
-        return $is_json ? json_encode(["explanation" => "API Error: $error_msg"], JSON_UNESCAPED_UNICODE) : "AI 요청 실패: $error_msg";
+        $provider_message = '';
+        $error_data = json_decode((string)$res, true);
+        if (is_array($error_data['error'] ?? null)) {
+            $provider_message = docent_sanitize_text($error_data['error']['message'] ?? '', 240, false);
+        }
+        error_log(sprintf('Gemini request failed: HTTP %d, cURL %d, %s, provider: %s', $http_code, $curl_errno, $curl_error, $provider_message));
+        $safe_message = $provider_message !== '' ? "Gemini 오류: {$provider_message}" : "AI 요청에 실패했습니다. (HTTP {$http_code})";
+        return $is_json
+            ? json_encode(["explanation" => $safe_message], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE)
+            : $safe_message;
     }
 
     $data = json_decode($res, true);
@@ -1133,16 +1224,24 @@ function trackAnalyticsEvent(name, params = {}) {
 async function api(act, data = {}) {
     const fd = new FormData();
     for (let k in data) fd.append(k, data[k]);
-    const response = await fetch(`?ajax=${act}`, { method: 'POST', body: fd });
+    const csrfToken = '<?= htmlspecialchars($_SESSION['docent_csrf'], ENT_QUOTES, 'UTF-8') ?>';
+    fd.append('csrf_token', csrfToken);
+    const response = await fetch(`?ajax=${act}`, {
+        method: 'POST',
+        body: fd,
+        credentials: 'same-origin',
+        headers: { 'X-CSRF-Token': csrfToken }
+    });
     
     const rawText = await response.text();
     
     if (!response.ok) {
         try {
             const err = JSON.parse(rawText);
-            throw new Error('[' + act + ' ' + '단계 오류] ' + (err.error || '서버 오류'));
+            throw new Error('[' + act + ' 단계 HTTP ' + response.status + '] ' + (err.error || '서버 오류'));
         } catch(e) {
-            throw new Error('[' + act + ' ' + '단계 500 에러] ' + rawText.substring(0, 150));
+            if (e instanceof Error && e.message.startsWith('[' + act + ' 단계 HTTP ')) throw e;
+            throw new Error('[' + act + ' 단계 HTTP ' + response.status + '] ' + rawText.substring(0, 150));
         }
     }
     
