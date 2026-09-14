@@ -9,7 +9,9 @@ Sequence:
  5) scripts/extract_all_entities.py
  6) HITL pause for xlsx review
  7) scripts/generate_cidoc_mappings.py
- 8) graph_builder.py
+ 8) scripts/graph_builder.py
+ 9) scripts/vectorize_neo4j.py
+10) scripts/apply_vectors_to_neo4j.py
 
 Each step is run synchronously; on error the process exits with non-zero code.
 """
@@ -20,11 +22,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 # .venv 환경 반영
-PY_VENV = ROOT / '.venv' / 'bin' / 'python3'
-if PY_VENV.exists():
-    PY = str(PY_VENV)
-else:
-    PY = sys.executable
+PY_CANDIDATES = (
+    ROOT / '.venv3.14' / 'bin' / 'python',
+    ROOT / '.venv' / 'bin' / 'python3',
+    ROOT / '.venv' / 'bin' / 'python',
+)
+PY = next((str(path) for path in PY_CANDIDATES if path.exists()), sys.executable)
 
 XLSX_PATH = ROOT / 'Extracted_Historical_Entities.xlsx'
 
@@ -39,7 +42,9 @@ STEPS = [
     (ROOT / 'scripts' / 'link_persnames_i815.py', ['--apply']),
     (ROOT / 'scripts' / 'extract_all_entities.py', []),
     (ROOT / 'scripts' / 'generate_cidoc_mappings.py', []),
-    (ROOT / 'graph_builder.py', []),
+    (ROOT / 'scripts' / 'graph_builder.py', []),
+    (ROOT / 'scripts' / 'vectorize_neo4j.py', []),
+    (ROOT / 'scripts' / 'apply_vectors_to_neo4j.py', []),
 ]
 
 

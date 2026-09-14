@@ -28,7 +28,7 @@ scripts/link_persnames_i815.py
 scripts/generate_cidoc_mappings.py
 	│  tei_cidoc_mappings 테이블 + CIDOC_Timeline_Mappings.ttl
 	▼
-graph_builder.py
+scripts/graph_builder.py
 	   Neo4j 노드·관계·CIDOC 매핑 재구축
 ```
 
@@ -91,7 +91,9 @@ python -m pip install -r requirements.txt
 4. `scripts/link_persnames_i815.py --apply`: 3글자 한글 후보를 i815 인명사전과 비교하고 단일 매칭만 DB에 반영합니다.
 5. `scripts/extract_all_entities.py`: `persName`, `placeName`, `term`을 `Extracted_Historical_Entities.csv`로 추출합니다.
 6. `scripts/generate_cidoc_mappings.py`: 인물 태그를 순차 활동으로 해석해 CIDOC TTL을 생성하고 PostgreSQL에 저장합니다.
-7. `graph_builder.py`: PostgreSQL 원자료, TEI, 기관 계층, 인물 관계, CIDOC 매핑을 Neo4j에 적재합니다.
+7. `scripts/graph_builder.py`: PostgreSQL 원자료, TEI, 문건, 기관 계층, 인물 관계, CIDOC 매핑을 포함한 전체 그래프를 Neo4j에 재구축합니다. 장소 마스터는 `raw_detail_place`의 식별자·명칭·좌표·유형을 기준으로 처리합니다.
+8. `scripts/vectorize_neo4j.py`: Neo4j 전체 그래프를 읽고 Ollama 임베딩을 `vector_store/`에 생성합니다.
+9. `scripts/apply_vectors_to_neo4j.py`: 생성된 임베딩을 Neo4j 노드의 `embedding` 속성에 저장합니다.
 
 5단계 뒤에는 `Extracted_Historical_Entities.xlsx`가 생성됩니다. 오케스트레이터는 기본적으로 이 파일을 사람이 검토한 뒤 Enter를 누를 때 다음 단계로 진행합니다. 자동 실행이 필요하면 다음처럼 설정합니다.
 
@@ -166,21 +168,21 @@ TEI가 있는 모든 `raw_*` 테이블을 스트리밍 방식으로 읽고 다�
 .venv/bin/python scripts/generate_cidoc_mappings.py
 ```
 
-### Neo4j 구축: `graph_builder.py`
+### 표준 Neo4j 구축: `scripts/graph_builder.py`
 
-실행할 때마다 Neo4j의 모든 노드를 `DETACH DELETE`한 뒤 전체 그래프를 재생성합니다. 다음 노드와 관계를 구성합니다.
+표준 `run_pipeline.py`가 사용하는 전체 그래프 적재기입니다. 실행할 때마다 Neo4j의 모든 노드를 `DETACH DELETE`한 뒤 전체 그래프를 재생성합니다.
 
 - 노드: `장소`, `사건`, `문건`, `기관`, `인물`
 - 주요 관계: `P14_carried_out_by`, `P7_took_place_at`, `P152_has_parent`, `foaf:knows`, `foaf:member`, `소속`
 - 제약조건/인덱스: 장소·사건·문건·기관 ID, 인물·장소·사건 UID, 장소명, 다중 라벨 전문 검색 인덱스
 
 ```bash
-.venv/bin/python graph_builder.py
+.venv/bin/python scripts/graph_builder.py
 ```
 
 ### Neo4j 벡터화: `scripts/vectorize_neo4j.py`
 
-Neo4j의 노드와 방향성 관계를 읽기 전용으로 조회하고, Ollama 임베딩을 Neo4j 외부의 `vector_store/`에 저장합니다. Neo4j에는 `CREATE`, `MERGE`, `SET`, `DELETE` 쿼리를 실행하지 않습니다. 먼저 의존성과 임베딩 모델을 준비하세요.
+Neo4j의 노드와 방향성 관계를 읽기 전용으로 조회하고, Ollama 임베딩을 Neo4j 외부의 `vector_store/`에 저장합니다. 먼저 의존성과 임베딩 모델을 준비하세요.
 
 ```bash
 .venv/bin/python -m pip install -r requirements.txt
@@ -189,6 +191,14 @@ ollama pull nomic-embed-text
 ```
 
 생성 파일은 `vector_store/metadata.jsonl`(원본 속성·관계 메타데이터), `vector_store/embeddings.npy`(코사인 검색용 정규화 벡터), `vector_store/manifest.json`입니다. 다른 저장 위치나 모델을 사용하려면 `--output-dir`, `--model`, `--ollama-url`을 지정할 수 있습니다.
+
+### Neo4j 벡터 적용: `scripts/apply_vectors_to_neo4j.py`
+
+`vector_store/embeddings.npy`를 읽어 Neo4j 노드에 `embedding` 속성으로 저장합니다. 기존 노드 속성과 관계는 변경하지 않습니다.
+
+```bash
+.venv/bin/python scripts/apply_vectors_to_neo4j.py --batch-size 256
+```
 
 ## 데이터와 산출물
 
@@ -222,9 +232,9 @@ php -S 127.0.0.1:8080
 ## 운영상 주의사항
 
 - `upload_data.py`는 대상 테이블을 삭제 후 재생성하므로 운영 DB에서 먼저 백업하고 실행합니다.
-- `graph_builder.py`는 Neo4j 전체 그래프를 삭제 후 재구축하므로 개발/검증 DB에서 먼저 실행합니다.
+- `scripts/graph_builder.py`는 Neo4j 전체 그래프를 삭제 후 재구축하므로 개발/검증 DB에서 먼저 실행합니다.
 - `tei_status=REFINED`가 남아 있으면 태깅 단계가 해당 행을 건너뜁니다. 원문을 다시 처리하려면 상태를 정리하거나 원자료 적재부터 다시 수행해야 합니다.
-- `generate_cidoc_mappings.py`와 `graph_builder.py`는 PostgreSQL의 `tei_cidoc_mappings`를 전제로 합니다. CIDOC 생성 전에 TEI와 인명 태깅을 완료해야 합니다.
+- `generate_cidoc_mappings.py`와 `scripts/graph_builder.py`는 PostgreSQL의 `tei_cidoc_mappings`를 전제로 합니다. CIDOC 생성 전에 TEI와 인명 태깅을 완료해야 합니다.
 - PostgreSQL과 Neo4j 접속 비밀번호는 `.streamlit/secrets.toml` 또는 `.env`를 외부에 공개하지 않습니다.
 - 대량 처리 전에는 `--limit`, `--dry-run`, 별도 데이터베이스를 사용해 결과를 확인합니다. `--apply`와 전체 그래프 재구축은 명시적으로 확인한 뒤 실행합니다.
 

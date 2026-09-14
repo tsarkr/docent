@@ -14,7 +14,7 @@
   - 프로젝트 개요: [README.md](README.md)
   - 의존성: [requirements.txt](requirements.txt)
   - UI 앱: [app.py](app.py)
-  - 그래프 적재: [graph_builder.py](graph_builder.py)
+  - 그래프 적재: [scripts/graph_builder.py](scripts/graph_builder.py)
   - 전체 오케스트레이션: [run_pipeline.py](run_pipeline.py)
   - 데이터 및 매핑: [data/](data)
   - 유틸 스크립트: [scripts/](scripts)

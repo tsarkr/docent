@@ -1,5 +1,5 @@
 """
-이 스크립트로 파이프라인이 통합되었으므로 pg_to_tei.py 및 tei_to_neo4j.py는 삭제 가능함
+이 스크립트는 전체 Neo4j 그래프 적재의 표준 진입점입니다.
 
 설명:
 - Neo4j 그래프 초기화 및 스키마 확보
@@ -13,6 +13,7 @@
 
 import os
 import re
+import html
 import urllib.parse
 
 import hanja
@@ -31,7 +32,11 @@ except ImportError:
 
 def _load_secrets(secret_file=None):
     if secret_file is None:
-        secret_file = os.path.join(os.path.dirname(__file__), '.streamlit', 'secrets.toml')
+        secret_file = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            '.streamlit',
+            'secrets.toml',
+        )
 
     if os.path.exists(secret_file):
         try:
@@ -68,10 +73,12 @@ def _split_names(val):
     """Split names in a cell by common delimiters."""
     if not val or pd.isna(val):
         return []
-    import re
-    # Split by ;, / | · and whitespace
-    parts = re.split(r'[;,/|·\s]+', str(val).strip())
-    return [p for p in parts if p and p.lower() != 'none' and p.lower() != 'nan']
+    cleaned = html.unescape(re.sub(r"<[^>]*>", " ", str(val)))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned or cleaned.lower() in {"none", "nan", "null"}:
+        return []
+    parts = re.split(r"[;,/|·\n\r]+", cleaned)
+    return [p.strip() for p in parts if p.strip()]
 
 PG_CONFIG = {
     "host": _secret_or_env("PG_HOST", "localhost", SECRETS),
@@ -405,27 +412,37 @@ def build_ultimate_graph():
         _clear_graph(session, batch_size=50000)
         _ensure_schema(session)
 
-        print("📍 장소 노드 생성 중... (Postgres TEI에서 로드)")
-        _ensure_tei_status('raw_detail_place')
+        print("📍 장소 노드 생성 중... (raw_detail_place 장소 마스터에서 로드)")
         try:
             df_place = pd.read_sql(
-                "SELECT rowid, tei FROM raw_detail_place WHERE tei IS NOT NULL",
+                '''
+                SELECT "세부장소아이디", "명칭", "유형", "유형3",
+                       "x좌표값", "y좌표값"
+                FROM raw_detail_place
+                WHERE "세부장소아이디" IS NOT NULL
+                  AND "명칭" IS NOT NULL
+                ''',
                 pg_engine,
             )
         except Exception as e:
-            print(f"⚠️ 장소 TEI 로딩 실패: {e}")
+            print(f"⚠️ 장소 마스터 로딩 실패: {e}")
             df_place = pd.DataFrame()
 
         place_records = []
         for _, row in df_place.iterrows():
-            values = _extract_tei_values(row.get('tei'), limit=3)
-            if not values:
+            code = str(row.get('세부장소아이디') or '').strip()
+            names = _split_names(row.get('명칭'))
+            if not code or not names:
                 continue
-            place_records.append({
-                'id': values[0],
-                'name': values[1] if len(values) > 1 else values[0],
-                'rowid': str(row.get('rowid', '')),
-            })
+            for name in names:
+                place_records.append({
+                    'id': code,
+                    'name': name,
+                    'type': str(row.get('유형') or '').strip(),
+                    'type3': str(row.get('유형3') or '').strip(),
+                    'x': row.get('x좌표값'),
+                    'y': row.get('y좌표값'),
+                })
 
         if place_records:
             _run_batches(
@@ -434,8 +451,11 @@ def build_ultimate_graph():
                 UNWIND $data AS row
                 MERGE (p:장소 {id: row.id})
                 SET p.명칭 = row.name,
-                    p.원천rowid = row.rowid,
-                    p.한글명칭 = coalesce(p.한글명칭, row.name)
+                    p.한글명칭 = coalesce(p.한글명칭, row.name),
+                    p.유형 = row.type,
+                    p.유형3 = row.type3,
+                    p.x = row.x,
+                    p.y = row.y
                 """,
                 place_records,
                 batch_size=5000,
@@ -628,21 +648,38 @@ def build_ultimate_graph():
 
                 if place_acc:
                     try:
-                        _run_batches(
-                            session,
-                            """
-                            UNWIND $data AS row
-                            MATCH (e:사건 {id: row.event_id})
-                            MERGE (p:장소 {명칭: row.place_name})
-                            ON CREATE SET p.한글독음 = row.gloss
-                            ON MATCH SET p.한글독음 = coalesce(p.한글독음, row.gloss)
-                            MERGE (e)-[r:P7_took_place_at]->(p)
-                            SET r.context = row.context_text,
-                                r.source_tag = 'placeName'
-                            """,
-                            place_acc,
-                            batch_size=2000,
-                        )
+                        place_by_id = [row for row in place_acc if row.get('place_id')]
+                        place_by_name = [row for row in place_acc if not row.get('place_id')]
+                        if place_by_id:
+                            _run_batches(
+                                session,
+                                """
+                                UNWIND $data AS row
+                                MATCH (e:사건 {id: row.event_id})
+                                MATCH (p:장소 {id: row.place_id})
+                                MERGE (e)-[r:P7_took_place_at]->(p)
+                                SET p.한글독음 = coalesce(p.한글독음, row.gloss),
+                                    r.context = row.context_text,
+                                    r.source_tag = 'placeName'
+                                """,
+                                place_by_id,
+                                batch_size=2000,
+                            )
+                        if place_by_name:
+                            _run_batches(
+                                session,
+                                """
+                                UNWIND $data AS row
+                                MATCH (e:사건 {id: row.event_id})
+                                MATCH (p:장소 {명칭: row.place_name})
+                                MERGE (e)-[r:P7_took_place_at]->(p)
+                                SET p.한글독음 = coalesce(p.한글독음, row.gloss),
+                                    r.context = row.context_text,
+                                    r.source_tag = 'placeName'
+                                """,
+                                place_by_name,
+                                batch_size=2000,
+                            )
                     except Exception as e:
                         print(f"⚠️ 장소 관계 배치 주입 중 오류: {e}")
                     place_acc = []
@@ -695,10 +732,12 @@ def build_ultimate_graph():
                                 except Exception:
                                     pass
                             place_name = place.get_text(' ', strip=True)
+                            place_ref = str(place.get('ref') or '').lstrip('#').strip()
                             if place_name:
                                 place_acc.append({
                                     'event_id': event_id,
                                     'place_name': place_name,
+                                    'place_id': place_ref,
                                     'gloss': gloss_text,
                                     'context_text': context_text,
                                 })
@@ -713,7 +752,7 @@ def build_ultimate_graph():
             print("👨‍👩‍👧‍👦 인물 간 관계망 분석 및 주입 중 (원천 컬럼 기반)...")
             # 분석 대상 테이블들
             relation_source_tables = ['raw_bibliography', 'raw_event_info', 'raw_source_info']
-            MAIN_PERSON_KWS = ['피고인', '성명', '이름', '인물', '명칭']
+            MAIN_PERSON_KWS = ['피고인', '성명', '이름', '인물']
 
             for table_name in relation_source_tables:
                 try:
