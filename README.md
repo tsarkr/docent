@@ -178,6 +178,18 @@ TEI가 있는 모든 `raw_*` 테이블을 스트리밍 방식으로 읽고 다�
 .venv/bin/python graph_builder.py
 ```
 
+### Neo4j 벡터화: `scripts/vectorize_neo4j.py`
+
+Neo4j의 노드와 방향성 관계를 읽기 전용으로 조회하고, Ollama 임베딩을 Neo4j 외부의 `vector_store/`에 저장합니다. Neo4j에는 `CREATE`, `MERGE`, `SET`, `DELETE` 쿼리를 실행하지 않습니다. 먼저 의존성과 임베딩 모델을 준비하세요.
+
+```bash
+.venv/bin/python -m pip install -r requirements.txt
+ollama pull nomic-embed-text
+.venv/bin/python scripts/vectorize_neo4j.py
+```
+
+생성 파일은 `vector_store/metadata.jsonl`(원본 속성·관계 메타데이터), `vector_store/embeddings.npy`(코사인 검색용 정규화 벡터), `vector_store/manifest.json`입니다. 다른 저장 위치나 모델을 사용하려면 `--output-dir`, `--model`, `--ollama-url`을 지정할 수 있습니다.
+
 ## 데이터와 산출물
 
 - `data/`: 원자료 CSV/XLSX, i815 캐시, 매칭 요약

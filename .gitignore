@@ -38,3 +38,4 @@ CIDOC_Timeline_Mappings.ttl
 Extracted_Historical_Entities.xlsx
 
 vendor/
+vector_store/

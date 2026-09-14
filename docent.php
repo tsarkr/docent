@@ -410,7 +410,15 @@ if (isset($_GET['ajax'])) {
                     $props = [];
                     if ($node && method_exists($node, 'getProperties')) {
                         foreach ($node->getProperties() as $k => $v) {
-                            $props[$k] = is_scalar($v) ? $v : (string)$v;
+                            if ($k === 'embedding') continue; // 768차원 벡터 데이터는 속성 맵에서 제외
+                            
+                            if (is_scalar($v)) {
+                                $props[$k] = $v;
+                            } elseif (is_iterable($v)) {
+                                $props[$k] = json_encode(iterator_to_array($v), JSON_UNESCAPED_UNICODE);
+                            } else {
+                                $props[$k] = (string)$v;
+                            }
                         }
                     }
                     
