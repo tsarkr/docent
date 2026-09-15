@@ -44,11 +44,7 @@ def metadata_rows(path: Path):
             raw_id = str(record.get("id", ""))
             if not raw_id.startswith("neo4j:"):
                 raise ValueError(f"Neo4j 내부 ID 형식이 아닙니다: line {line_number}")
-            try:
-                node_id = int(raw_id.removeprefix("neo4j:"))
-            except ValueError as exc:
-                raise ValueError(f"Neo4j 내부 ID를 해석할 수 없습니다: {raw_id}") from exc
-            yield node_id
+            yield raw_id.removeprefix("neo4j:")
 
 
 def main() -> int:
@@ -92,7 +88,7 @@ def main() -> int:
                     except StopIteration:
                         break
                     row_index = total_updated + len(rows)
-                    rows.append({"node_id": node_id, "vector": vectors[row_index].tolist()})
+                    rows.append({"element_id": node_id, "vector": vectors[row_index].tolist()})
                 if not rows:
                     break
 
@@ -100,7 +96,7 @@ def main() -> int:
                     f"""
                     UNWIND $rows AS row
                     MATCH (n)
-                    WHERE id(n) = row.node_id
+                    WHERE elementId(n) = row.element_id
                     SET n.`{args.property}` = row.vector
                     RETURN count(n) AS updated
                     """,
