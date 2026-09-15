@@ -94,12 +94,27 @@ python -m pip install -r requirements.txt
 7. `scripts/graph_builder.py`: PostgreSQL 원자료, TEI, 문건, 기관 계층, 인물 관계, CIDOC 매핑을 포함한 전체 그래프를 Neo4j에 재구축합니다. 장소 마스터는 `raw_detail_place`의 식별자·명칭·좌표·유형을 기준으로 처리합니다.
 8. `scripts/vectorize_neo4j.py`: Neo4j 전체 그래프를 읽고 Ollama 임베딩을 `vector_store/`에 생성합니다.
 9. `scripts/apply_vectors_to_neo4j.py`: 생성된 임베딩을 Neo4j 노드의 `embedding` 속성에 저장합니다.
+10. `thesaurus_to_neo4j.py`: 근대·일제시기 시소러스를 Neo4j에 적재하고 Ollama 임베딩과 `Thesaurus` 벡터 인덱스를 준비합니다.
 
 5단계 뒤에는 `Extracted_Historical_Entities.xlsx`가 생성됩니다. 오케스트레이터는 기본적으로 이 파일을 사람이 검토한 뒤 Enter를 누를 때 다음 단계로 진행합니다. 자동 실행이 필요하면 다음처럼 설정합니다.
 
 ```bash
 SKIP_HITL_PAUSE=1 .venv/bin/python run_pipeline.py
 ```
+
+HITL 일시정지와 시소러스 임베딩을 건너뛰면서 전체 단계를 자동 실행하려면 다음처럼 실행합니다.
+
+```bash
+.venv3.14/bin/python run_pipeline.py --skip-hitl --skip-thesaurus-embed
+```
+
+실행하지 않고 단계와 필수 파일만 확인하려면 다음을 사용합니다.
+
+```bash
+.venv3.14/bin/python run_pipeline.py --dry-run
+```
+
+시소러스 단계는 `--thesaurus-csv`, `--thesaurus-batch-size`, `--ollama-url`, `--embedding-model` 옵션으로 설정할 수 있습니다.
 
 TEI 태깅의 처리량은 `USE_PROCESS_POOL`, `MAX_WORKERS`, `CHUNK_SIZE` 환경변수로 조정할 수 있습니다.
 

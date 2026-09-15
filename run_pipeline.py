@@ -12,12 +12,14 @@ Sequence:
  8) scripts/graph_builder.py
  9) scripts/vectorize_neo4j.py
 10) scripts/apply_vectors_to_neo4j.py
+10) thesaurus_to_neo4j.py
 
 Each step is run synchronously; on error the process exits with non-zero code.
 """
 import subprocess
 import sys
 import os
+import argparse
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -31,7 +33,7 @@ PY = next((str(path) for path in PY_CANDIDATES if path.exists()), sys.executable
 
 XLSX_PATH = ROOT / 'Extracted_Historical_Entities.xlsx'
 
-STEPS = [
+BASE_STEPS = [
     (ROOT / 'upload_data.py', []),
     (ROOT / 'scripts' / 'pg_to_pg_with_tei.py', []),
     (ROOT / 'scripts' / 'tag_tei_with_dict.py', ['--all', '--limit', '0', '--skip-hitl'], {
@@ -46,6 +48,32 @@ STEPS = [
     (ROOT / 'scripts' / 'vectorize_neo4j.py', []),
     (ROOT / 'scripts' / 'apply_vectors_to_neo4j.py', []),
 ]
+
+
+def build_steps(
+    skip_thesaurus_embed=False,
+    thesaurus_csv=None,
+    thesaurus_batch_size=None,
+    ollama_url=None,
+    embedding_model=None,
+):
+    """Build the ordered pipeline, including the final thesaurus stage."""
+    thesaurus_args = []
+    csv_path = thesaurus_csv or os.getenv('THESAURUS_CSV')
+    batch_size = thesaurus_batch_size or os.getenv('THESAURUS_BATCH_SIZE')
+    ollama_host = ollama_url or os.getenv('OLLAMA_HOST')
+    ollama_model = embedding_model or os.getenv('OLLAMA_EMBED_MODEL')
+    if csv_path:
+        thesaurus_args.extend(['--csv', csv_path])
+    if batch_size:
+        thesaurus_args.extend(['--batch-size', str(batch_size)])
+    if ollama_host:
+        thesaurus_args.extend(['--ollama-url', ollama_host])
+    if ollama_model:
+        thesaurus_args.extend(['--embedding-model', ollama_model])
+    if skip_thesaurus_embed:
+        thesaurus_args.append('--skip-embed')
+    return BASE_STEPS + [(ROOT / 'thesaurus_to_neo4j.py', thesaurus_args)]
 
 
 def run_step(path, args, extra_env=None):
@@ -87,9 +115,54 @@ def pause_for_hitl(xlsx_path):
 
 
 def main():
-    skip_hitl_pause = os.getenv('SKIP_HITL_PAUSE', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+    parser = argparse.ArgumentParser(description='Docent 전체 데이터 파이프라인 실행')
+    parser.add_argument(
+        '--skip-hitl',
+        action='store_true',
+        help='엔티티 XLSX 검토 일시정지를 건너뜁니다.',
+    )
+    parser.add_argument(
+        '--skip-thesaurus-embed',
+        action='store_true',
+        help='시소러스 적재 후 Ollama 임베딩을 건너뜁니다.',
+    )
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='실행하지 않고 단계와 필수 파일만 확인합니다.',
+    )
+    parser.add_argument('--thesaurus-csv', help='시소러스 CSV 경로')
+    parser.add_argument('--thesaurus-batch-size', type=int, help='시소러스 Neo4j 배치 크기')
+    parser.add_argument('--ollama-url', help='Ollama 서버 주소')
+    parser.add_argument('--embedding-model', help='Ollama 임베딩 모델명')
+    args = parser.parse_args()
+    skip_hitl_pause = args.skip_hitl or os.getenv('SKIP_HITL_PAUSE', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+    if args.thesaurus_batch_size is not None and args.thesaurus_batch_size < 1:
+        parser.error('--thesaurus-batch-size는 1 이상이어야 합니다.')
+    steps = build_steps(
+        args.skip_thesaurus_embed,
+        args.thesaurus_csv,
+        args.thesaurus_batch_size,
+        args.ollama_url,
+        args.embedding_model,
+    )
     print('Pipeline orchestrator starting')
-    for step in STEPS:
+    if args.dry_run:
+        missing_paths = []
+        for number, step in enumerate(steps, start=1):
+            path, step_args = step[:2]
+            state = 'OK' if path.exists() else 'MISSING'
+            print(f'{number:02d}. [{state}] {path.relative_to(ROOT)} {step_args}')
+            if not path.exists():
+                missing_paths.append(path)
+        if not (ROOT / 'data' / '교육부 국사편찬위원회_한국역사용어시소러스 정보_20211028.csv').exists():
+            print('ERROR: 기본 시소러스 CSV가 없습니다.')
+            return 1
+        if missing_paths:
+            return 1
+        return 0
+
+    for step in steps:
         if len(step) == 2:
             path, args = step
             extra_env = None

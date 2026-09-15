@@ -176,7 +176,8 @@ def _ensure_schema(session):
         "CREATE INDEX place_name IF NOT EXISTS FOR (p:장소) ON (p.명칭)",
         "CREATE INDEX place_korean_name IF NOT EXISTS FOR (p:장소) ON (p.한글명칭)",
         "DROP INDEX namesIndex IF EXISTS",
-        "CREATE FULLTEXT INDEX namesIndex IF NOT EXISTS FOR (n:인물|장소|사건|기관|문건) ON EACH [n.명칭, n.사건명, n.제목, n.name, n.title, n.한글독음, n.한글명칭]",
+        "CREATE FULLTEXT INDEX namesIndex IF NOT EXISTS FOR (n:인물|장소|사건|기관|문건|Thesaurus) ON EACH [n.명칭, n.사건명, n.제목, n.name, n.title, n.한글독음, n.한글명칭, n.description, n.설명, n.hanja, n.category]",
+        "CREATE VECTOR INDEX thesaurus_embedding_index IF NOT EXISTS FOR (t:Thesaurus) ON (t.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 768, `vector.similarity_function`: 'cosine'}}",
     ]
 
     for statement in statements:

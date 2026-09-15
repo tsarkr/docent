@@ -432,7 +432,18 @@ if (isset($_GET['ajax'])) {
                     
                     add_node_to_map($nodes, $node, $labels_iterable);
 
-                    if (in_array('문건', $labels) || in_array('사료', $labels)) {
+                    if (in_array('Thesaurus', $labels)) {
+                        add_fact_evidence($evidences, 'node', [
+                            (string)$node_id,
+                            (string)($props['description'] ?? $props['설명'] ?? ''),
+                            (string)($props['category'] ?? '')
+                        ], [
+                            "doc" => "[시소러스] " . (string)($props['name'] ?? $node_id),
+                            "quote" => mb_substr((string)($props['description'] ?? $props['설명'] ?? ''), 0, 500),
+                            "concept" => (string)($props['name'] ?? $node_id),
+                            "text" => "분류: " . (string)($props['category'] ?? '') . "\n설명: " . mb_substr((string)($props['description'] ?? $props['설명'] ?? ''), 0, 1000)
+                        ], 40);
+                    } elseif (in_array('문건', $labels) || in_array('사료', $labels)) {
                         add_fact_evidence($evidences, 'node', [
                             (string)$node_id,
                             (string)($props['제목'] ?? $props['사건명'] ?? ''),
