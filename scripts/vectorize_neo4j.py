@@ -65,8 +65,23 @@ def node_key(node: Any) -> str:
 def node_text(node: Any) -> str:
     properties = dict(node.items())
     labels = ", ".join(sorted(node.labels))
-    fields = []
+    node_type = properties.get("type") or next(
+        (label for label in ("인물", "장소", "사건", "기관", "사료") if label in node.labels),
+        labels,
+    )
+    name = (
+        properties.get("name")
+        or properties.get("명칭")
+        or properties.get("title")
+        or properties.get("제목")
+        or properties.get("사건명")
+        or properties.get("term_id")
+        or ""
+    )
+    fields = [f"[유형: {node_type}] 이름: {name}"]
     for key, value in properties.items():
+        if key in {"embedding", "name", "명칭", "title", "제목", "사건명", "type"}:
+            continue
         if value in (None, "", [], {}):
             continue
         fields.append(f"{key}: {json_value(value)}")
@@ -75,7 +90,12 @@ def node_text(node: Any) -> str:
 
 def count_nodes(driver: Any) -> int:
     with driver.session() as session:
-        return int(session.run("MATCH (n) RETURN count(n) AS count").single()["count"])
+        return int(
+            session.run(
+                "MATCH (n) WHERE NOT n:Thesaurus OR EXISTS((n)--()) "
+                "RETURN count(n) AS count"
+            ).single()["count"]
+        )
 
 
 def read_graph_batch(session: Any, last_node_id: int, batch_size: int) -> list[dict[str, Any]]:
@@ -83,7 +103,8 @@ def read_graph_batch(session: Any, last_node_id: int, batch_size: int) -> list[d
     MATCH (n)
     WHERE id(n) > $last_node_id
     WITH n ORDER BY id(n) LIMIT $batch_size
-    OPTIONAL MATCH (n)-[r]->(target)
+    WHERE NOT n:Thesaurus OR EXISTS((n)--())
+    OPTIONAL MATCH (n)-[r]-(target)
     WITH n, id(n) AS node_id,
          collect(CASE WHEN r IS NULL THEN NULL ELSE {
              relationship: type(r),

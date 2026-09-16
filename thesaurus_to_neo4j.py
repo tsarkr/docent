@@ -115,7 +115,7 @@ def read_thesaurus_csv(csv_path: Path) -> list[dict[str, str]]:
 SCHEMA_STATEMENTS = (
     "CREATE CONSTRAINT IF NOT EXISTS FOR (t:Thesaurus) REQUIRE t.term_id IS UNIQUE",
     "CREATE INDEX IF NOT EXISTS FOR (t:Thesaurus) ON (t.name)",
-    "CREATE VECTOR INDEX thesaurus_embedding_index IF NOT EXISTS FOR (t:Thesaurus) ON (t.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 768, `vector.similarity_function`: 'cosine'}}",
+    "CREATE VECTOR INDEX samil_docent_vector_idx IF NOT EXISTS FOR (t:Thesaurus) ON (t.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 768, `vector.similarity_function`: 'cosine'}}",
 )
 
 UPSERT_QUERY = """
@@ -125,7 +125,8 @@ SET t.name = row.name,
     t.hanja = row.hanja,
     t.category = row.category,
     t.description = row.description,
-    t.period = row.period
+    t.period = row.period,
+    t.type = '시소러스'
 WITH t
 CALL {
     WITH t
@@ -168,18 +169,29 @@ def load_batches(driver: Any, rows: list[dict[str, str]], batch_size: int) -> in
 
 
 def embedding_text(row: dict[str, Any]) -> str:
+    neighbors = row.get("neighbors") or ""
     return (
-        f"[시소러스] {row.get('name', '')}({row.get('hanja', '')}) | "
-        f"분류: {row.get('category', '')} | 설명: {row.get('description', '')}"
+        f"[유형: 시소러스] 이름: {row.get('name', '')}({row.get('hanja', '')})\n"
+        f"분류: {row.get('category', '')}\n설명: {row.get('description', '')}\n"
+        f"관련 그래프 문맥: {neighbors}"
     )
 
 
 def read_embedding_batches(driver: Any, batch_size: int) -> list[list[dict[str, Any]]]:
     query = """
     MATCH (t:Thesaurus)
-    WHERE t.embedding IS NULL
+    WHERE t.embedding IS NULL AND EXISTS((t)--())
+    OPTIONAL MATCH (t)-[r]-(neighbor)
+    WITH t, collect(
+        CASE WHEN neighbor IS NULL THEN NULL ELSE
+            type(r) + " -> " + coalesce(neighbor.name, neighbor.명칭, neighbor.title, neighbor.제목, neighbor.사건명, neighbor.term_id, "")
+        END
+    ) AS neighbors
     RETURN t.term_id AS term_id, t.name AS name, t.hanja AS hanja,
-           t.category AS category, t.description AS description
+           t.category AS category, t.description AS description,
+           reduce(text = "", value IN neighbors |
+               text + CASE WHEN value IS NULL THEN "" ELSE value + " | " END
+           ) AS neighbors
     ORDER BY t.term_id
     """
     with driver.session() as session:

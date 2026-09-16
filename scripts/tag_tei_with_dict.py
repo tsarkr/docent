@@ -6,6 +6,7 @@ import re
 import json
 import sys  
 import signal  
+import os
 import hanja  
 from xml.etree import ElementTree as ET
 from langchain_ollama import OllamaLLM
@@ -54,6 +55,9 @@ class LocalDocentEngine:
         self.cur = self.conn.cursor()  
         self.done_status = 'REFINED'
         self.interrupted = False  
+        self.commit_batch_size = max(
+            1, int(os.getenv('TEI_COMMIT_BATCH_SIZE', '50'))
+        )
         
         signal.signal(signal.SIGINT, self._handle_signal)
         
@@ -422,7 +426,9 @@ class LocalDocentEngine:
             WHERE column_name = 'tei' AND table_schema = 'public'
         """)
         tables = [row[0] for row in self.cur.fetchall()]
-        skipped_tables = {'raw_detail_place'}
+        # This table contains only event/place links. It cannot produce people,
+        # so sending its TEI through the LLM fallback only adds latency.
+        skipped_tables = {'raw_detail_place', 'raw_event_place_link'}
         for table in tables:
             if table in skipped_tables: continue
             if self.interrupted: break
@@ -439,6 +445,7 @@ class LocalDocentEngine:
             self.cur.execute(query, tuple(params))
             rows = self.cur.fetchall()
             if not rows: continue
+            pending_commits = 0
             for rowid, tei, event_id in rows:
                 if self.interrupted: break
                 try:
@@ -447,11 +454,17 @@ class LocalDocentEngine:
                     real_names = self._extract_names_with_llm_context(table, pre_tagged)
                     final_tei = self._apply_persname_tags(pre_tagged, real_names, event_ref)
                     self.cur.execute(f'UPDATE "{table}" SET tei = %s, tei_status = %s WHERE rowid = %s', (final_tei, self.done_status, rowid))
-                    self.conn.commit()
+                    pending_commits += 1
+                    if pending_commits >= self.commit_batch_size:
+                        self.conn.commit()
+                        pending_commits = 0
                     print(f"  ✅ [최종 검증 완료] {table} rowid={rowid} | 확정 인명: {real_names}")
                 except Exception as e:
                     self.conn.rollback()
+                    pending_commits = 0
                     print(f"  ⚠️ 장애 발생 (rowid={rowid}): {e}")
+            if pending_commits:
+                self.conn.commit()
         self.cur.close()
         self.conn.close()
         try:

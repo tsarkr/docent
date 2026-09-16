@@ -96,6 +96,23 @@ python -m pip install -r requirements.txt
 9. `scripts/apply_vectors_to_neo4j.py`: 생성된 임베딩을 Neo4j 노드의 `embedding` 속성에 저장합니다.
 10. `thesaurus_to_neo4j.py`: 근대·일제시기 시소러스를 Neo4j에 적재하고 Ollama 임베딩과 `Thesaurus` 벡터 인덱스를 준비합니다.
 
+RDBMS 전처리와 Neo4j 구축은 비용이 큰 독립 단계입니다. 원자료나 TEI가
+변경되지 않았다면 매번 RDBMS 전처리를 다시 실행하지 말고 Neo4j 단계만 실행합니다.
+
+```bash
+# PostgreSQL/TEI/CIDOC 전처리만 실행
+.venv3.14/bin/python run_pipeline.py --stage rdbms --skip-hitl
+
+# 이미 전처리된 PostgreSQL 결과로 Neo4j 그래프·시소러스·벡터만 재구축
+.venv3.14/bin/python run_pipeline.py --stage neo4j
+```
+
+`--stage all`이 기본값이며 기존 전체 실행과 동일합니다. 기본값을 고정하고
+싶다면 `PIPELINE_STAGE=rdbms` 또는 `PIPELINE_STAGE=neo4j`를 사용할 수 있습니다.
+`neo4j` 단계는 [scripts/graph_builder.py](./scripts/graph_builder.py)가 기존
+Neo4j 그래프를 재생성하므로, 그래프를 변경하지 않는 검색·UI 작업에는 실행할
+필요가 없습니다.
+
 5단계 뒤에는 `Extracted_Historical_Entities.xlsx`가 생성됩니다. 오케스트레이터는 기본적으로 이 파일을 사람이 검토한 뒤 Enter를 누를 때 다음 단계로 진행합니다. 자동 실행이 필요하면 다음처럼 설정합니다.
 
 ```bash
@@ -117,6 +134,17 @@ HITL 일시정지와 시소러스 임베딩을 건너뛰면서 전체 단계를 
 시소러스 단계는 `--thesaurus-csv`, `--thesaurus-batch-size`, `--ollama-url`, `--embedding-model` 옵션으로 설정할 수 있습니다.
 
 TEI 태깅의 처리량은 `USE_PROCESS_POOL`, `MAX_WORKERS`, `CHUNK_SIZE` 환경변수로 조정할 수 있습니다.
+장소 연결 전용 테이블(`raw_event_place_link`)은 인명 LLM 태깅에서 자동 제외되며,
+PostgreSQL 상태 갱신은 기본 50건 단위로 커밋합니다. 커밋 주기는
+`TEI_COMMIT_BATCH_SIZE`로 조정할 수 있습니다.
+
+```bash
+TEI_COMMIT_BATCH_SIZE=100 .venv3.14/bin/python run_pipeline.py --stage rdbms --skip-hitl
+```
+
+커밋 배치를 크게 하면 DB 왕복은 줄지만, 중단 또는 오류 시 마지막 미커밋 배치를
+다시 처리합니다. Ollama 호출 자체는 순차 처리되므로, 정확성을 유지하면서 먼저
+LLM이 불필요한 테이블을 제외하고 커밋 빈도를 줄이는 방식을 기본 최적화로 사용합니다.
 
 ## 개별 스크립트
 

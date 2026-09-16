@@ -494,7 +494,7 @@ if (isset($_GET['ajax'])) {
 
                     if ($r && $n_nid && $m_nid) {
                         $rel_type = method_exists($r, 'getType') ? $r->getType() : '연결';
-                        $edges[] = ["from" => $n_nid, "to" => $m_nid, "label" => _get_rel_label($rel_type)];
+                        $edges[] = ["from" => $n_nid, "to" => $m_nid, "type" => $rel_type, "label" => _get_rel_label($rel_type)];
 
                         $rel_context_text = trim(mb_substr((string)($rel_context ?? ''), 0, 1000));
                         if ($rel_context_text !== '') {
@@ -517,8 +517,8 @@ if (isset($_GET['ajax'])) {
                     if ($e && $p) {
                         $e_nid = add_node_to_map($nodes, $e, $rec->get('e_labels'));
                         $p_nid = add_node_to_map($nodes, $p, $rec->get('p_labels'));
-                        if ($n_nid && $e_nid) $edges[] = ["from" => $n_nid, "to" => $e_nid, "label" => docent_t("수행/참여", "Performed/Participated")];
-                        if ($e_nid && $p_nid) $edges[] = ["from" => $e_nid, "to" => $p_nid, "label" => docent_t("수행/참여", "Performed/Participated")];
+                        if ($n_nid && $e_nid) $edges[] = ["from" => $n_nid, "to" => $e_nid, "type" => "P14_carried_out_by", "label" => docent_t("수행/참여", "Performed/Participated")];
+                        if ($e_nid && $p_nid) $edges[] = ["from" => $e_nid, "to" => $p_nid, "type" => "P7_took_place_at", "label" => docent_t("발생 장소", "Location")];
                     }
                 }
             }
@@ -534,6 +534,14 @@ if (isset($_GET['ajax'])) {
             echo json_encode([
                 "nodes" => array_values($nodes),
                 "edges" => array_values($unique_edges),
+                "links" => array_map(static function ($edge) {
+                    return [
+                        "source" => $edge["from"],
+                        "target" => $edge["to"],
+                        "type" => $edge["type"] ?? $edge["label"],
+                        "label" => $edge["label"],
+                    ];
+                }, array_values($unique_edges)),
                 "evidences" => array_values($evidences),
                 "prefetch_names" => $prefetch_names
             ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
@@ -903,11 +911,28 @@ function add_node_to_map(&$map, $node, $labels_iterable) {
         elseif (strpos($lstr, '장소') !== false) { $color = "#16A34A"; $icon = "📍\n"; }
         elseif (strpos($lstr, '기관') !== false) { $color = "#7C3AED"; $icon = "🏢\n"; }
 
+        $type = (string)($props['type'] ?? '');
+        if ($type === '') {
+            $type_map = [
+                '인물' => '인물', 'Person' => '인물',
+                '장소' => '장소', 'Place' => '장소',
+                '사건' => '사건', 'Event' => '사건',
+                '기관' => '기관', 'Organization' => '기관',
+                '사료' => '사료', '문건' => '사료', 'Document' => '사료',
+            ];
+            foreach ($labels_list as $label_name) {
+                if (isset($type_map[$label_name])) {
+                    $type = $type_map[$label_name];
+                    break;
+                }
+            }
+        }
         $map[$nid] = [
             "id" => $nid,
             "label" => $icon . mb_substr((string)$label_text, 0, 20),
             "raw_id" => (string)$raw_id,
             "labels" => $labels_list,
+            "type" => $type,
             "color" => ["background" => $color, "border" => $color, "highlight" => ["background" => $color, "border" => "#333"]],
             "shape" => "box",
             "font" => ["color" => "#000", "size" => 14, "multi" => true],
@@ -919,8 +944,8 @@ function add_node_to_map(&$map, $node, $labels_iterable) {
 }
 
 function _get_rel_label($rtype) {
-    $ko = ["P14_carried_out_by" => "수행(참여)", "P7_took_place_at" => "발생 장소", "P152_has_parent" => "가족 관계", "foaf:knows" => "동지/지인", "foaf:member" => "소속 기구", "P11_had_participant" => "참여 인물", "P108_has_produced" => "생성/저작", "P102_has_title" => "명칭/제목", "소속" => "소속"];
-    $en = ["P14_carried_out_by" => "Performed/Participated", "P7_took_place_at" => "Location", "P152_has_parent" => "Family relation", "foaf:knows" => "Comrade/Acquaintance", "foaf:member" => "Affiliated organization", "P11_had_participant" => "Participant", "P108_has_produced" => "Created/Produced", "P102_has_title" => "Title", "소속" => "Affiliation"];
+    $ko = ["P14_carried_out_by" => "수행(참여)", "P7_took_place_at" => "발생 장소", "ACTIVATED_AT" => "활동지", "P152_has_parent" => "가족 관계", "foaf:knows" => "동지/지인", "foaf:member" => "소속 기구", "P11_had_participant" => "참여 인물", "P108_has_produced" => "생성/저작", "P102_has_title" => "명칭/제목", "소속" => "소속"];
+    $en = ["P14_carried_out_by" => "Performed/Participated", "P7_took_place_at" => "Location", "ACTIVATED_AT" => "Activity place", "P152_has_parent" => "Family relation", "foaf:knows" => "Comrade/Acquaintance", "foaf:member" => "Affiliated organization", "P11_had_participant" => "Participant", "P108_has_produced" => "Created/Produced", "P102_has_title" => "Title", "소속" => "Affiliation"];
     return docent_is_english() ? ($en[$rtype] ?? $rtype) : ($ko[$rtype] ?? $rtype);
 }
 

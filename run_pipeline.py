@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""Orchestrator to run the pipeline in order, aborting on failure.
+"""Orchestrate the RDBMS preprocessing and Neo4j serving pipelines separately.
 
-Sequence:
- 1) upload_data.py
- 2) scripts/pg_to_pg_with_tei.py
- 3) scripts/tag_tei_with_dict.py
- 4) scripts/link_persnames_i815.py
- 5) scripts/extract_all_entities.py
- 6) HITL pause for xlsx review
- 7) scripts/generate_cidoc_mappings.py
- 8) scripts/graph_builder.py
- 9) scripts/vectorize_neo4j.py
-10) scripts/apply_vectors_to_neo4j.py
-10) thesaurus_to_neo4j.py
+RDBMS preprocessing:
+1) upload_data.py
+2) scripts/pg_to_pg_with_tei.py
+3) scripts/tag_tei_with_dict.py
+4) scripts/link_persnames_i815.py
+5) scripts/extract_all_entities.py
+6) HITL pause for xlsx review
+7) scripts/generate_cidoc_mappings.py
+
+Neo4j serving:
+1) scripts/graph_builder.py
+2) thesaurus_to_neo4j.py
+3) scripts/vectorize_neo4j.py
+4) scripts/apply_vectors_to_neo4j.py
 
 Each step is run synchronously; on error the process exits with non-zero code.
 """
@@ -33,7 +35,7 @@ PY = next((str(path) for path in PY_CANDIDATES if path.exists()), sys.executable
 
 XLSX_PATH = ROOT / 'Extracted_Historical_Entities.xlsx'
 
-BASE_STEPS = [
+RDBMS_STEPS = [
     (ROOT / 'upload_data.py', []),
     (ROOT / 'scripts' / 'pg_to_pg_with_tei.py', []),
     (ROOT / 'scripts' / 'tag_tei_with_dict.py', ['--all', '--limit', '0', '--skip-hitl'], {
@@ -44,9 +46,10 @@ BASE_STEPS = [
     (ROOT / 'scripts' / 'link_persnames_i815.py', ['--apply']),
     (ROOT / 'scripts' / 'extract_all_entities.py', []),
     (ROOT / 'scripts' / 'generate_cidoc_mappings.py', []),
+]
+
+NEO4J_STEPS = [
     (ROOT / 'scripts' / 'graph_builder.py', []),
-    (ROOT / 'scripts' / 'vectorize_neo4j.py', []),
-    (ROOT / 'scripts' / 'apply_vectors_to_neo4j.py', []),
 ]
 
 
@@ -56,8 +59,16 @@ def build_steps(
     thesaurus_batch_size=None,
     ollama_url=None,
     embedding_model=None,
+    stage='all',
 ):
-    """Build the ordered pipeline, including the final thesaurus stage."""
+    """Build only the requested pipeline stage.
+
+    ``rdbms`` stops after PostgreSQL/TEI/CIDOC preprocessing. ``neo4j``
+    assumes that preprocessing is already complete and only rebuilds the
+    graph, thesaurus links, and vectors. ``all`` preserves the legacy flow.
+    """
+    if stage not in {'all', 'rdbms', 'neo4j'}:
+        raise ValueError(f'지원하지 않는 파이프라인 단계: {stage}')
     thesaurus_args = []
     csv_path = thesaurus_csv or os.getenv('THESAURUS_CSV')
     batch_size = thesaurus_batch_size or os.getenv('THESAURUS_BATCH_SIZE')
@@ -71,9 +82,19 @@ def build_steps(
         thesaurus_args.extend(['--ollama-url', ollama_host])
     if ollama_model:
         thesaurus_args.extend(['--embedding-model', ollama_model])
-    if skip_thesaurus_embed:
-        thesaurus_args.append('--skip-embed')
-    return BASE_STEPS + [(ROOT / 'thesaurus_to_neo4j.py', thesaurus_args)]
+    # Embeddings are generated once, after thesaurus relationships are loaded,
+    # so isolated flat thesaurus vectors cannot be written by the pipeline.
+    thesaurus_args.append('--skip-embed')
+    neo4j_steps = NEO4J_STEPS + [
+        (ROOT / 'thesaurus_to_neo4j.py', thesaurus_args),
+        (ROOT / 'scripts' / 'vectorize_neo4j.py', []),
+        (ROOT / 'scripts' / 'apply_vectors_to_neo4j.py', []),
+    ]
+    if stage == 'rdbms':
+        return RDBMS_STEPS
+    if stage == 'neo4j':
+        return neo4j_steps
+    return RDBMS_STEPS + neo4j_steps
 
 
 def run_step(path, args, extra_env=None):
@@ -117,6 +138,12 @@ def pause_for_hitl(xlsx_path):
 def main():
     parser = argparse.ArgumentParser(description='Docent 전체 데이터 파이프라인 실행')
     parser.add_argument(
+        '--stage',
+        choices=('all', 'rdbms', 'neo4j'),
+        default=os.getenv('PIPELINE_STAGE', 'all'),
+        help='실행 범위: rdbms(전처리만), neo4j(기존 RDBMS 결과로 그래프만), all(전체)',
+    )
+    parser.add_argument(
         '--skip-hitl',
         action='store_true',
         help='엔티티 XLSX 검토 일시정지를 건너뜁니다.',
@@ -145,6 +172,7 @@ def main():
         args.thesaurus_batch_size,
         args.ollama_url,
         args.embedding_model,
+        stage=args.stage,
     )
     print('Pipeline orchestrator starting')
     if args.dry_run:

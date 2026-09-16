@@ -68,17 +68,42 @@ RELATION_MAPPING = {
     "소속": "foaf:member"
 }
 
+NODE_TYPES = {
+    "person": ("Person", "인물", "인물"),
+    "place": ("Place", "장소", "장소"),
+    "event": ("Event", "사건", "사건"),
+    "organization": ("Organization", "기관", "기관"),
+    "document": ("Document", "사료", "사료"),
+    "thesaurus": ("Thesaurus", "Thesaurus", "시소러스"),
+}
 
-def _split_names(val):
+
+def _strip_xml_text(value):
+    """Return readable text without XML/HTML markup or entity escapes."""
+    if value is None or pd.isna(value):
+        return ""
+    text = html.unescape(re.sub(r"<[^>]*>", " ", str(value)))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _split_names(val, split_whitespace=False):
     """Split names in a cell by common delimiters."""
     if not val or pd.isna(val):
         return []
-    cleaned = html.unescape(re.sub(r"<[^>]*>", " ", str(val)))
+    cleaned = _strip_xml_text(val)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     if not cleaned or cleaned.lower() in {"none", "nan", "null"}:
         return []
-    parts = re.split(r"[;,/|·\n\r]+", cleaned)
+    delimiters = r"[;,/|·\n\r]+"
+    if split_whitespace:
+        delimiters = r"[;,/|·\s]+"
+    parts = re.split(delimiters, cleaned)
     return [p.strip() for p in parts if p.strip()]
+
+
+def _is_identifier_column(column):
+    normalized = str(column).strip()
+    return normalized.endswith(("아이디", "코드", "id", "ID", "code", "Code"))
 
 PG_CONFIG = {
     "host": _secret_or_env("PG_HOST", "localhost", SECRETS),
@@ -165,19 +190,19 @@ def _run_batches(session, cypher, records, batch_size=20000, extra_params=None):
 def _ensure_schema(session):
     import re
     statements = [
-        "CREATE CONSTRAINT place_id IF NOT EXISTS FOR (p:장소) REQUIRE p.id IS UNIQUE",
-        "CREATE CONSTRAINT event_id IF NOT EXISTS FOR (e:사건) REQUIRE e.id IS UNIQUE",
-        "CREATE CONSTRAINT document_id IF NOT EXISTS FOR (m:문건) REQUIRE m.id IS UNIQUE",
-        "CREATE CONSTRAINT org_id IF NOT EXISTS FOR (o:기관) REQUIRE o.id IS UNIQUE",
-        "CREATE CONSTRAINT person_name IF NOT EXISTS FOR (i:인물) REQUIRE i.명칭 IS UNIQUE",
-        "CREATE CONSTRAINT person_uid IF NOT EXISTS FOR (i:인물) REQUIRE i.uid IS UNIQUE",
-        "CREATE CONSTRAINT place_uid IF NOT EXISTS FOR (p:장소) REQUIRE p.uid IS UNIQUE",
-        "CREATE CONSTRAINT event_uid IF NOT EXISTS FOR (e:사건) REQUIRE e.uid IS UNIQUE",
+        "CREATE CONSTRAINT place_id IF NOT EXISTS FOR (p:Place) REQUIRE p.id IS UNIQUE",
+        "CREATE CONSTRAINT event_id IF NOT EXISTS FOR (e:Event) REQUIRE e.id IS UNIQUE",
+        "CREATE CONSTRAINT document_id IF NOT EXISTS FOR (m:Document) REQUIRE m.id IS UNIQUE",
+        "CREATE CONSTRAINT org_id IF NOT EXISTS FOR (o:Organization) REQUIRE o.id IS UNIQUE",
+        "CREATE CONSTRAINT person_name IF NOT EXISTS FOR (i:Person) REQUIRE i.명칭 IS UNIQUE",
+        "CREATE CONSTRAINT person_uid IF NOT EXISTS FOR (i:Person) REQUIRE i.uid IS UNIQUE",
+        "CREATE CONSTRAINT place_uid IF NOT EXISTS FOR (p:Place) REQUIRE p.uid IS UNIQUE",
+        "CREATE CONSTRAINT event_uid IF NOT EXISTS FOR (e:Event) REQUIRE e.uid IS UNIQUE",
         "CREATE INDEX place_name IF NOT EXISTS FOR (p:장소) ON (p.명칭)",
         "CREATE INDEX place_korean_name IF NOT EXISTS FOR (p:장소) ON (p.한글명칭)",
         "DROP INDEX namesIndex IF EXISTS",
-        "CREATE FULLTEXT INDEX namesIndex IF NOT EXISTS FOR (n:인물|장소|사건|기관|문건|Thesaurus) ON EACH [n.명칭, n.사건명, n.제목, n.name, n.title, n.한글독음, n.한글명칭, n.description, n.설명, n.hanja, n.category]",
-        "CREATE VECTOR INDEX thesaurus_embedding_index IF NOT EXISTS FOR (t:Thesaurus) ON (t.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 768, `vector.similarity_function`: 'cosine'}}",
+        "CREATE FULLTEXT INDEX namesIndex IF NOT EXISTS FOR (n:Person|Place|Event|Organization|Document|Thesaurus) ON EACH [n.명칭, n.사건명, n.제목, n.name, n.title, n.한글독음, n.한글명칭, n.description, n.설명, n.hanja, n.category]",
+        "CREATE VECTOR INDEX samil_docent_vector_idx IF NOT EXISTS FOR (n) ON (n.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 768, `vector.similarity_function`: 'cosine'}}",
     ]
 
     for statement in statements:
@@ -350,8 +375,8 @@ def apply_cidoc_mappings(session, mappings):
         _run_batches(session,
                      """
                      UNWIND $data AS row
-                     MERGE (n:인물 {uid: row.uid})
-                     SET n.명칭 = coalesce(n.명칭, row.label)
+                     MERGE (n:Person:인물 {uid: row.uid})
+                     SET n.명칭 = coalesce(n.명칭, row.label), n.name = coalesce(n.name, row.label), n.type = '인물'
                      """,
                      data,
                      batch_size=batch)
@@ -362,8 +387,8 @@ def apply_cidoc_mappings(session, mappings):
         _run_batches(session,
                      """
                      UNWIND $data AS row
-                     MERGE (n:장소 {uid: row.uid})
-                     SET n.명칭 = coalesce(n.명칭, row.label)
+                     MERGE (n:Place:장소 {uid: row.uid})
+                     SET n.명칭 = coalesce(n.명칭, row.label), n.name = coalesce(n.name, row.label), n.type = '장소'
                      """,
                      data,
                      batch_size=batch)
@@ -374,8 +399,8 @@ def apply_cidoc_mappings(session, mappings):
         _run_batches(session,
                      """
                      UNWIND $data AS row
-                     MERGE (n:사건 {uid: row.uid})
-                     SET n.사건명 = coalesce(n.사건명, row.label)
+                     MERGE (n:Event:사건 {uid: row.uid})
+                     SET n.사건명 = coalesce(n.사건명, row.label), n.title = coalesce(n.title, row.label), n.type = '사건'
                      """,
                      data,
                      batch_size=batch)
@@ -386,8 +411,8 @@ def apply_cidoc_mappings(session, mappings):
         _run_batches(session,
                      """
                      UNWIND $data AS row
-                     MATCH (a:사건 {uid: row.ev})
-                     MATCH (b:인물 {uid: row.pe})
+                     MATCH (a:Event {uid: row.ev})
+                     MATCH (b:Person {uid: row.pe})
                      MERGE (a)-[:P14_carried_out_by]->(b)
                      """,
                      rel_p14,
@@ -397,12 +422,24 @@ def apply_cidoc_mappings(session, mappings):
         _run_batches(session,
                      """
                      UNWIND $data AS row
-                     MATCH (a:사건 {uid: row.ev})
-                     MATCH (b:장소 {uid: row.pl})
+                     MATCH (a:Event {uid: row.ev})
+                     MATCH (b:Place {uid: row.pl})
                      MERGE (a)-[:P7_took_place_at]->(b)
                      """,
                      rel_p7,
                      batch_size=batch)
+        _run_batches(
+            session,
+            """
+            UNWIND $data AS row
+            MATCH (event:Event {uid: row.ev})-[:P7_took_place_at]->(place:Place {uid: row.pl})
+            MATCH (event)-[:P14_carried_out_by]->(person:Person)
+            MERGE (person)-[shortcut:ACTIVATED_AT]->(place)
+            SET shortcut.event = coalesce(event.title, event.사건명, event.uid)
+            """,
+            rel_p7,
+            batch_size=batch,
+        )
 
     print(f"Applied {applied} CIDOC mappings (nodes: {len(person_nodes)+len(place_nodes)+len(event_nodes)}, rels: {len(rel_p14)+len(rel_p7)}) from {total_rows} rows")
 
@@ -431,8 +468,9 @@ def build_ultimate_graph():
 
         place_records = []
         for _, row in df_place.iterrows():
-            code = str(row.get('세부장소아이디') or '').strip()
-            names = _split_names(row.get('명칭'))
+            code = _strip_xml_text(row.get('세부장소아이디'))
+            name = _strip_xml_text(row.get('명칭'))
+            names = [name] if name else []
             if not code or not names:
                 continue
             for name in names:
@@ -450,9 +488,12 @@ def build_ultimate_graph():
                 session,
                 """
                 UNWIND $data AS row
-                MERGE (p:장소 {id: row.id})
-                SET p.명칭 = row.name,
-                    p.한글명칭 = coalesce(p.한글명칭, row.name),
+                MERGE (p:Place:장소 {id: row.id})
+                SET p.place_id = row.id,
+                    p.name = row.name,
+                    p.명칭 = row.name,
+                    p.한글명칭 = row.name,
+                    p.type = '장소',
                     p.유형 = row.type,
                     p.유형3 = row.type3,
                     p.x = row.x,
@@ -485,8 +526,10 @@ def build_ultimate_graph():
             session,
             """
             UNWIND $data AS row
-            MERGE (e:사건 {id: row.아이디})
+            MERGE (e:Event:사건 {id: row.아이디})
             SET e.사건명 = row.사건명,
+                e.title = row.사건명,
+                e.type = '사건',
                 e.날짜 = row.시위_시작일자
             """,
             event_records,
@@ -524,9 +567,11 @@ def build_ultimate_graph():
                 session,
                 """
                 UNWIND $data AS row
-                MERGE (m:문건 {id: row.id})
+                MERGE (m:Document:사료 {id: row.id})
                 SET m.원본id = row.source_id,
                     m.제목 = row.title,
+                    m.title = row.title,
+                    m.type = '사료',
                     m.원천rowid = row.rowid,
                     m.원천테이블 = row.source_table
                 """,
@@ -580,16 +625,19 @@ def build_ultimate_graph():
                         session,
                         """
                         UNWIND $data AS row
-                        MERGE (o:기관 {id: row.id})
+                        MERGE (o:Organization:기관 {id: row.id})
                         SET o.명칭 = row.name,
+                            o.name = row.name,
                             o.한글명칭 = row.h_name,
+                            o.type = '기관',
                             o.유형 = $type,
                             o.설치장소명 = row.loc_name,
                             o.설치장소코드 = row.loc_code,
                             o.비고 = row.note
                         WITH o, row
                         WHERE row.parent_id IS NOT NULL AND row.parent_id <> row.id
-                        MERGE (parent:기관 {id: row.parent_id})
+                        MERGE (parent:Organization:기관 {id: row.parent_id})
+                        SET parent.type = '기관'
                         MERGE (o)-[:소속]->(parent)
                         """,
                         data_payload,
@@ -632,10 +680,10 @@ def build_ultimate_graph():
                             session,
                             """
                             UNWIND $data AS row
-                            MATCH (e:사건 {id: row.event_id})
-                            MERGE (p:인물 {명칭: row.person_name})
-                            ON CREATE SET p.한글독음 = row.gloss
-                            ON MATCH SET p.한글독음 = coalesce(p.한글독음, row.gloss)
+                            MATCH (e:Event {id: row.event_id})
+                            MERGE (p:Person:인물 {명칭: row.person_name})
+                            ON CREATE SET p.name = row.person_name, p.type = '인물', p.한글독음 = row.gloss
+                            ON MATCH SET p.name = coalesce(p.name, row.person_name), p.type = '인물', p.한글독음 = coalesce(p.한글독음, row.gloss)
                             MERGE (e)-[r:P14_carried_out_by]->(p)
                             SET r.context = row.context_text,
                                 r.source_tag = 'persName'
@@ -656,8 +704,8 @@ def build_ultimate_graph():
                                 session,
                                 """
                                 UNWIND $data AS row
-                                MATCH (e:사건 {id: row.event_id})
-                                MATCH (p:장소 {id: row.place_id})
+                                MATCH (e:Event {id: row.event_id})
+                                MATCH (p:Place {id: row.place_id})
                                 MERGE (e)-[r:P7_took_place_at]->(p)
                                 SET p.한글독음 = coalesce(p.한글독음, row.gloss),
                                     r.context = row.context_text,
@@ -671,8 +719,8 @@ def build_ultimate_graph():
                                 session,
                                 """
                                 UNWIND $data AS row
-                                MATCH (e:사건 {id: row.event_id})
-                                MATCH (p:장소 {명칭: row.place_name})
+                                MATCH (e:Event {id: row.event_id})
+                                MATCH (p:Place {명칭: row.place_name})
                                 MERGE (e)-[r:P7_took_place_at]->(p)
                                 SET p.한글독음 = coalesce(p.한글독음, row.gloss),
                                     r.context = row.context_text,
@@ -681,6 +729,18 @@ def build_ultimate_graph():
                                 place_by_name,
                                 batch_size=2000,
                             )
+                        _run_batches(
+                            session,
+                            """
+                            UNWIND $data AS row
+                            MATCH (e:Event {id: row.event_id})-[r:P7_took_place_at]->(place:Place)
+                            MATCH (e)-[:P14_carried_out_by]->(person:Person)
+                            MERGE (person)-[shortcut:ACTIVATED_AT]->(place)
+                            SET shortcut.event = coalesce(e.title, e.사건명, e.id)
+                            """,
+                            place_acc,
+                            batch_size=2000,
+                        )
                     except Exception as e:
                         print(f"⚠️ 장소 관계 배치 주입 중 오류: {e}")
                     place_acc = []
@@ -711,8 +771,7 @@ def build_ultimate_graph():
                                     gloss_tag.extract()
                                 except Exception:
                                     pass
-                            person_name = pers.get_text(' ', strip=True)
-                            if person_name:
+                            for person_name in _split_names(pers.get_text(' ', strip=True), split_whitespace=True):
                                 person_acc.append({
                                     'event_id': event_id,
                                     'person_name': person_name,
@@ -732,7 +791,7 @@ def build_ultimate_graph():
                                     gloss_tag.extract()
                                 except Exception:
                                     pass
-                            place_name = place.get_text(' ', strip=True)
+                            place_name = _strip_xml_text(place.get_text(' ', strip=True))
                             place_ref = str(place.get('ref') or '').lstrip('#').strip()
                             if place_name:
                                 place_acc.append({
@@ -761,7 +820,12 @@ def build_ultimate_graph():
                     cols = df_rel.columns.tolist()
 
                     # 주체(Main Person) 컬럼 식별
-                    subject_cols = [c for c in cols if any(kw in c for kw in MAIN_PERSON_KWS) and c not in RELATION_MAPPING]
+                    subject_cols = [
+                        c for c in cols
+                        if not _is_identifier_column(c)
+                        and any(kw in c for kw in MAIN_PERSON_KWS)
+                        and c not in RELATION_MAPPING
+                    ]
                     # 관계(Relation) 컬럼 식별
                     rel_cols = [c for c in cols if any(rk in c for rk in RELATION_MAPPING.keys())]
 
@@ -812,8 +876,10 @@ def build_ultimate_graph():
                             batch = [r for r in rel_p_p_acc if r['rel'] == rt]
                             query = """
                                 UNWIND $data AS row
-                                MERGE (a:인물 {명칭: row.src})
-                                MERGE (b:인물 {명칭: row.dst})
+                                MERGE (a:Person:인물 {명칭: row.src})
+                                SET a.name = coalesce(a.name, row.src), a.type = '인물'
+                                MERGE (b:Person:인물 {명칭: row.dst})
+                                SET b.name = coalesce(b.name, row.dst), b.type = '인물'
                                 MERGE (a)-[:`REL_TYPE`]->(b)
                             """.replace("REL_TYPE", rt)
                             _run_batches(session, query, batch, batch_size=5000)
