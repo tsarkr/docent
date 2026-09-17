@@ -109,6 +109,29 @@ function docent_decode_json_array($key, $max_items = 50, $max_len = 500) {
     return $items;
 }
 
+function docent_sanitize_json_list($value, $max_items = 50, $max_len = 500) {
+    if (is_array($value)) {
+        $decoded = $value;
+    } else {
+        $decoded = json_decode((string)$value, true);
+    }
+    if (!is_array($decoded)) return [];
+    $items = [];
+    foreach ($decoded as $item) {
+        if (is_array($item)) {
+            $item = json_encode($item, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+        }
+        $val = docent_sanitize_text((string)$item, $max_len, false);
+        if ($val !== '') {
+            $items[] = $val;
+        }
+        if (count($items) >= $max_items) {
+            break;
+        }
+    }
+    return $items;
+}
+
 function docent_valid_identifier($value, $default = '') {
     $sanitized = preg_replace('/[^A-Za-z0-9_]/', '', (string)($value ?? $default));
     return $sanitized !== '' ? $sanitized : $default;
@@ -303,7 +326,7 @@ if (isset($_GET['ajax'])) {
     header('X-Frame-Options: SAMEORIGIN');
 
     $action = strtolower((string)($_GET['ajax'] ?? ''));
-    $allowed_actions = ['analyze', 'graph', 'pg_prefetch', 'explain'];
+    $allowed_actions = ['analyze', 'graph', 'pg_prefetch', 'explain', 'node_detail'];
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
         http_response_code(405);
         echo json_encode(['error' => 'Method not allowed.'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
@@ -484,7 +507,7 @@ if (isset($_GET['ajax'])) {
             }
 
             if (!empty($found_ids)) {
-                $found_ids = array_unique($found_ids);
+                $found_ids = array_values(array_unique(array_filter($found_ids, fn($id) => $id !== '')));
                 // 카테시안 곱을 제거하고 인접 엣지와 사건 동반참여자를 안전하게 서브쿼리로 제한
                 $graph_query = "
                     MATCH (n)
@@ -558,6 +581,8 @@ if (isset($_GET['ajax'])) {
                     }
                 }
             }
+
+            merge_same_person_nodes($nodes, $edges, $evidences);
 
             $unique_edges = [];
             foreach ($edges as $e) {
@@ -663,11 +688,197 @@ if (isset($_GET['ajax'])) {
             echo json_encode(["text" => $res], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
             exit;
         }
+
+        // [Action 5] 개체 원천 사료(PostgreSQL) 상세 레코드 실시간 조회
+        if ($action === 'node_detail') {
+            $raw_id = docent_sanitize_text($_POST['raw_id'] ?? '', 500, false);
+            $table = docent_sanitize_text($_POST['table'] ?? '', 100, false);
+            $rowid = (int)($_POST['rowid'] ?? 0);
+            $label = docent_sanitize_text($_POST['label'] ?? '', 200, false);
+            $aliases = docent_sanitize_json_list($_POST['aliases'] ?? '', 10, 100);
+
+            // raw_id 패턴 분석 (예: raw_event_place_link:Generated from raw_event_place_link row 3647 on...)
+            if (empty($table) || $rowid <= 0) {
+                if (preg_match('/^([a-zA-Z0-9_]+):Generated from [a-zA-Z0-9_]+ row (\d+)/i', $raw_id, $m)) {
+                    $table = $m[1];
+                    $rowid = (int)$m[2];
+                } elseif (preg_match('/^#?([a-zA-Z0-9_]+)[_-](\d+)$/i', $raw_id, $m)) {
+                    $table = $m[1];
+                    $rowid = (int)$m[2];
+                } elseif (preg_match('/^([a-zA-Z0-9_]+):(\d+)$/i', $raw_id, $m)) {
+                    $table = $m[1];
+                    $rowid = (int)$m[2];
+                }
+            }
+
+            $response_data = [
+                "found" => false,
+                "table" => $table,
+                "rowid" => $rowid,
+                "columns" => [],
+                "tei" => ""
+            ];
+
+            $pdo = get_pg();
+            if ($pdo) {
+                $fill_from_row = function($tableName, $row) use (&$response_data) {
+                    $response_data["found"] = true;
+                    $response_data["table"] = $tableName;
+                    $response_data["rowid"] = (int)($row['rowid'] ?? 0);
+                    if (isset($row['tei'])) {
+                        $response_data["tei"] = (string)$row['tei'];
+                        unset($row['tei']);
+                    }
+                    $clean_cols = [];
+                    foreach ($row as $col_k => $col_v) {
+                        if ($col_v !== null && $col_v !== '') {
+                            $clean_cols[$col_k] = (string)$col_v;
+                        }
+                    }
+                    $response_data["columns"] = $clean_cols;
+                };
+
+                // 검색 대상 식별자/키워드 후보 수집
+                $candidates = array_values(array_unique(array_filter(
+                    array_merge([$raw_id, $label], $aliases),
+                    static fn($v) => $v !== null && trim((string)$v) !== ''
+                )));
+
+                try {
+                    // 1. table/rowid가 유효한 경우 직접 조회
+                    if (!empty($table) && $rowid > 0 && preg_match('/^[a-zA-Z0-9_]+$/', $table)) {
+                        $chk = $pdo->prepare("SELECT 1 FROM information_schema.tables WHERE table_name = ? LIMIT 1");
+                        $chk->execute([strtolower($table)]);
+                        if ($chk->fetch()) {
+                            $stmt = $pdo->prepare("SELECT * FROM \"{$table}\" WHERE rowid = ? LIMIT 1");
+                            $stmt->execute([$rowid]);
+                            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+                            if ($row) {
+                                $fill_from_row($table, $row);
+                            }
+                        }
+                    }
+
+                    // 2. table/rowid로 못 찾았고 후보 키워드들이 있는 경우 차례로 조회
+                    if (!$response_data["found"] && !empty($candidates)) {
+                        // (1) raw_event_info (사건정보: "아이디", "사건명")
+                        foreach ($candidates as $cand) {
+                            $stmt = $pdo->prepare("SELECT * FROM raw_event_info WHERE \"아이디\" = ? OR \"사건명\" = ? LIMIT 1");
+                            $stmt->execute([$cand, $cand]);
+                            if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                                $fill_from_row("raw_event_info", $row);
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!$response_data["found"] && !empty($candidates)) {
+                        // (2) raw_event_place_link (연결정보: demons_id, demons_title, place_id, place_name)
+                        foreach ($candidates as $cand) {
+                            $stmt = $pdo->prepare("SELECT * FROM raw_event_place_link WHERE demons_id = ? OR demons_title = ? OR place_id = ? OR place_name = ? LIMIT 1");
+                            $stmt->execute([$cand, $cand, $cand, $cand]);
+                            if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                                $fill_from_row("raw_event_place_link", $row);
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!$response_data["found"] && !empty($candidates)) {
+                        // (3) raw_detail_place (세부장소: "세부장소아이디", "명칭", "이칭")
+                        foreach ($candidates as $cand) {
+                            $stmt = $pdo->prepare("SELECT * FROM raw_detail_place WHERE \"세부장소아이디\" = ? OR \"명칭\" = ? OR \"이칭\" = ? LIMIT 1");
+                            $stmt->execute([$cand, $cand, $cand]);
+                            if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                                $fill_from_row("raw_detail_place", $row);
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!$response_data["found"] && !empty($candidates)) {
+                        // (4) raw_bibliography (서지정보: "문서아이디", "제목")
+                        foreach ($candidates as $cand) {
+                            $stmt = $pdo->prepare("SELECT * FROM raw_bibliography WHERE \"문서아이디\" = ? OR \"제목\" = ? LIMIT 1");
+                            $stmt->execute([$cand, $cand]);
+                            if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                                $fill_from_row("raw_bibliography", $row);
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!$response_data["found"] && !empty($candidates)) {
+                        // (5) 탄압기구 테이블 (경찰, 헌병, 군대)
+                        foreach (['raw_oppression_org_police', 'raw_oppression_org_gendarme', 'raw_oppression_org_military'] as $org_tab) {
+                            foreach ($candidates as $cand) {
+                                $stmt = $pdo->prepare("SELECT * FROM \"{$org_tab}\" WHERE \"기구ID\" = ? OR \"기구명\" = ? LIMIT 1");
+                                $stmt->execute([$cand, $cand]);
+                                if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                                    $fill_from_row($org_tab, $row);
+                                    break 2;
+                                }
+                            }
+                        }
+                    }
+
+                    if (!$response_data["found"] && !empty($candidates)) {
+                        // (6) 인물명 등으로 사건정보 "관련인물" 부분 매칭
+                        foreach ($candidates as $cand) {
+                            if (mb_strlen($cand) >= 2) {
+                                $stmt = $pdo->prepare("SELECT * FROM raw_event_info WHERE \"관련인물\" LIKE ? LIMIT 1");
+                                $stmt->execute(['%' . $cand . '%']);
+                                if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                                    $fill_from_row("raw_event_info", $row);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (!$response_data["found"] && !empty($candidates)) {
+                        // (7) tei_cidoc_mappings 매핑 확인
+                        foreach ($candidates as $cand) {
+                            if (mb_strlen($cand) >= 2) {
+                                $stmt = $pdo->prepare("SELECT * FROM tei_cidoc_mappings WHERE mapping_label LIKE ? LIMIT 1");
+                                $stmt->execute(['%' . $cand . '%']);
+                                if ($m_row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                                    if (!empty($m_row['table_name']) && !empty($m_row['rowid'])) {
+                                        $stmt2 = $pdo->prepare("SELECT * FROM \"{$m_row['table_name']}\" WHERE rowid = ? LIMIT 1");
+                                        $stmt2->execute([(int)$m_row['rowid']]);
+                                        if ($row = $stmt2->fetch(PDO::FETCH_ASSOC)) {
+                                            $fill_from_row($m_row['table_name'], $row);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (\Throwable $sql_err) {
+                    error_log("node_detail query error: " . $sql_err->getMessage());
+                    $response_data["db_error"] = $sql_err->getMessage();
+                }
+            }
+
+            echo json_encode($response_data, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+            exit;
+        }
     } catch (Throwable $e) {
-        error_log(sprintf('Docent AJAX failure [%s]: %s in %s:%d', $action, $e->getMessage(), $e->getFile(), $e->getLine()));
+        $detail_msg = $e->getMessage();
+        $file_name = basename($e->getFile());
+        $line_no = $e->getLine();
+        $class_name = get_class($e);
+        error_log(sprintf('Docent AJAX failure [%s]: [%s] %s in %s:%d', $action, $class_name, $detail_msg, $file_name, $line_no));
         http_response_code(500);
         echo json_encode([
-            "error" => "서버 내부 오류가 발생했습니다."
+            "error" => sprintf('[%s] %s (%s:%d)', $class_name, $detail_msg, $file_name, $line_no),
+            "details" => [
+                "class" => $class_name,
+                "message" => $detail_msg,
+                "file" => $file_name,
+                "line" => $line_no
+            ]
         ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
         exit;
     }
@@ -800,6 +1011,163 @@ function dynamic_prefetch_ratio($node_count) {
     return 0.40 - (($node_count - 10) * (0.10 / 20.0));
 }
 
+function merge_same_person_nodes(&$nodes, &$edges, &$evidences) {
+    if (empty($nodes)) return;
+
+    $merge_target = []; // maps alias_nid => canon_nid
+
+    // 1. Detect from edges with type === '동일인물', 'sameAs', 'owl:sameAs'
+    foreach ($edges as $e) {
+        $type = $e['type'] ?? '';
+        if (in_array($type, ['동일인물', 'sameAs', 'owl:sameAs'], true)) {
+            $from = $e['from'];
+            $to = $e['to'];
+            if (isset($nodes[$from], $nodes[$to]) && $from !== $to) {
+                $raw1 = (string)($nodes[$from]['raw_id'] ?? '');
+                $raw2 = (string)($nodes[$to]['raw_id'] ?? '');
+
+                $is_hangul1 = (bool)preg_match('/[\x{AC00}-\x{D7A3}]/u', $raw1);
+                $is_hangul2 = (bool)preg_match('/[\x{AC00}-\x{D7A3}]/u', $raw2);
+                $is_hanja1 = (bool)preg_match('/[\x{4E00}-\x{9FFF}]/u', $raw1);
+                $is_hanja2 = (bool)preg_match('/[\x{4E00}-\x{9FFF}]/u', $raw2);
+
+                if ($is_hangul1 && !$is_hangul2 && $is_hanja2) {
+                    $canon = $from; $alias = $to;
+                } elseif ($is_hangul2 && !$is_hangul1 && $is_hanja1) {
+                    $canon = $to; $alias = $from;
+                } else {
+                    $canon = $to; $alias = $from;
+                }
+                $merge_target[$alias] = $canon;
+            }
+        }
+    }
+
+    // 2. Secondary check: Person nodes with matching Hanja / Hangul reading
+    $person_nids = [];
+    foreach ($nodes as $nid => $node) {
+        $type = $node['type'] ?? '';
+        $labels = $node['labels'] ?? [];
+        if ($type === '인물' || in_array('인물', $labels, true) || in_array('Person', $labels, true)) {
+            $person_nids[] = $nid;
+        }
+    }
+
+    $count_p = count($person_nids);
+    for ($i = 0; $i < $count_p; $i++) {
+        for ($j = $i + 1; $j < $count_p; $j++) {
+            $nid1 = $person_nids[$i];
+            $nid2 = $person_nids[$j];
+            if (!isset($nodes[$nid1], $nodes[$nid2])) continue;
+
+            $raw1 = trim((string)($nodes[$nid1]['raw_id'] ?? ''));
+            $raw2 = trim((string)($nodes[$nid2]['raw_id'] ?? ''));
+            $props1 = $nodes[$nid1]['props'] ?? [];
+            $props2 = $nodes[$nid2]['props'] ?? [];
+
+            $reading1 = trim((string)($props1['한글독음'] ?? $props1['한글명칭'] ?? ''));
+            $reading2 = trim((string)($props2['한글독음'] ?? $props2['한글명칭'] ?? ''));
+            $hanja1 = trim((string)($props1['한자'] ?? ''));
+            $hanja2 = trim((string)($props2['한자'] ?? ''));
+
+            $is_same = false;
+            $canon = null; $alias = null;
+
+            if ($reading1 !== '' && $reading1 === $raw2) {
+                $is_same = true; $canon = $nid2; $alias = $nid1;
+            } elseif ($reading2 !== '' && $reading2 === $raw1) {
+                $is_same = true; $canon = $nid1; $alias = $nid2;
+            } elseif ($hanja1 !== '' && $hanja1 === $raw2) {
+                $is_same = true; $canon = $nid1; $alias = $nid2;
+            } elseif ($hanja2 !== '' && $hanja2 === $raw1) {
+                $is_same = true; $canon = $nid2; $alias = $nid1;
+            }
+
+            if ($is_same && $canon && $alias) {
+                $merge_target[$alias] = $canon;
+            }
+        }
+    }
+
+    if (empty($merge_target)) return;
+
+    // Resolve transitive mapping (A -> B -> C => A -> C, B -> C)
+    foreach ($merge_target as $src => $dst) {
+        $visited = [$src => true];
+        $curr = $dst;
+        while (isset($merge_target[$curr]) && !isset($visited[$curr])) {
+            $visited[$curr] = true;
+            $curr = $merge_target[$curr];
+        }
+        $merge_target[$src] = $curr;
+    }
+
+    // Merge nodes
+    foreach ($merge_target as $alias_nid => $canon_nid) {
+        if (!isset($nodes[$alias_nid], $nodes[$canon_nid])) continue;
+        if ($alias_nid === $canon_nid) continue;
+
+        $alias_node = $nodes[$alias_nid];
+        $canon_node = &$nodes[$canon_nid];
+
+        $alias_raw = (string)($alias_node['raw_id'] ?? '');
+        $canon_raw = (string)($canon_node['raw_id'] ?? '');
+
+        if (!isset($canon_node['aliases']) || !is_array($canon_node['aliases'])) {
+            $canon_node['aliases'] = [];
+        }
+        if ($alias_raw !== '' && $alias_raw !== $canon_raw) {
+            $canon_node['aliases'][] = $alias_raw;
+        }
+        if (!empty($alias_node['aliases'])) {
+            $canon_node['aliases'] = array_merge($canon_node['aliases'], $alias_node['aliases']);
+        }
+        $canon_node['aliases'] = array_values(array_unique($canon_node['aliases']));
+
+        // Format combined label: e.g. "이동휘 (李東輝)"
+        $icon = "👤\n";
+        $hanja_sub = '';
+        foreach ($canon_node['aliases'] as $al) {
+            if (preg_match('/[\x{4E00}-\x{9FFF}]/u', $al)) {
+                $hanja_sub = $al;
+                break;
+            }
+        }
+        if ($hanja_sub !== '') {
+            $canon_node['label'] = $icon . mb_substr("{$canon_raw} ({$hanja_sub})", 0, 25);
+        } elseif (!empty($canon_node['aliases'])) {
+            $first_al = $canon_node['aliases'][0];
+            $canon_node['label'] = $icon . mb_substr("{$canon_raw} ({$first_al})", 0, 25);
+        }
+
+        if (!empty($alias_node['labels'])) {
+            $canon_node['labels'] = array_values(array_unique(array_merge($canon_node['labels'] ?? [], $alias_node['labels'])));
+        }
+        if (isset($alias_node['props'])) {
+            $canon_node['props'] = array_merge($alias_node['props'], $canon_node['props'] ?? []);
+        }
+
+        unset($nodes[$alias_nid]);
+    }
+
+    // Redirect edges & drop internal alias edges
+    $new_edges = [];
+    foreach ($edges as $e) {
+        $from = $merge_target[$e['from']] ?? $e['from'];
+        $to = $merge_target[$e['to']] ?? $e['to'];
+
+        if ($from === $to) continue; // Drop self-loops resulting from merge
+        if (in_array($e['type'] ?? '', ['동일인물', 'sameAs', 'owl:sameAs'], true)) {
+            continue; // Drop 동일인물 edges between merged nodes
+        }
+
+        $e['from'] = $from;
+        $e['to'] = $to;
+        $new_edges[] = $e;
+    }
+    $edges = $new_edges;
+}
+
 function select_prefetch_names_by_degree($nodes, $edges) {
     $node_list = array_values($nodes);
     $node_count = count($node_list);
@@ -832,6 +1200,12 @@ function select_prefetch_names_by_degree($nodes, $edges) {
         $raw = trim((string)($n['raw_id'] ?? ''));
         if ($raw === '' || isset($names[$raw])) continue;
         $names[$raw] = true;
+        if (!empty($n['aliases'])) {
+            foreach ($n['aliases'] as $alias) {
+                $alias = trim((string)$alias);
+                if ($alias !== '') $names[$alias] = true;
+            }
+        }
         if (count($names) >= $target) break;
     }
     return array_keys($names);
@@ -920,6 +1294,7 @@ function add_node_to_map(&$map, $node, $labels_iterable) {
     $props = [];
     if (method_exists($node, 'getProperties')) {
         foreach ($node->getProperties() as $k => $v) {
+            if ($k === 'embedding') continue;
             $props[$k] = is_scalar($v) ? $v : (is_iterable($v) ? json_encode($v, JSON_UNESCAPED_UNICODE) : (string)$v);
         }
     }
@@ -937,6 +1312,13 @@ function add_node_to_map(&$map, $node, $labels_iterable) {
     if (!isset($map[$nid])) {
         $reading = $props['한글독음'] ?? '';
         $base = $props['제목'] ?? $props['명칭'] ?? $props['사건명'] ?? $raw_id;
+
+        // 허위 유령 개체 필터링 (불용어 또는 텍스트 오추출 잔여물 차단)
+        static $ghost_stopwords = ['대표', '달하', '그러', '총독', '순사', '공판', '십자표', '펼치는데', '연행하', '거행하고'];
+        if (in_array((string)$base, $ghost_stopwords, true) && empty($props['한글독음']) && empty($props['uid']) && empty($props['id'])) {
+            return null;
+        }
+
         $label_text = ($reading && $base != $reading) ? "{$base} ({$reading})" : $base;
 
         $color = "#999999"; $icon = "";
@@ -969,6 +1351,8 @@ function add_node_to_map(&$map, $node, $labels_iterable) {
             "raw_id" => (string)$raw_id,
             "labels" => $labels_list,
             "type" => $type,
+            "props" => $props,
+            "aliases" => [],
             "color" => ["background" => $color, "border" => $color, "highlight" => ["background" => $color, "border" => "#333"]],
             "shape" => "box",
             "font" => ["color" => "#000", "size" => 14, "multi" => true],
@@ -980,8 +1364,36 @@ function add_node_to_map(&$map, $node, $labels_iterable) {
 }
 
 function _get_rel_label($rtype) {
-    $ko = ["P14_carried_out_by" => "수행(참여)", "P7_took_place_at" => "발생 장소", "ACTIVATED_AT" => "활동지", "P152_has_parent" => "가족 관계", "foaf:knows" => "동지/지인", "foaf:member" => "소속 기구", "P11_had_participant" => "참여 인물", "P108_has_produced" => "생성/저작", "P102_has_title" => "명칭/제목", "소속" => "소속"];
-    $en = ["P14_carried_out_by" => "Performed/Participated", "P7_took_place_at" => "Location", "ACTIVATED_AT" => "Activity place", "P152_has_parent" => "Family relation", "foaf:knows" => "Comrade/Acquaintance", "foaf:member" => "Affiliated organization", "P11_had_participant" => "Participant", "P108_has_produced" => "Created/Produced", "P102_has_title" => "Title", "소속" => "Affiliation"];
+    $ko = [
+        "P14_carried_out_by" => "수행(참여)",
+        "P7_took_place_at" => "발생 장소",
+        "ACTIVATED_AT" => "활동지",
+        "P152_has_parent" => "가족 관계",
+        "foaf:knows" => "동지/지인",
+        "foaf:member" => "소속 기구",
+        "P11_had_participant" => "참여 인물",
+        "P108_has_produced" => "생성/저작",
+        "P102_has_title" => "명칭/제목",
+        "소속" => "소속",
+        "동일인물" => "동일인물",
+        "sameAs" => "동일인물",
+        "owl:sameAs" => "동일인물"
+    ];
+    $en = [
+        "P14_carried_out_by" => "Performed/Participated",
+        "P7_took_place_at" => "Location",
+        "ACTIVATED_AT" => "Activity place",
+        "P152_has_parent" => "Family relation",
+        "foaf:knows" => "Comrade/Acquaintance",
+        "foaf:member" => "Affiliated organization",
+        "P11_had_participant" => "Participant",
+        "P108_has_produced" => "Created/Produced",
+        "P102_has_title" => "Title",
+        "소속" => "Affiliation",
+        "동일인물" => "Same Person",
+        "sameAs" => "Same As",
+        "owl:sameAs" => "Same As"
+    ];
     return docent_is_english() ? ($en[$rtype] ?? $rtype) : ($ko[$rtype] ?? $rtype);
 }
 
@@ -1279,6 +1691,7 @@ let network = null;
 let lastEvidences = [];
 let pgPrefetchTexts = [];
 let currentNodes = []; // ✨ 검색된 노드 목록 보관용
+let currentEdges = []; // ✨ 검색된 엣지 목록 보관용
 
 function restoreSuggestedKeywords() {
     if (document.documentElement.lang !== 'en') return;
@@ -1318,10 +1731,11 @@ async function api(act, data = {}) {
     if (!response.ok) {
         try {
             const err = JSON.parse(rawText);
-            throw new Error('[' + act + ' 단계 HTTP ' + response.status + '] ' + (err.error || '서버 오류'));
+            const errMsg = err.error || ('HTTP ' + response.status + ' 오류');
+            throw new Error('[' + act + ' 단계 HTTP ' + response.status + '] ' + errMsg);
         } catch(e) {
             if (e instanceof Error && e.message.startsWith('[' + act + ' 단계 HTTP ')) throw e;
-            throw new Error('[' + act + ' 단계 HTTP ' + response.status + '] ' + rawText.substring(0, 150));
+            throw new Error('[' + act + ' 단계 HTTP ' + response.status + '] ' + rawText.substring(0, 300));
         }
     }
     
@@ -1361,6 +1775,7 @@ async function performSearch() {
         const graphData = await api('graph', { term, keywords: JSON.stringify(keywords) });
         lastEvidences = graphData.evidences;
         currentNodes = graphData.nodes; // ✨ 노드 데이터를 보관
+        currentEdges = graphData.edges || []; // ✨ 엣지 데이터를 보관
         
         draw(graphData.nodes, graphData.edges);
 
@@ -1405,7 +1820,12 @@ async function performSearch() {
     } catch (e) {
         console.error(e);
         setStatus('<span class="text-danger"><i class="bi bi-exclamation-triangle"></i> ' + '에러: ' + e.message + '</span>');
-        document.getElementById('explanation-content').innerHTML = "데이터 탐색 과정에서 실패했습니다. 에러 내용을 확인해 주세요.";
+        document.getElementById('explanation-content').innerHTML = 
+            `<div class="alert alert-danger mb-0 text-start">` +
+            `<div class="fw-bold mb-1"><i class="bi bi-exclamation-octagon-fill me-1"></i> 데이터 탐색 실패</div>` +
+            `<div class="small font-monospace text-break mb-1">${e.message}</div>` +
+            `<small class="text-muted">서버 오류 상세 정보를 확인하고 설정을 점검해 주세요.</small>` +
+            `</div>`;
     }
 }
 
@@ -1452,57 +1872,200 @@ function setStatus(html) {
     document.getElementById('status-text').innerHTML = html;
 }
 
+function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function focusNode(nodeId) {
+    if (network) {
+        network.focus(nodeId, { scale: 1.2, animation: { duration: 500, easingFunction: 'easeInOutQuad' } });
+        network.selectNodes([nodeId]);
+    }
+    const targetNode = currentNodes.find(n => n.id === nodeId);
+    if (targetNode) {
+        showNodeInfo(targetNode);
+    }
+}
+
 // ✨ 노드 정보를 패널에 렌더링하는 함수
 function showNodeInfo(node) {
     const panel = document.getElementById('node-info-panel');
     const content = document.getElementById('node-info-content');
     
-    // 기본 정보
-    let html = `<h5 class="fw-bold mb-3 text-dark">${node.label.replace(/[\n📜👤🔥📍🏢]/g, '').trim()}</h5>`;
-    html += `<div class="mb-1"><span class="badge bg-secondary me-2">개체 ID</span> <span class="text-muted">${node.raw_id}</span></div>`;
+    // 1. 기본 정보 헤더
+    const cleanLabel = node.label.replace(/[\n📜👤🔥📍🏢]/g, '').trim();
+    let html = `<div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 class="fw-bold text-dark m-0">${escapeHtml(cleanLabel)}</h5>
+        <span class="badge bg-primary fs-6">${escapeHtml(node.type || '개체')}</span>
+    </div>`;
+
+    html += `<div class="mb-2"><span class="badge bg-secondary me-2">개체 ID</span> <span class="font-monospace text-muted small text-break">${escapeHtml(node.raw_id)}</span></div>`;
     
-    if (node.labels && node.labels.length > 0) {
-        html += `<div class="mb-3"><span class="badge bg-secondary me-2">속성</span> <span class="text-primary">${node.labels.join(', ')}</span></div>`;
+    if (Array.isArray(node.aliases) && node.aliases.length > 0) {
+        html += `<div class="mb-2"><span class="badge bg-info text-dark me-2">이칭/한자</span> <span class="text-dark fw-semibold">${escapeHtml(node.aliases.join(', '))}</span></div>`;
     }
 
-    // 관련된 Neo4j 사료 증거 찾기
-    const relatedEvidences = lastEvidences.filter(ev => ev.concept === node.raw_id || ev.concept === node.id);
+    if (node.labels && node.labels.length > 0) {
+        html += `<div class="mb-3"><span class="badge bg-secondary me-2">속성 라벨</span> <span class="text-primary small">${escapeHtml(node.labels.join(', '))}</span></div>`;
+    }
+
+    // 2. Neo4j 노드 기본 속성 테이블 (Properties)
+    if (node.props && Object.keys(node.props).length > 0) {
+        let propRows = '';
+        const propLabels = {
+            '제목': '제목', 'title': '제목', 'name': '명칭', '사건명': '사건명',
+            '설명': '설명', 'description': '설명', '날짜': '날짜', 'category': '분류',
+            '원천테이블': '원천 테이블', 'source_table': '원천 테이블',
+            '원천rowid': '원천 행 번호', 'rowid': '행 번호', '원본id': '원본 식별자',
+            '한글독음': '한글 독음', '한자': '한자 표기', 'type': '유형'
+        };
+        for (let k in node.props) {
+            if (['embedding', 'labels', 'id', 'uid'].includes(k)) continue;
+            const val = String(node.props[k] || '').trim();
+            if (!val) continue;
+            const displayKey = propLabels[k] || k;
+            propRows += `<tr>
+                <td class="text-muted small fw-bold text-nowrap bg-light" style="width: 30%;">${escapeHtml(displayKey)}</td>
+                <td class="small text-break" style="white-space: pre-wrap;">${escapeHtml(val)}</td>
+            </tr>`;
+        }
+        if (propRows) {
+            html += `<hr><h6 class="fw-bold text-dark mb-2"><i class="bi bi-card-list"></i> 노드 상세 메타데이터</h6>`;
+            html += `<div class="table-responsive mb-3" style="max-height: 200px; overflow-y: auto;">
+                <table class="table table-sm table-bordered bg-light mb-0">${propRows}</table>
+            </div>`;
+        }
+    }
+
+    // 3. 그래프 상 직접 연결된 이웃 개체 (Connected Entities in Graph)
+    const connectedEdges = currentEdges.filter(e => e.from === node.id || e.to === node.id);
+    if (connectedEdges.length > 0) {
+        html += `<hr><h6 class="fw-bold text-primary mb-2"><i class="bi bi-diagram-3"></i> 그래프 연결 관계 (${connectedEdges.length}건)</h6>`;
+        html += `<div class="d-flex flex-wrap gap-1 mb-3" style="max-height: 140px; overflow-y: auto;">`;
+        connectedEdges.forEach(e => {
+            const isOutgoing = (e.from === node.id);
+            const otherId = isOutgoing ? e.to : e.from;
+            const otherNode = currentNodes.find(n => n.id === otherId);
+            if (otherNode) {
+                const otherLabel = otherNode.label.replace(/[\n📜👤🔥📍🏢]/g, '').trim();
+                const edgeLabel = e.label || (isOutgoing ? '연결 ➔' : '🠔 연결');
+                html += `<button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2 small text-start" onclick="focusNode('${otherId}')" title="${escapeHtml(e.type || '')}">
+                    <span class="badge bg-light text-dark border me-1">${escapeHtml(edgeLabel)}</span> ${escapeHtml(otherLabel)}
+                </button>`;
+            }
+        });
+        html += `</div>`;
+    }
+
+    // 4. PostgreSQL 원천 레코드 비동기 로딩 영역
+    html += `<div id="node-pg-source-box">
+        <hr><div class="d-flex align-items-center text-muted small py-2">
+            <span class="spinner-border spinner-border-sm me-2 text-success"></span> 원천 사료 데이터(PostgreSQL) 실시간 조회 중...
+        </div>
+    </div>`;
+
+    // 5. 관련된 Neo4j 사료 증거 찾기
+    const relatedEvidences = lastEvidences.filter(ev => {
+        if (ev.concept === node.raw_id || ev.concept === node.id) return true;
+        if (Array.isArray(node.aliases) && node.aliases.includes(ev.concept)) return true;
+        return false;
+    });
     if (relatedEvidences.length > 0) {
-        html += `<hr><h6 class="fw-bold text-warning mb-2"><i class="bi bi-journal-bookmark-fill"></i> Neo4j 관련 사료 기록</h6>`;
-        html += `<div style="max-height: 220px; overflow-y: auto; padding-right: 4px;">`;
+        html += `<hr><h6 class="fw-bold text-warning mb-2"><i class="bi bi-journal-bookmark-fill"></i> Neo4j 관련 사료 기록 (${relatedEvidences.length}건)</h6>`;
+        html += `<div style="max-height: 200px; overflow-y: auto; padding-right: 4px;">`;
         relatedEvidences.forEach(ev => {
             html += `<div class="mb-2 p-2 bg-light border rounded small" style="white-space: pre-wrap; word-break: break-word;">
-                <strong class="text-dark">${ev.doc}</strong><br>
-                <span class="text-muted">${ev.text.substring(0, 150)}...</span>
+                <strong class="text-dark">${escapeHtml(ev.doc)}</strong><br>
+                <span class="text-muted">${escapeHtml(ev.text.substring(0, 200))}...</span>
             </div>`;
         });
         html += `</div>`;
     }
 
-    // 관련된 PostgreSQL 근거 텍스트 찾기
-    const relatedPg = pgPrefetchTexts.filter(txt => txt.includes(`node=${node.raw_id}`));
-    if (relatedPg.length > 0) {
-        html += `<hr><h6 class="fw-bold text-success mb-2"><i class="bi bi-database-fill"></i> PostgreSQL 관련 근거</h6>`;
-        html += `<div style="max-height: 220px; overflow-y: auto; padding-right: 4px;">`;
-        relatedPg.forEach(txt => {
-            // DB 출처 정보 강조 (예: [public.서지정보_260410])
-            const parts = txt.split('::');
-            const source = parts[0];
-            const detail = parts[1] ? parts[1] : '';
-            html += `<div class="mb-2 p-2 bg-light border rounded small">
-                <strong class="text-success">${source.replace(/\[|\]/g, '')}</strong><br>
-                <div class="text-muted" style="max-height: 120px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;">${detail}</div>
-            </div>`;
-        });
-        html += `</div>`;
-    }
-
-    if (relatedEvidences.length === 0 && relatedPg.length === 0) {
-        html += `<div class="text-muted small mt-3"><i class="bi bi-info-circle"></i> 이 개체와 직접 연결된 사료나 추가 데이터가 없습니다.</div>`;
-    }
-    
     content.innerHTML = html;
     panel.style.display = 'block';
+
+    // 6. 비동기로 PostgreSQL 원천 레코드 실시간 조회
+    loadNodeSourceDetail(node);
+}
+
+async function loadNodeSourceDetail(node) {
+    const box = document.getElementById('node-pg-source-box');
+    if (!box) return;
+
+    const props = node.props || {};
+    const table = props['원천테이블'] || props['source_table'] || '';
+    const rowid = props['원천rowid'] || props['rowid'] || '';
+
+    const cleanLabel = (node.label || '').replace(/[\n📜👤🔥📍🏢]/g, '').trim();
+
+    try {
+        const detail = await api('node_detail', {
+            table: table,
+            rowid: rowid,
+            raw_id: node.raw_id || '',
+            label: cleanLabel,
+            aliases: JSON.stringify(node.aliases || [])
+        });
+
+        if (detail && detail.found && detail.columns && Object.keys(detail.columns).length > 0) {
+            let rowHtml = `<hr><h6 class="fw-bold text-success mb-2">
+                <i class="bi bi-database-check"></i> 원천 사료 원문 [${escapeHtml(detail.table)} 행 #${detail.rowid}]
+            </h6>`;
+            rowHtml += `<div class="table-responsive" style="max-height: 250px; overflow-y: auto;">
+                <table class="table table-sm table-striped table-bordered small mb-2">
+                    <tbody>`;
+            for (let col in detail.columns) {
+                const val = detail.columns[col];
+                if (val === null || val === '') continue;
+                rowHtml += `<tr>
+                    <th class="bg-light text-muted" style="width: 32%;">${escapeHtml(col)}</th>
+                    <td class="text-break" style="white-space: pre-wrap;">${escapeHtml(val)}</td>
+                </tr>`;
+            }
+            rowHtml += `</tbody></table></div>`;
+
+            if (detail.tei) {
+                rowHtml += `<details class="small mt-2 mb-2">
+                    <summary class="text-primary fw-bold" style="cursor: pointer;">📜 TEI 마크업 XML 원문 확인</summary>
+                    <pre class="bg-light p-2 border rounded mt-1 small font-monospace text-break" style="max-height: 200px; overflow-y: auto; white-space: pre-wrap;">${escapeHtml(detail.tei)}</pre>
+                </details>`;
+            }
+            box.innerHTML = rowHtml;
+        } else {
+            // 원천 행을 찾지 못한 경우 기존 사전조회 PG 텍스트 매칭
+            const relatedPg = pgPrefetchTexts.filter(txt => {
+                if (txt.includes(`node=${node.raw_id}`)) return true;
+                if (Array.isArray(node.aliases) && node.aliases.some(a => txt.includes(`node=${a}`))) return true;
+                return false;
+            });
+            if (relatedPg.length > 0) {
+                let pgHtml = `<hr><h6 class="fw-bold text-success mb-2"><i class="bi bi-database-fill"></i> PostgreSQL 관련 근거</h6>`;
+                pgHtml += `<div style="max-height: 180px; overflow-y: auto; padding-right: 4px;">`;
+                relatedPg.forEach(txt => {
+                    const parts = txt.split('::');
+                    const source = parts[0];
+                    const detailText = parts[1] ? parts[1] : '';
+                    pgHtml += `<div class="mb-2 p-2 bg-light border rounded small">
+                        <strong class="text-success">${escapeHtml(source.replace(/\[|\]/g, ''))}</strong><br>
+                        <div class="text-muted" style="max-height: 120px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;">${escapeHtml(detailText)}</div>
+                    </div>`;
+                });
+                pgHtml += `</div>`;
+                box.innerHTML = pgHtml;
+            } else {
+                box.innerHTML = `<hr><div class="text-muted small py-1"><i class="bi bi-info-circle"></i> 원천 DB 테이블에 직접 대응되는 데이터가 없습니다.</div>`;
+            }
+        }
+    } catch (e) {
+        box.innerHTML = `<hr><div class="text-muted small py-1"><i class="bi bi-exclamation-circle text-warning"></i> 원천 데이터 상세 조회 생략: ${escapeHtml(e.message)}</div>`;
+    }
 }
 
 function draw(nodes, edges) {

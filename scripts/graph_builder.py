@@ -80,7 +80,7 @@ def _is_identifier_column(column):
     return normalized.endswith(("아이디", "코드", "id", "ID", "code", "Code"))
 
 
-def extract_family_relations_from_text(text):
+def extract_family_relations_from_text(text, valid_names=None):
     """사료 본문 텍스트에서 인물 간 가족(P152_has_parent 등) 및 혈연/지인 관계를 추출합니다."""
     if not text or not isinstance(text, str):
         return []
@@ -99,50 +99,49 @@ def extract_family_relations_from_text(text):
         return translate_hanja_name(n).strip() if re.search(r'[\u4e00-\u9fff]', n) else n.strip()
 
     patterns = [
-        # 1. '유관순도 부친인 유중권의' -> 자녀 -> 부모 (P152_has_parent)
+        # 1. '유관순도 부친인 유중권의' / '유관순의 부친 유중권' / '유관순의 아버지 유중권'
         (
-            r'([가-힣\u4e00-\u9fff]{2,5})(?:[은는이가도을를의\s]+)?부친인\s+([가-힣\u4e00-\u9fff]{2,5})',
+            r'([가-힣\u4e00-\u9fff]{2,4})(?:[은는이가도을를의\s]+)?(?:부친인|아버지인|아버님인)\s+([가-힣\u4e00-\u9fff]{2,4})',
             'P152_has_parent',
             'child_to_parent',
             '가족 관계(부친)',
         ),
-        # 2. '유관순의 부친 유중권' / '유관순 부 유중권'
         (
-            r'([가-힣\u4e00-\u9fff]{2,5})\s*(?:의)?\s*(?:부친|부)\s+([가-힣\u4e00-\u9fff]{2,5})',
+            r'([가-힣\u4e00-\u9fff]{2,4})\s*(?:의)?\s*(?:부친|아버지|아버님)\s+([가-힣\u4e00-\u9fff]{2,4})',
             'P152_has_parent',
             'child_to_parent',
             '가족 관계(부친)',
         ),
-        # 3. '모친인' / '의 모친'
+        # 2. '모친인' / '의 모친' / '어머니'
         (
-            r'([가-힣\u4e00-\u9fff]{2,5})(?:[은는이가도을를의\s]+)?모친인\s+([가-힣\u4e00-\u9fff]{2,5})',
+            r'([가-힣\u4e00-\u9fff]{2,4})(?:[은는이가도을를의\s]+)?(?:모친인|어머니인|어머님인)\s+([가-힣\u4e00-\u9fff]{2,4})',
             'P152_has_parent',
             'child_to_parent',
             '가족 관계(모친)',
         ),
         (
-            r'([가-힣\u4e00-\u9fff]{2,5})\s*(?:의)?\s*(?:모친|모)\s+([가-힣\u4e00-\u9fff]{2,5})',
+            r'([가-힣\u4e00-\u9fff]{2,4})\s*(?:의)?\s*(?:모친|어머니|어머님)\s+([가-힣\u4e00-\u9fff]{2,4})',
             'P152_has_parent',
             'child_to_parent',
             '가족 관계(모친)',
         ),
-        # 4. '아들' / '자' / '딸'
+        # 3. '아들' / '딸' / '자녀' / '장남' / '차남' / '장녀' / '차녀' (단독 '자'나 '부' 매칭 금지)
         (
-            r'([가-힣\u4e00-\u9fff]{2,5})\s*(?:의)?\s*(?:아들|자녀|자|딸)\s+([가-힣\u4e00-\u9fff]{2,5})',
+            r'([가-힣\u4e00-\u9fff]{2,4})\s*(?:의)?\s*(?:아들|자녀|딸|장남|차남|장녀|차녀|자식|친자|양자)\s+([가-힣\u4e00-\u9fff]{2,4})',
             'P152_has_parent',
             'parent_to_child',
             '가족 관계(자녀)',
         ),
-        # 5. '형' / '아우' / '동생'
+        # 4. '친형인' / '친동생인' / '아우인' / '형인' / '동생인'
         (
-            r'([가-힣\u4e00-\u9fff]{2,5})(?:[은는이가도을를의\s]+)?(?:[^\.\n]{0,25})?\b(?:형|아우|동생)\s+([가-힣\u4e00-\u9fff]{2,5})',
+            r'([가-힣\u4e00-\u9fff]{2,4})(?:[은는이가도을를의\s]+)?(?:친형인|친동생인|아우인|형인|동생인)\s+([가-힣\u4e00-\u9fff]{2,4})',
             'foaf:knows',
             'sibling',
             '형제 관계',
         ),
-        # 6. '동지'
+        # 5. '동지인' / '의 동지'
         (
-            r'([가-힣\u4e00-\u9fff]{2,5})\s*(?:의)?\s*동지\s+([가-힣\u4e00-\u9fff]{2,5})',
+            r'([가-힣\u4e00-\u9fff]{2,4})\s*의\s*동지\s+([가-힣\u4e00-\u9fff]{2,4})',
             'foaf:knows',
             'comrade',
             '동지 관계',
@@ -159,6 +158,8 @@ def extract_family_relations_from_text(text):
             if not c1 or not c2 or c1 == c2:
                 continue
             if len(c1) < 2 or len(c2) < 2 or len(c1) > 4 or len(c2) > 4:
+                continue
+            if valid_names is not None and (c1 not in valid_names or c2 not in valid_names):
                 continue
 
             # 문맥 추출 (해당 문장 또는 전후 문맥)
@@ -987,6 +988,13 @@ def build_ultimate_graph():
             print("📜 사료 본문 문맥(판결문 등) 기반 가족/인물 관계(P152_has_parent 등) 분석 및 주입 중...")
             text_rel_acc = []
             try:
+                # 사전 등록된 실제 인물 엔티티 목록 확보 (오탐 방지)
+                res_persons = session.run("MATCH (p:Person) WHERE p.한글독음 IS NOT NULL RETURN p.명칭 AS name, p.한글명칭 AS hname")
+                valid_persons = set()
+                for rec in res_persons:
+                    if rec["name"]: valid_persons.add(rec["name"])
+                    if rec["hname"]: valid_persons.add(rec["hname"])
+
                 # 1. raw_source_info 출처정보 분석
                 df_source_text = pd.read_sql(
                     'SELECT rowid, "출처정보" AS body FROM raw_source_info WHERE "출처정보" IS NOT NULL',
@@ -994,7 +1002,7 @@ def build_ultimate_graph():
                 )
                 for _, srow in df_source_text.iterrows():
                     body_text = srow.get('body') or ''
-                    rels = extract_family_relations_from_text(body_text)
+                    rels = extract_family_relations_from_text(body_text, valid_names=valid_persons)
                     for r in rels:
                         text_rel_acc.append(r)
 
@@ -1005,7 +1013,7 @@ def build_ultimate_graph():
                 )
                 for _, brow in df_bib_text.iterrows():
                     body_text = brow.get('body') or ''
-                    rels = extract_family_relations_from_text(body_text)
+                    rels = extract_family_relations_from_text(body_text, valid_names=valid_persons)
                     for r in rels:
                         text_rel_acc.append(r)
 
@@ -1023,10 +1031,8 @@ def build_ultimate_graph():
                         batch = [r for r in dedup_rels if r['rel'] == rt]
                         query = """
                             UNWIND $data AS row
-                            MERGE (a:Person:인물 {명칭: row.src})
-                            SET a.name = coalesce(a.name, row.src), a.한글명칭 = coalesce(a.한글명칭, row.src), a.type = '인물'
-                            MERGE (b:Person:인물 {명칭: row.dst})
-                            SET b.name = coalesce(b.name, row.dst), b.한글명칭 = coalesce(b.한글명칭, row.dst), b.type = '인물'
+                            MATCH (a:Person {명칭: row.src})
+                            MATCH (b:Person {명칭: row.dst})
                             MERGE (a)-[r:`REL_TYPE`]->(b)
                             SET r.context = row.context, r.label = row.label
                         """.replace("REL_TYPE", rt)
