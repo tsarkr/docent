@@ -11,12 +11,6 @@ import os, csv, sys, datetime, re
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape, quoteattr
 
-# TOML 읽기 (Python 3.11+ 또는 tomli)
-try:
-    import tomllib
-except ImportError:
-    import tomli as tomllib
-
 try:
     import psycopg2
     from psycopg2.extras import execute_values
@@ -24,37 +18,22 @@ except Exception:
     print('psycopg2 not installed. Install with: pip install psycopg2-binary')
     raise
 
-ROOT = os.getcwd()
-DATA_DIR = os.path.join(ROOT, 'data')
+from pathlib import Path
 
-def _load_secrets(secret_file=None):
-    if secret_file is None:
-        secret_file = os.path.join(ROOT, '.streamlit', 'secrets.toml')
-    if os.path.exists(secret_file):
-        try:
-            with open(secret_file, 'rb') as f:
-                return tomllib.load(f)
-        except Exception:
-            return {}
-    return {}
+# Ensure workspace root is in sys.path
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
+from scripts.config import setting, ROOT, SECRETS
 
-def _secret_or_env(key, default='', secrets_dict=None):
-    val = os.getenv(key)
-    if val:
-        return str(val)
-    if secrets_dict and key in secrets_dict:
-        return str(secrets_dict[key])
-    return str(default) if default else ''
+DATA_DIR = str(ROOT / 'data')
 
-
-SECRETS = _load_secrets()
-
-PGHOST = _secret_or_env('PG_HOST', 'localhost', SECRETS)
-PGPORT = int(_secret_or_env('PG_PORT', '5432', SECRETS))
-PGUSER = _secret_or_env('PG_USER', 'postgres', SECRETS)
-PGPASSWORD = _secret_or_env('PG_PASSWORD', '', SECRETS)
-PGDATABASE = _secret_or_env('PG_DATABASE', 'postgres', SECRETS)
+PGHOST = setting('PG_HOST', 'localhost')
+PGPORT = int(setting('PG_PORT', '5432'))
+PGUSER = setting('PG_USER', 'postgres')
+PGPASSWORD = setting('PG_PASSWORD', '')
+PGDATABASE = setting('PG_DATABASE', 'postgres')
 TEI_TABLES = os.getenv('TEI_TABLES', '').strip()
 TEI_TABLE_PREFIX = os.getenv('TEI_TABLE_PREFIX', 'raw_').strip()
 

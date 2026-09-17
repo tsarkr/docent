@@ -81,4 +81,4 @@ ob_start(function ($buffer) {
     return str_replace(array_keys($replacements), array_values($replacements), $buffer);
 });
 
-require_once __DIR__ . '/index.php';
+require_once __DIR__ . '/docent.php';

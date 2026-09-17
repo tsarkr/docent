@@ -71,6 +71,17 @@ function docent_sanitize_text($value, $max_len = 255, $allow_newlines = false) {
     return trim($text);
 }
 
+function docent_escape_lucene($term) {
+    $chars = ['\\', '+', '-', '&&', '||', '!', '(', ')', '{', '}', '[', ']', '^', '"', '~', '*', '?', ':', '/'];
+    $escaped = ['\\\\', '\+', '\-', '\&&', '\||', '\!', '\(', '\)', '\{', '\}', '\[', '\]', '\^', '\"', '\~', '\*', '\?', '\:', '\/'];
+    $term = str_replace($chars, $escaped, (string)$term);
+    $term = trim($term);
+    if (in_array(strtoupper($term), ['AND', 'OR', 'NOT'], true)) {
+        $term = '"' . $term . '"';
+    }
+    return $term;
+}
+
 function docent_decode_json_array($key, $max_items = 50, $max_len = 500) {
     $raw = $_POST[$key] ?? '[]';
     if (!is_string($raw)) {
@@ -396,8 +407,10 @@ if (isset($_GET['ajax'])) {
             
             foreach ($keywords as $kw) {
                 if (empty($kw)) continue;
+                $escaped_kw = docent_escape_lucene($kw);
+                if ($escaped_kw === '') continue;
                 try {
-                    $res1 = $client->run($search_query, ['term' => $kw]);
+                    $res1 = $client->run($search_query, ['term' => $escaped_kw]);
                 } catch (Throwable $fulltextError) {
                     $res1 = $client->run($fallback_search_query, ['term' => $kw]);
                 }
@@ -472,18 +485,41 @@ if (isset($_GET['ajax'])) {
 
             if (!empty($found_ids)) {
                 $found_ids = array_unique($found_ids);
+                // 카테시안 곱을 제거하고 인접 엣지와 사건 동반참여자를 안전하게 서브쿼리로 제한
                 $graph_query = "
                     MATCH (n)
                     WHERE any(k IN ['id','명칭','한글독음','한글명칭','name','title','uid'] WHERE n[k] IS NOT NULL AND toString(n[k]) IN \$search_ids)
-                    OPTIONAL MATCH (n)-[r]-(m)
-                    WITH n, r, m, labels(n) as n_labels, labels(m) as m_labels
-                    OPTIONAL MATCH (n)-[:P14_carried_out_by|P11_had_participant]-(e:사건)-[:P14_carried_out_by|P11_had_participant]-(p:인물)
-                    WHERE n:인물 AND n <> p
-                    RETURN DISTINCT n, r, m, n_labels, m_labels, e, p, labels(e) as e_labels, labels(p) as p_labels, r.context as rel_context
+                    CALL (n) {
+                        OPTIONAL MATCH (n)-[r]-(m)
+                        RETURN r, m, labels(m) as m_labels, r.context as rel_context
+                        LIMIT 50
+                    }
+                    CALL (n) {
+                        OPTIONAL MATCH (n)-[:P14_carried_out_by]-(e:사건)-[:P14_carried_out_by]-(p:인물)
+                        WHERE n:인물 AND n <> p
+                        RETURN e, p, labels(e) as e_labels, labels(p) as p_labels
+                        LIMIT 30
+                    }
+                    RETURN DISTINCT n, labels(n) as n_labels, r, m, m_labels, rel_context, e, p, e_labels, p_labels
                     LIMIT 100
                 ";
 
-                $res2 = $client->run($graph_query, ['search_ids' => $found_ids]);
+                // 타임아웃 또는 서브쿼리 미지원 시 초고속 안전 fallback
+                $fallback_graph_query = "
+                    MATCH (n)
+                    WHERE any(k IN ['id','명칭','한글독음','한글명칭','name','title','uid'] WHERE n[k] IS NOT NULL AND toString(n[k]) IN \$search_ids)
+                    OPTIONAL MATCH (n)-[r]-(m)
+                    RETURN DISTINCT n, labels(n) as n_labels, r, m, labels(m) as m_labels, r.context as rel_context, null as e, null as p, [] as e_labels, [] as p_labels
+                    LIMIT 100
+                ";
+
+                try {
+                    $res2 = $client->run($graph_query, ['search_ids' => $found_ids]);
+                } catch (Throwable $queryErr) {
+                    error_log(sprintf('Neo4j graph_query failed (%s), falling back to safe simple query', $queryErr->getMessage()));
+                    $res2 = $client->run($fallback_graph_query, ['search_ids' => $found_ids]);
+                }
+
                 foreach ($res2 as $rec) {
                     $n = $rec->get('n'); $m = $rec->get('m'); $r = $rec->get('r');
                     $e = $rec->get('e'); $p = $rec->get('p');
@@ -518,7 +554,7 @@ if (isset($_GET['ajax'])) {
                         $e_nid = add_node_to_map($nodes, $e, $rec->get('e_labels'));
                         $p_nid = add_node_to_map($nodes, $p, $rec->get('p_labels'));
                         if ($n_nid && $e_nid) $edges[] = ["from" => $n_nid, "to" => $e_nid, "type" => "P14_carried_out_by", "label" => docent_t("수행/참여", "Performed/Participated")];
-                        if ($e_nid && $p_nid) $edges[] = ["from" => $e_nid, "to" => $p_nid, "type" => "P7_took_place_at", "label" => docent_t("발생 장소", "Location")];
+                        if ($e_nid && $p_nid) $edges[] = ["from" => $e_nid, "to" => $p_nid, "type" => "P14_carried_out_by", "label" => docent_t("수행/참여", "Performed/Participated")];
                     }
                 }
             }

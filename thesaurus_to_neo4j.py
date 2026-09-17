@@ -13,6 +13,9 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parent
+
+from scripts.config import load_secrets, setting, SECRETS
+
 DEFAULT_CSV = ROOT / "data" / "교육부 국사편찬위원회_한국역사용어시소러스 정보_20211028.csv"
 TARGET_PERIODS = {"일제시기", "근대", "근대-현대"}
 REQUIRED_COLUMNS = {
@@ -26,38 +29,6 @@ REQUIRED_COLUMNS = {
 DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
 OLLAMA_BATCH_SIZE = 100
-
-
-def load_secrets() -> dict[str, Any]:
-    """Read the repository's Streamlit secrets file when it is available."""
-    secret_path = ROOT / ".streamlit" / "secrets.toml"
-    if not secret_path.exists():
-        return {}
-    try:
-        try:
-            import tomllib
-        except ModuleNotFoundError:
-            import tomli as tomllib
-        with secret_path.open("rb") as secret_file:
-            values = tomllib.load(secret_file)
-        return values if isinstance(values, dict) else {}
-    except Exception as exc:
-        print(f"경고: secrets.toml을 읽지 못했습니다: {exc}", file=sys.stderr)
-        return {}
-
-
-SECRETS = load_secrets()
-
-
-def setting(name: str, default: str = "") -> str:
-    """Return an environment value first, then a flat TOML value, then default."""
-    environment_value = os.getenv(name)
-    if environment_value:
-        return environment_value
-    secret_value = SECRETS.get(name)
-    if secret_value is not None and str(secret_value):
-        return str(secret_value)
-    return default
 
 
 def read_thesaurus_csv(csv_path: Path) -> list[dict[str, str]]:

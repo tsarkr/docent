@@ -1,7 +1,6 @@
 import argparse
 import psycopg2
 from pathlib import Path
-import tomllib
 import re
 import json
 import sys  
@@ -11,6 +10,13 @@ import hanja
 from xml.etree import ElementTree as ET
 from langchain_ollama import OllamaLLM
 from langchain_core.prompts import ChatPromptTemplate
+
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from scripts.config import ROOT, get_pg_connection
+from scripts.hanja_utils import translate_hanja_name
 
 BIBLIOGRAPHY_PERSON_FIELDS = {
     '작성자', '발신자', '수신자', '수신자2', '상위자료_작성자', '피고인', '관련인물', '인물'
@@ -50,8 +56,7 @@ BIBLIOGRAPHY_TITLE_KOREAN = {
 
 class LocalDocentEngine:
     def __init__(self):
-        self.secrets = self._load_secrets()
-        self.conn = self._get_conn()
+        self.conn = get_pg_connection()
         self.cur = self.conn.cursor()  
         self.done_status = 'REFINED'
         self.interrupted = False  
@@ -68,16 +73,6 @@ class LocalDocentEngine:
     def _handle_signal(self, signum, frame):
         print("\n\n🛑 [인터럽트] 주인님, Ctrl+C 입력을 감지했습니다. 현재 건까지만 안전하게 커밋하고 정지합니다...")
         self.interrupted = True
-
-    def _load_secrets(self):
-        path = Path(__file__).resolve().parent.parent / '.streamlit' / 'secrets.toml'
-        with open(path, 'rb') as f: return tomllib.load(f)
-
-    def _get_conn(self):
-        return psycopg2.connect(
-            host=self.secrets.get('PG_HOST'), user=self.secrets.get('PG_USER'),
-            password=self.secrets.get('PG_PASSWORD'), dbname=self.secrets.get('PG_DATABASE')
-        )
 
     def _table_has_column(self, table_name, column_name):
         self.cur.execute(
@@ -97,36 +92,11 @@ class LocalDocentEngine:
             print(f"  [안내] {table_name} 테이블에 'tei_status' 컬럼을 신규 생성했습니다.")
 
     def _clean_and_pre_tag_hanja(self, text):
-        text = re.sub(r'</?(term|foreign|gloss|persName)[^>]*>', '', text)
+        text = re.sub(r'</?(?:term|foreign|gloss|persName)[^>]*>', '', text)
         
         def replace_hanja(match):
             word = match.group(0)
-            reading = hanja.translate(word, 'substitution')
-            
-            if word.startswith('金') and reading.startswith('금'):
-                reading = '김' + reading[1:]
-                
-            if word.startswith('丸山') and reading.startswith('환산'):
-                reading = reading.replace('환산', '마루야마')
-            elif word.startswith('楠') and reading.startswith('남'):
-                reading = reading.replace('남', '구스노키')
-
-            if len(reading) >= 2:
-                first_char = reading[0]
-                if first_char in ('리', '니', '랴', '냐', '려', '녀', '료', '뇨', '류', '뉴'):
-                    trans_map = {
-                        '리': '이', '니': '이', '랴': '야', '냐': '야', 
-                        '려': '여', '녀': '여', '료': '요', '뇨': '요', 
-                        '류': '유', '뉴': '유'
-                    }
-                    reading = trans_map[first_char] + reading[1:]
-                elif first_char in ('라', '러', '로', '루', '뢰', '래', '레', '릉'):
-                    trans_map = {
-                        '라': '나', '러': '너', '로': '노', '루': '누', 
-                        '뢰': '뇌', '래': '내', '레': '네', '릉': '능'
-                    }
-                    reading = trans_map[first_char] + reading[1:]
-                    
+            reading = translate_hanja_name(word)
             return f'<term><foreign xml:lang="zh-Hani">{word}</foreign><gloss>{reading}</gloss></term>'
             
         return re.sub(r'[\u4e00-\u9fff]+', replace_hanja, text)
@@ -135,7 +105,7 @@ class LocalDocentEngine:
         if not name: return False
         name = str(name).strip()
         if len(name) <= 1: return False
-        strict_geography = {'장연', '온양', '비안', '청단', '장련', '삭주', '금천', '양덕', '함흥', '의주', '안악', '시흥', '고양', '혼춘', '용정'}
+        strict_geography = {'장연', '온양', '비안', '청단', '장련', '삭주', '금천', '양덕', '함흥', '의주', '안악', '시흥', '고양', '혼춘', '용정', '평양'}
         if name in strict_geography: return False
         if re.search(r'([_\-\.\d]|[A-Za-z])', name): return False
         if len(name) > 2 and name.endswith(('군', '면', '읍', '리', '시', '구')): return False
@@ -175,21 +145,9 @@ class LocalDocentEngine:
         if re.search(r'[가-힣]', candidate) and re.search(r'[\u4e00-\u9fff]', candidate):
             hangul_parts = re.findall(r'[가-힣]+', candidate)
             if hangul_parts: candidate = hangul_parts[-1]
-        candidate = re.sub(r'(으로부터|으로써|이라고|라고|에게서|에게|께|에서|까지|부터|보다|만|밖에|조차|마저|도|은|는|이|가|을|를|의|와|과|에|로|으로|처럼|같이|및|등)$', '', candidate)
+        candidate = re.sub(r'(으로부터|로부터|으로써|이라고|라고|에게서|에게|께|에서|까지|부터|보다|만|밖에|조차|마저|도|은|는|이|가|을|를|의|와|과|에|로|으로|처럼|같이|및|등)$', '', candidate)
         if re.search(r'[\u4e00-\u9fff]', candidate) and not re.search(r'[가-힣]', candidate):
-            reading = hanja.translate(candidate, 'substitution')
-            if candidate.startswith('金') and reading.startswith('금'): reading = '김' + reading[1:]
-            if candidate.startswith('丸山') and reading.startswith('환산'): reading = reading.replace('환산', '마루야마')
-            elif candidate.startswith('楠') and reading.startswith('남'): reading = reading.replace('남', '구스노키')
-            if len(reading) >= 2:
-                first_char = reading[0]
-                if first_char in ('리', '니', '랴', '냐', '려', '녀', '료', '뇨', '류', '뉴'):
-                    trans_map = {'리': '이', '니': '이', '랴': '야', '냐': '야', '려': '여', '녀': '여', '료': '요', '뇨': '요', '류': '유', '뉴': '유'}
-                    reading = trans_map[first_char] + reading[1:]
-                elif first_char in ('라', '러', '로', '루', '뢰', '래', '레', '릉'):
-                    trans_map = {'라': '나', '러': '너', '로': '노', '루': '누', '뢰': '뇌', '래': '내', '레': '네', '릉': '능'}
-                    reading = trans_map[first_char] + reading[1:]
-            candidate = reading
+            candidate = translate_hanja_name(candidate)
         return candidate.strip()
 
     def _split_compound_korean_name_tokens(self, token):

@@ -1,5 +1,4 @@
 import os
-import tomli
 import asyncio
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -8,29 +7,22 @@ import mcp.server.stdio
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 
-# Load secrets from Streamlit
-secrets_path = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.toml")
-secrets = {}
-try:
-    with open(secrets_path, "rb") as f:
-        secrets = tomli.load(f)
-except Exception as e:
-    print(f"Failed to load secrets: {e}")
+from scripts.config import load_secrets, SECRETS
 
 # Connection helpers
 def get_pg_connection():
     return psycopg2.connect(
-        host=secrets.get("PG_HOST", "localhost"),
-        port=int(secrets.get("PG_PORT", 5432)),
-        dbname=secrets.get("PG_DATABASE", "postgres"),
-        user=secrets.get("PG_USER", "postgres"),
-        password=secrets.get("PG_PASSWORD", "")
+        host=SECRETS.get("PG_HOST", "localhost"),
+        port=int(SECRETS.get("PG_PORT", 5432)),
+        dbname=SECRETS.get("PG_DATABASE", "postgres"),
+        user=SECRETS.get("PG_USER", "postgres"),
+        password=SECRETS.get("PG_PASSWORD", "")
     )
 
 def get_neo4j_driver():
     return GraphDatabase.driver(
-        secrets.get("NEO4J_URI", "bolt://localhost:7687"),
-        auth=(secrets.get("NEO4J_USER", "neo4j"), secrets.get("NEO4J_PASSWORD", ""))
+        SECRETS.get("NEO4J_URI", "bolt://localhost:7687"),
+        auth=(SECRETS.get("NEO4J_USER", "neo4j"), SECRETS.get("NEO4J_PASSWORD", ""))
     )
 
 # Initialize MCP Server

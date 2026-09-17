@@ -23,40 +23,14 @@ from neo4j import GraphDatabase
 from neo4j.exceptions import ClientError
 from sqlalchemy import create_engine, text
 import time
+import sys
+from pathlib import Path
 
-try:
-    import tomllib
-except ImportError:
-    import tomli as tomllib
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
-
-def _load_secrets(secret_file=None):
-    if secret_file is None:
-        secret_file = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            '.streamlit',
-            'secrets.toml',
-        )
-
-    if os.path.exists(secret_file):
-        try:
-            with open(secret_file, 'rb') as f:
-                return tomllib.load(f)
-        except Exception as e:
-            print(f"⚠️ secrets.toml 읽기 실패: {e}")
-    return {}
-
-
-def _secret_or_env(key, default="", secrets_dict=None):
-    val = os.getenv(key)
-    if val:
-        return str(val)
-    if secrets_dict and key in secrets_dict:
-        return str(secrets_dict[key])
-    return str(default) if default else ""
-
-
-SECRETS = _load_secrets()
+from scripts.config import load_secrets, setting, get_pg_config, get_neo4j_config, SECRETS, ROOT
 
 RELATION_MAPPING = {
     "부친": "P152_has_parent",
@@ -105,26 +79,129 @@ def _is_identifier_column(column):
     normalized = str(column).strip()
     return normalized.endswith(("아이디", "코드", "id", "ID", "code", "Code"))
 
-PG_CONFIG = {
-    "host": _secret_or_env("PG_HOST", "localhost", SECRETS),
-    "port": _secret_or_env("PG_PORT", "5432", SECRETS),
-    "database": _secret_or_env("PG_DATABASE", "postgres", SECRETS),
-    "user": _secret_or_env("PG_USER", "postgres", SECRETS),
-    "password": _secret_or_env("PG_PASSWORD", "", SECRETS),
-}
 
-NEO4J_CONFIG = {
-    "uri": _secret_or_env("NEO4J_URI", "bolt://localhost:7687", SECRETS),
-    "user": _secret_or_env("NEO4J_USER", "neo4j", SECRETS),
-    "password": _secret_or_env("NEO4J_PASSWORD", "", SECRETS),
-}
+def extract_family_relations_from_text(text):
+    """사료 본문 텍스트에서 인물 간 가족(P152_has_parent 등) 및 혈연/지인 관계를 추출합니다."""
+    if not text or not isinstance(text, str):
+        return []
+
+    def clean_name(n):
+        if not n:
+            return ''
+        n = str(n).strip()
+        n = re.sub(r'[\s\(\)\[\]\{\}<>]+', '', n)
+        n = re.sub(
+            r'(으로부터|으로써|이라고|라고|에게서|에게|께|에서|까지|부터|보다|만|밖에|조차|마저|도|은|는|이|가|을|를|의|와|과|에|로|으로|처럼|같이|및|등)$',
+            '',
+            n,
+        )
+        from scripts.hanja_utils import translate_hanja_name
+        return translate_hanja_name(n).strip() if re.search(r'[\u4e00-\u9fff]', n) else n.strip()
+
+    patterns = [
+        # 1. '유관순도 부친인 유중권의' -> 자녀 -> 부모 (P152_has_parent)
+        (
+            r'([가-힣\u4e00-\u9fff]{2,5})(?:[은는이가도을를의\s]+)?부친인\s+([가-힣\u4e00-\u9fff]{2,5})',
+            'P152_has_parent',
+            'child_to_parent',
+            '가족 관계(부친)',
+        ),
+        # 2. '유관순의 부친 유중권' / '유관순 부 유중권'
+        (
+            r'([가-힣\u4e00-\u9fff]{2,5})\s*(?:의)?\s*(?:부친|부)\s+([가-힣\u4e00-\u9fff]{2,5})',
+            'P152_has_parent',
+            'child_to_parent',
+            '가족 관계(부친)',
+        ),
+        # 3. '모친인' / '의 모친'
+        (
+            r'([가-힣\u4e00-\u9fff]{2,5})(?:[은는이가도을를의\s]+)?모친인\s+([가-힣\u4e00-\u9fff]{2,5})',
+            'P152_has_parent',
+            'child_to_parent',
+            '가족 관계(모친)',
+        ),
+        (
+            r'([가-힣\u4e00-\u9fff]{2,5})\s*(?:의)?\s*(?:모친|모)\s+([가-힣\u4e00-\u9fff]{2,5})',
+            'P152_has_parent',
+            'child_to_parent',
+            '가족 관계(모친)',
+        ),
+        # 4. '아들' / '자' / '딸'
+        (
+            r'([가-힣\u4e00-\u9fff]{2,5})\s*(?:의)?\s*(?:아들|자녀|자|딸)\s+([가-힣\u4e00-\u9fff]{2,5})',
+            'P152_has_parent',
+            'parent_to_child',
+            '가족 관계(자녀)',
+        ),
+        # 5. '형' / '아우' / '동생'
+        (
+            r'([가-힣\u4e00-\u9fff]{2,5})(?:[은는이가도을를의\s]+)?(?:[^\.\n]{0,25})?\b(?:형|아우|동생)\s+([가-힣\u4e00-\u9fff]{2,5})',
+            'foaf:knows',
+            'sibling',
+            '형제 관계',
+        ),
+        # 6. '동지'
+        (
+            r'([가-힣\u4e00-\u9fff]{2,5})\s*(?:의)?\s*동지\s+([가-힣\u4e00-\u9fff]{2,5})',
+            'foaf:knows',
+            'comrade',
+            '동지 관계',
+        ),
+    ]
+
+    results = []
+    for pat, rel, dir_type, label in patterns:
+        for m in re.finditer(pat, text):
+            raw_c1 = m.group(1)
+            raw_c2 = m.group(2)
+            c1 = clean_name(raw_c1)
+            c2 = clean_name(raw_c2)
+            if not c1 or not c2 or c1 == c2:
+                continue
+            if len(c1) < 2 or len(c2) < 2 or len(c1) > 4 or len(c2) > 4:
+                continue
+
+            # 문맥 추출 (해당 문장 또는 전후 문맥)
+            start = max(0, text.rfind('\n', 0, m.start()))
+            dot_start = text.rfind('.', 0, m.start())
+            if dot_start != -1 and dot_start > start:
+                start = dot_start + 1
+            end = text.find('.', m.end())
+            if end == -1:
+                end = text.find('\n', m.end())
+            if end == -1:
+                end = len(text)
+            ctx = text[start : end + 1].strip()
+
+            if dir_type == 'child_to_parent':
+                src, dst = c1, c2
+            elif dir_type == 'parent_to_child':
+                src, dst = c2, c1
+            else:
+                src, dst = c1, c2
+
+            results.append({
+                'src': src,
+                'dst': dst,
+                'rel': rel,
+                'label': label,
+                'context': ctx,
+            })
+    return results
+
+PG_CONFIG = get_pg_config()
+
+NEO4J_CONFIG = get_neo4j_config()
 
 encoded_pass = urllib.parse.quote_plus(PG_CONFIG["password"])
 pg_engine = create_engine(
-    f"postgresql://{PG_CONFIG['user']}:{encoded_pass}@{PG_CONFIG['host']}:5432/{PG_CONFIG['database']}"
+    f"postgresql://{PG_CONFIG['user']}:{encoded_pass}@{PG_CONFIG['host']}:{PG_CONFIG['port']}/{PG_CONFIG['database']}"
 )
 neo4j_driver = GraphDatabase.driver(
-    NEO4J_CONFIG["uri"], auth=(NEO4J_CONFIG["user"], NEO4J_CONFIG["password"])
+    NEO4J_CONFIG["uri"],
+    auth=(NEO4J_CONFIG["user"], NEO4J_CONFIG["password"]),
+    max_connection_lifetime=300,
+    connection_timeout=120,
 )
 
 
@@ -133,16 +210,21 @@ def safe_run(session, cypher, **params):
     "MATCH (a ...),(b ...)" -> "MATCH (a ...) MATCH (b ...)" to avoid
     accidental cartesian products. Returns the underlying result object.
     """
-    try:
-        if isinstance(cypher, str) and 'MATCH' in cypher and '),(' in cypher:
-            new = cypher.replace('),(', ') MATCH (')
-            if new != cypher:
-                print('⚠️ 안전조치: 분리된 MATCH 패턴을 더 안전한 형태로 변환합니다.')
-                cypher = new
-        return session.run(cypher, **params)
-    except Exception:
-        # re-raise for caller to handle
-        raise
+    for attempt in range(3):
+        try:
+            if isinstance(cypher, str) and 'MATCH' in cypher and '),(' in cypher:
+                new = cypher.replace('),(', ') MATCH (')
+                if new != cypher:
+                    print('⚠️ 안전조치: 분리된 MATCH 패턴을 더 안전한 형태로 변환합니다.')
+                    cypher = new
+            return session.run(cypher, **params)
+        except Exception as e:
+            err_msg = str(e).lower()
+            if attempt < 2 and ('timed out' in err_msg or 'defunct' in err_msg or 'unavailable' in err_msg or 'broken pipe' in err_msg):
+                print(f"⚠️ 연결 지연/단절 발생, {attempt+1}회 재시도 중: {e}")
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise
 
 
 def _read_table_with_mapping(table_name, mapping, required=None):
@@ -172,7 +254,7 @@ def _read_table_with_mapping(table_name, mapping, required=None):
     return out
 
 
-def _run_batches(session, cypher, records, batch_size=20000, extra_params=None):
+def _run_batches(session, cypher, records, batch_size=2000, extra_params=None):
     extra_params = extra_params or {}
     total = len(records)
     if total == 0:
@@ -184,15 +266,23 @@ def _run_batches(session, cypher, records, batch_size=20000, extra_params=None):
         params = {"data": chunk, **extra_params}
         safe_run(session, cypher, **params).consume()
         written += len(chunk)
+        if total >= 5000 and (written % 10000 == 0 or written == total):
+            print(f"    배치 진행: {written}/{total} ({written*100//total}%)")
     return written
 
 
 def _ensure_schema(session):
     import re
     statements = [
+        "DROP CONSTRAINT tei_place_name IF EXISTS",
+        "DROP CONSTRAINT tei_person_name IF EXISTS",
+        "DROP CONSTRAINT tei_event_title IF EXISTS",
+        "DROP CONSTRAINT document_id IF EXISTS",
         "CREATE CONSTRAINT place_id IF NOT EXISTS FOR (p:Place) REQUIRE p.id IS UNIQUE",
         "CREATE CONSTRAINT event_id IF NOT EXISTS FOR (e:Event) REQUIRE e.id IS UNIQUE",
         "CREATE CONSTRAINT document_id IF NOT EXISTS FOR (m:Document) REQUIRE m.id IS UNIQUE",
+        "CREATE CONSTRAINT saryo_id IF NOT EXISTS FOR (m:사료) REQUIRE m.id IS UNIQUE",
+        "CREATE CONSTRAINT mungun_id IF NOT EXISTS FOR (m:문건) REQUIRE m.id IS UNIQUE",
         "CREATE CONSTRAINT org_id IF NOT EXISTS FOR (o:Organization) REQUIRE o.id IS UNIQUE",
         "CREATE CONSTRAINT person_name IF NOT EXISTS FOR (i:Person) REQUIRE i.명칭 IS UNIQUE",
         "CREATE CONSTRAINT person_uid IF NOT EXISTS FOR (i:Person) REQUIRE i.uid IS UNIQUE",
@@ -202,7 +292,7 @@ def _ensure_schema(session):
         "CREATE INDEX place_korean_name IF NOT EXISTS FOR (p:장소) ON (p.한글명칭)",
         "DROP INDEX namesIndex IF EXISTS",
         "CREATE FULLTEXT INDEX namesIndex IF NOT EXISTS FOR (n:Person|Place|Event|Organization|Document|Thesaurus) ON EACH [n.명칭, n.사건명, n.제목, n.name, n.title, n.한글독음, n.한글명칭, n.description, n.설명, n.hanja, n.category]",
-        "CREATE VECTOR INDEX samil_docent_vector_idx IF NOT EXISTS FOR (n) ON (n.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 768, `vector.similarity_function`: 'cosine'}}",
+        "CREATE VECTOR INDEX samil_docent_vector_idx IF NOT EXISTS FOR (t:Thesaurus) ON (t.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 768, `vector.similarity_function`: 'cosine'}}",
     ]
 
     for statement in statements:
@@ -563,11 +653,12 @@ def build_ultimate_graph():
                 })
 
         if source_records:
+            print(f"  ✓ {len(source_records)}개 사료/문건 데이터 주입 중...")
             _run_batches(
                 session,
                 """
                 UNWIND $data AS row
-                MERGE (m:Document:사료 {id: row.id})
+                MERGE (m:Document:사료:문건 {id: row.id})
                 SET m.원본id = row.source_id,
                     m.제목 = row.title,
                     m.title = row.title,
@@ -576,7 +667,7 @@ def build_ultimate_graph():
                     m.원천테이블 = row.source_table
                 """,
                 source_records,
-                batch_size=5000,
+                batch_size=2000,
             )
         else:
             print("⚠️ 문건 TEI에서 생성할 레코드가 없습니다.")
@@ -594,7 +685,7 @@ def build_ultimate_graph():
                     {
                         'id': ['id', '아이디', '기구ID', '기구_id', '기구id'],
                         'name': ['name', '명칭', '기구명', '기구명칭'],
-                        'parent_id': ['parent_id', '상위ID', '상위_아이디', 'parent'],
+                        'parent_id': ['parent_id', '상위ID', '상위_아이디', 'parent', '상위기구ID', '상위기구id'],
                     },
                     required=['id', 'name'],
                 )
@@ -682,11 +773,16 @@ def build_ultimate_graph():
                             UNWIND $data AS row
                             MATCH (e:Event {id: row.event_id})
                             MERGE (p:Person:인물 {명칭: row.person_name})
-                            ON CREATE SET p.name = row.person_name, p.type = '인물', p.한글독음 = row.gloss
-                            ON MATCH SET p.name = coalesce(p.name, row.person_name), p.type = '인물', p.한글독음 = coalesce(p.한글독음, row.gloss)
+                            ON CREATE SET p.name = row.person_name, p.type = '인물', p.한글독음 = row.gloss, p.한글명칭 = coalesce(row.gloss, row.person_name)
+                            ON MATCH SET p.name = coalesce(p.name, row.person_name), p.type = '인물', p.한글독음 = coalesce(p.한글독음, row.gloss), p.한글명칭 = coalesce(p.한글명칭, row.gloss, row.person_name)
                             MERGE (e)-[r:P14_carried_out_by]->(p)
                             SET r.context = row.context_text,
                                 r.source_tag = 'persName'
+                            WITH p, row
+                            WHERE row.gloss IS NOT NULL AND row.gloss <> '' AND row.gloss <> row.person_name
+                            MERGE (p_ko:Person:인물 {명칭: row.gloss})
+                            SET p_ko.name = coalesce(p_ko.name, row.gloss), p_ko.type = '인물', p_ko.한글명칭 = row.gloss, p_ko.한자 = row.person_name
+                            MERGE (p)-[:동일인물]->(p_ko)
                             """,
                             person_acc,
                             batch_size=2000,
@@ -887,6 +983,59 @@ def build_ultimate_graph():
 
                 except Exception as e:
                     print(f"⚠️ {table_name} 관계 분석 중 오류: {e}")
+
+            print("📜 사료 본문 문맥(판결문 등) 기반 가족/인물 관계(P152_has_parent 등) 분석 및 주입 중...")
+            text_rel_acc = []
+            try:
+                # 1. raw_source_info 출처정보 분석
+                df_source_text = pd.read_sql(
+                    'SELECT rowid, "출처정보" AS body FROM raw_source_info WHERE "출처정보" IS NOT NULL',
+                    pg_engine
+                )
+                for _, srow in df_source_text.iterrows():
+                    body_text = srow.get('body') or ''
+                    rels = extract_family_relations_from_text(body_text)
+                    for r in rels:
+                        text_rel_acc.append(r)
+
+                # 2. raw_bibliography 문서요약 분석
+                df_bib_text = pd.read_sql(
+                    'SELECT rowid, "문서요약" AS body FROM raw_bibliography WHERE "문서요약" IS NOT NULL',
+                    pg_engine
+                )
+                for _, brow in df_bib_text.iterrows():
+                    body_text = brow.get('body') or ''
+                    rels = extract_family_relations_from_text(body_text)
+                    for r in rels:
+                        text_rel_acc.append(r)
+
+                if text_rel_acc:
+                    # 중복 제거 (src, dst, rel 기준)
+                    dedup_dict = {}
+                    for r in text_rel_acc:
+                        key = (r['src'], r['dst'], r['rel'])
+                        if key not in dedup_dict:
+                            dedup_dict[key] = r
+                    dedup_rels = list(dedup_dict.values())
+
+                    rel_types_acc = set(r['rel'] for r in dedup_rels)
+                    for rt in rel_types_acc:
+                        batch = [r for r in dedup_rels if r['rel'] == rt]
+                        query = """
+                            UNWIND $data AS row
+                            MERGE (a:Person:인물 {명칭: row.src})
+                            SET a.name = coalesce(a.name, row.src), a.한글명칭 = coalesce(a.한글명칭, row.src), a.type = '인물'
+                            MERGE (b:Person:인물 {명칭: row.dst})
+                            SET b.name = coalesce(b.name, row.dst), b.한글명칭 = coalesce(b.한글명칭, row.dst), b.type = '인물'
+                            MERGE (a)-[r:`REL_TYPE`]->(b)
+                            SET r.context = row.context, r.label = row.label
+                        """.replace("REL_TYPE", rt)
+                        _run_batches(session, query, batch, batch_size=2000)
+                    print(f"    ✓ 사료 본문 문맥에서 {len(dedup_rels)}개 인물 관계(가족/혈연/지인 등) 추가 완료")
+                else:
+                    print("    ℹ️ 사료 본문 문맥에서 추출된 인물 관계가 없습니다.")
+            except Exception as e:
+                print(f"⚠️ 사료 본문 문맥 관계 분석 중 오류: {e}")
 
             # CIDOC-CRM 매핑 적용: Postgres의 tei_cidoc_mappings 테이블에서 TTL 불러와 병합
             print("🔧 CIDOC 매핑 적용을 시도합니다 (Postgres 테이블: tei_cidoc_mappings)")

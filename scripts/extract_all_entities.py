@@ -1,26 +1,20 @@
 import psycopg2
 from pathlib import Path
-import tomllib
 import re
 import csv
 import sys
 
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from scripts.config import ROOT, load_secrets, get_pg_connection
+
 class TeiEntityExtractor:
     def __init__(self):
-        self.secrets = self._load_secrets()
-        self.conn = self._get_conn()
+        self.conn = get_pg_connection()
         self.cur = self.conn.cursor()
-        self.output_csv = "/Users/gyungmin/Dev/docent/Extracted_Historical_Entities.csv"
-        
-    def _load_secrets(self):
-        path = Path(__file__).resolve().parent.parent / '.streamlit' / 'secrets.toml'
-        with open(path, 'rb') as f: return tomllib.load(f)
-
-    def _get_conn(self):
-        return psycopg2.connect(
-            host=self.secrets.get('PG_HOST'), user=self.secrets.get('PG_USER'),
-            password=self.secrets.get('PG_PASSWORD'), dbname=self.secrets.get('PG_DATABASE')
-        )
+        self.output_csv = str(ROOT / 'Extracted_Historical_Entities.csv')
 
     def _parse_inner_text(self, tag_content):
         hanja = ""

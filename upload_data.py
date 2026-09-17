@@ -6,53 +6,12 @@ import re
 import json
 import csv
 
-# TOML 읽기 (Python 3.11+ 또는 tomli)
-try:
-    import tomllib
-except ImportError:
-    import tomli as tomllib
-
-# --- [설정 함수] ---
-def _load_secrets(secret_file=None):
-    """secrets.toml 파일에서 설정 로드"""
-    if secret_file is None:
-        secret_file = os.path.join(os.path.dirname(__file__), '.streamlit', 'secrets.toml')
-    
-    if os.path.exists(secret_file):
-        try:
-            with open(secret_file, 'rb') as f:
-                return tomllib.load(f)
-        except Exception as e:
-            print(f"⚠️ secrets.toml 읽기 실패: {e}")
-    return {}
-
-def _secret_or_env(key, default="", secrets_dict=None):
-    """환경변수 → secrets.toml → 기본값 순서로 설정값 가져오기"""
-    # 1. 환경변수 확인
-    val = os.getenv(key)
-    if val:
-        return str(val)
-    
-    # 2. secrets 딕셔너리에서 확인
-    if secrets_dict and key in secrets_dict:
-        return str(secrets_dict[key])
-    
-    # 3. 기본값 사용
-    return str(default) if default else ""
-
-# 설정 로드
-SECRETS = _load_secrets()
+from scripts.config import load_secrets, setting, get_pg_config, SECRETS, ROOT
 
 # --- [설정구역] ---
-PG_CONFIG = {
-    "host": _secret_or_env("PG_HOST", "11e.kr", SECRETS),
-    "port": _secret_or_env("PG_PORT", "5432", SECRETS),
-    "database": _secret_or_env("PG_DATABASE", "historical", SECRETS),
-    "user": _secret_or_env("PG_USER", "postgres", SECRETS),
-    "password": _secret_or_env("PG_PASSWORD", "", SECRETS)  # secrets.toml에서만 로드
-}
+PG_CONFIG = get_pg_config()
 
-DATA_PATH = "./data"
+DATA_PATH = str(ROOT / "data")
 
 encoded_password = urllib.parse.quote_plus(PG_CONFIG["password"])
 DB_URL = f"postgresql://{PG_CONFIG['user']}:{encoded_password}@{PG_CONFIG['host']}:{PG_CONFIG['port']}/{PG_CONFIG['database']}"

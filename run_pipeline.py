@@ -102,9 +102,13 @@ def run_step(path, args, extra_env=None):
     cmd = [PY, str(path)] + args
     try:
         env = os.environ.copy()
+        current_pythonpath = env.get('PYTHONPATH', '')
+        env['PYTHONPATH'] = (
+            f"{ROOT}:{current_pythonpath}" if current_pythonpath else str(ROOT)
+        )
         if extra_env:
             env.update({k: str(v) for k, v in extra_env.items() if v is not None and str(v) != ''})
-        subprocess.run(cmd, check=True, env=env)
+        subprocess.run(cmd, check=True, env=env, cwd=ROOT)
     except subprocess.CalledProcessError as e:
         print(f'ERROR: step {path} failed with exit {e.returncode}')
         sys.exit(e.returncode)

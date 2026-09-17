@@ -25,42 +25,15 @@ from typing import Any
 import requests
 
 ROOT = Path(__file__).resolve().parent
+
+from scripts.config import load_secrets, setting, SECRETS
+
 DEFAULT_QUERY = "보성사에서 손병희를 명예총재로, 이종일을 단장으로 결성된 천도교 항일비밀결사는?"
 TARGET_NAME = "천도구국단"
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
 DEFAULT_OLLAMA_MODEL = "nomic-embed-text"
 VECTOR_DIMENSION = 768
 TOP_K = 5
-
-
-def load_secrets() -> dict[str, Any]:
-    path = ROOT / ".streamlit" / "secrets.toml"
-    if not path.exists():
-        return {}
-    try:
-        try:
-            import tomllib
-        except ModuleNotFoundError:
-            import tomli as tomllib
-        with path.open("rb") as secret_file:
-            values = tomllib.load(secret_file)
-        return values if isinstance(values, dict) else {}
-    except Exception as exc:
-        print(f"경고: secrets.toml을 읽지 못했습니다: {exc}", file=sys.stderr)
-        return {}
-
-
-SECRETS = load_secrets()
-
-
-def setting(name: str, default: str = "") -> str:
-    value = os.getenv(name)
-    if value:
-        return value
-    secret_value = SECRETS.get(name)
-    if secret_value is not None and str(secret_value):
-        return str(secret_value)
-    return default
 
 
 def section(title: str) -> None:

@@ -9,12 +9,11 @@ tei/
 data/
 
 # Python env
-.venv/
+.venv*/
 env/
 
 # Python cache
-__pycache__
-scripts/__pycache__
+__pycache__/
 
 # Secrets and config
 .env
@@ -26,16 +25,13 @@ scripts/__pycache__
 
 # OS files
 .DS_Store
-__pycache__/graph_builder.cpython-312.pyc
-__pycache__/graph_builder.cpython-312.pyc
-__pycache__/graph_builder.cpython-312.pyc
-__pycache__/graph_builder.cpython-312.pyc
-scripts/__pycache__/tag_tei_with_gemma.cpython-312.pyc
-scripts/__pycache__/tag_tei_with_gemma.cpython-312.pyc
-scripts/__pycache__/tag_tei_with_gemma.cpython-312.pyc
-scripts/tei_to_neo4j.py.bak
+
+# Generated outputs
 CIDOC_Timeline_Mappings.ttl
 Extracted_Historical_Entities.xlsx
 
+# PHP dependencies
 vendor/
+
+# Vector store
 vector_store/

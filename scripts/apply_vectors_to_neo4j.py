@@ -13,15 +13,14 @@ from neo4j import GraphDatabase
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.config import load_secrets, setting
 
 
 def load_config() -> dict[str, Any]:
-    try:
-        import tomllib
-    except ModuleNotFoundError:
-        import tomli as tomllib
-    with (ROOT / ".streamlit" / "secrets.toml").open("rb") as file:
-        return tomllib.load(file)
+    return load_secrets()
 
 
 def setting(config: dict[str, Any], name: str, default: str = "") -> str:

@@ -10,33 +10,15 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-
-def load_secrets() -> dict[str, Any]:
-    secret_path = ROOT / ".streamlit" / "secrets.toml"
-    if not secret_path.exists():
-        return {}
-    try:
-        import tomllib
-    except ModuleNotFoundError:
-        import tomli as tomllib
-    try:
-        with secret_path.open("rb") as secret_file:
-            return tomllib.load(secret_file)
-    except Exception as exc:
-        print(f"경고: secrets.toml을 읽지 못했습니다: {exc}", file=sys.stderr)
-        return {}
-
-
-SECRETS = load_secrets()
-
-
-def setting(name: str, default: str = "") -> str:
-    return str(os.getenv(name) or SECRETS.get(name) or default)
+from scripts.config import load_secrets, setting, SECRETS
 
 
 def json_value(value: Any) -> Any:
@@ -102,8 +84,8 @@ def read_graph_batch(session: Any, last_node_id: int, batch_size: int) -> list[d
     query = """
     MATCH (n)
     WHERE id(n) > $last_node_id
+      AND (NOT n:Thesaurus OR EXISTS((n)--()))
     WITH n ORDER BY id(n) LIMIT $batch_size
-    WHERE NOT n:Thesaurus OR EXISTS((n)--())
     OPTIONAL MATCH (n)-[r]-(target)
     WITH n, id(n) AS node_id,
          collect(CASE WHEN r IS NULL THEN NULL ELSE {
@@ -149,29 +131,65 @@ def ollama_embeddings(texts: list[str], model: str, base_url: str, batch_size: i
     import numpy as np
     import requests
 
+    cleaned_texts = [str(t or "")[:3000] for t in texts]
     vectors = []
     endpoint = f"{base_url.rstrip('/')}/api/embed"
     fallback_endpoint = f"{base_url.rstrip('/')}/api/embeddings"
-    for start in range(0, len(texts), batch_size):
-        batch = texts[start:start + batch_size]
-        response = requests.post(
-            endpoint,
-            json={"model": model, "input": batch},
-            timeout=300,
-        )
-        if response.status_code == 404:
-            for text in batch:
+    for start in range(0, len(cleaned_texts), batch_size):
+        batch = cleaned_texts[start:start + batch_size]
+        payload = None
+        for attempt in range(5):
+            try:
                 response = requests.post(
-                    fallback_endpoint,
-                    json={"model": model, "prompt": text},
+                    endpoint,
+                    json={"model": model, "input": batch},
                     timeout=300,
                 )
+                if response.status_code == 404:
+                    sub_vectors = []
+                    for text in batch:
+                        r = requests.post(
+                            fallback_endpoint,
+                            json={"model": model, "prompt": text},
+                            timeout=300,
+                        )
+                        r.raise_for_status()
+                        sub_vectors.append(r.json()["embedding"])
+                    payload = {"embeddings": sub_vectors}
+                    break
                 response.raise_for_status()
-                vectors.append(response.json()["embedding"])
-            continue
-        response.raise_for_status()
-        payload = response.json()
-        vectors.extend(payload.get("embeddings", []))
+                payload = response.json()
+                break
+            except Exception as exc:
+                if attempt < 4:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                # Fall back to item-by-item if batch fails
+                sub_vectors = []
+                for text in batch:
+                    for item_attempt in range(5):
+                        try:
+                            r = requests.post(
+                                endpoint,
+                                json={"model": model, "input": [text]},
+                                timeout=300,
+                            )
+                            r.raise_for_status()
+                            sub_vectors.append(r.json()["embeddings"][0])
+                            break
+                        except Exception:
+                            if item_attempt < 4:
+                                time.sleep(1 + item_attempt)
+                                continue
+                            sub_vectors.append([0.0] * 768)
+                            break
+                payload = {"embeddings": sub_vectors}
+                break
+
+        if payload and "embeddings" in payload:
+            vectors.extend(payload["embeddings"])
+        else:
+            raise RuntimeError(f"임베딩을 생성하지 못했습니다: start={start}")
 
     if len(vectors) != len(texts):
         raise RuntimeError(f"임베딩 개수 불일치: 문서 {len(texts)}개, 벡터 {len(vectors)}개")
@@ -241,6 +259,7 @@ def main() -> int:
     vectors_path = output_dir / "embeddings.npy"
     temp_metadata_path = output_dir / "metadata.jsonl.tmp"
     temp_vectors_path = output_dir / "embeddings.npy.tmp"
+    checkpoint_path = output_dir / "checkpoint.json"
     try:
         driver.verify_connectivity()
         total_nodes = count_nodes(driver)
@@ -251,7 +270,25 @@ def main() -> int:
         written = 0
         last_node_id = -1
         vectors = None
-        with temp_metadata_path.open("w", encoding="utf-8") as metadata_file:
+        open_mode = "w"
+
+        if checkpoint_path.exists() and temp_metadata_path.exists() and temp_vectors_path.exists():
+            try:
+                cp = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                if cp.get("total_nodes") == total_nodes and cp.get("model") == args.model and cp.get("written", 0) > 0:
+                    written = cp["written"]
+                    last_node_id = cp["last_node_id"]
+                    open_mode = "a"
+                    vectors = np.lib.format.open_memmap(temp_vectors_path, mode="r+")
+                    print(f"이전 작업 재개: {written}/{total_nodes}개 노드부터 이어서 진행합니다.")
+            except Exception as e:
+                print(f"체크포인트 읽기 실패, 처음부터 시작합니다: {e}")
+                written = 0
+                last_node_id = -1
+                open_mode = "w"
+                vectors = None
+
+        with temp_metadata_path.open(open_mode, encoding="utf-8") as metadata_file:
             with driver.session() as session:
                 while written < total_nodes:
                     records = read_graph_batch(session, last_node_id, args.batch_size)
@@ -282,11 +319,21 @@ def main() -> int:
                         metadata_file.write(json.dumps(record, ensure_ascii=False) + "\n")
                     written = end
                     print(f"진행: {written}/{total_nodes}개 노드")
+                    checkpoint_path.write_text(
+                        json.dumps({
+                            "written": written,
+                            "last_node_id": last_node_id,
+                            "total_nodes": total_nodes,
+                            "model": args.model,
+                        }, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
 
         if written != total_nodes or vectors is None:
             raise RuntimeError(f"노드 처리 개수 불일치: {written}/{total_nodes}")
         vectors.flush()
         del vectors
+        checkpoint_path.unlink(missing_ok=True)
         os.replace(temp_metadata_path, metadata_path)
         os.replace(temp_vectors_path, vectors_path)
         dimension = int(batch_vectors.shape[1])
