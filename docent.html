@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3.1 운동 역사 도슨트 — 지식그래프 기반 역사 해설 시스템</title>
+    <meta name="description" content="1919년 3.1운동의 인물, 사건, 장소를 지식그래프로 탐색하고 AI 도슨트 해설을 받아보세요.">
+
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        ink: { 50: '#f7f7f8', 100: '#eeeef0', 200: '#d9d9de', 300: '#b5b5bf', 400: '#8c8c9a', 500: '#6e6e7f', 600: '#585868', 700: '#484855', 800: '#3d3d47', 900: '#2c2c33', 950: '#1a1a1f' },
+                        taegeuk: { red: '#C8102E', blue: '#003478', 'red-light': '#F4D3D9', 'blue-light': '#D6E4F0' },
+                    },
+                    fontFamily: {
+                        serif: ['"Noto Serif KR"', '"Source Serif 4"', 'Georgia', 'serif'],
+                        sans: ['"Pretendard"', '"Noto Sans KR"', 'system-ui', 'sans-serif'],
+                    },
+                    animation: {
+                        'fade-in': 'fadeIn 0.5s ease-out',
+                        'slide-up': 'slideUp 0.4s ease-out',
+                        'pulse-dot': 'pulseDot 1.4s infinite ease-in-out',
+                        'blink': 'blink 0.8s infinite',
+                    },
+                    keyframes: {
+                        fadeIn: { '0%': { opacity: '0' }, '100%': { opacity: '1' } },
+                        slideUp: { '0%': { opacity: '0', transform: 'translateY(12px)' }, '100%': { opacity: '1', transform: 'translateY(0)' } },
+                        pulseDot: { '0%, 80%, 100%': { opacity: '0.3', transform: 'scale(0.8)' }, '40%': { opacity: '1', transform: 'scale(1.1)' } },
+                        blink: { '0%, 100%': { opacity: '1' }, '50%': { opacity: '0' } },
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;600;700&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&family=Noto+Sans+KR:wght@300;400;500;600&display=swap" rel="stylesheet">
+
+    <!-- vis.js for knowledge graph -->
+    <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <!-- marked.js for markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+    <style>
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+
+        .docent-prose h1 { font-size: 1.5rem; font-weight: 700; margin-top: 1.5rem; margin-bottom: 0.75rem; color: #1a1a1f; border-bottom: 2px solid #C8102E20; padding-bottom: 0.5rem; }
+        .docent-prose h2 { font-size: 1.25rem; font-weight: 600; margin-top: 1.25rem; margin-bottom: 0.5rem; color: #2c2c33; }
+        .docent-prose h3 { font-size: 1.1rem; font-weight: 600; margin-top: 1rem; margin-bottom: 0.5rem; color: #484855; }
+        .docent-prose p { margin-bottom: 0.875rem; }
+        .docent-prose ul, .docent-prose ol { padding-left: 1.25rem; margin-bottom: 0.875rem; }
+        .docent-prose li { margin-bottom: 0.25rem; }
+        .docent-prose strong { color: #1a1a1f; }
+        .docent-prose blockquote { border-left: 3px solid #C8102E; padding-left: 1rem; margin: 1rem 0; color: #585868; font-style: italic; }
+        .docent-prose table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.875rem; }
+        .docent-prose th, .docent-prose td { border: 1px solid #e5e7eb; padding: 0.5rem 0.75rem; text-align: left; }
+        .docent-prose th { background: #f9fafb; font-weight: 600; }
+
+        .typing-cursor { animation: blink 0.8s infinite; display: inline-block; font-weight: bold; margin-left: 2px; color: #C8102E; }
+        .suggestion-chip { transition: all 0.2s ease; }
+        .suggestion-chip:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+        .reasoning-step { transition: all 0.3s ease; }
+        .source-badge { transition: all 0.2s ease; }
+        .source-badge:hover { transform: scale(1.05); }
+    </style>
+</head>
+<body class="bg-ink-50 text-ink-900 font-sans min-h-screen">
+
+    <!-- ═══════════════ HEADER ═══════════════ -->
+    <header class="bg-white/80 backdrop-blur-md border-b border-ink-100 sticky top-0 z-50">
+        <div class="max-w-5xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between">
+            <div class="flex items-center gap-2.5">
+                <span class="text-xl">🇰🇷</span>
+                <h1 class="text-lg sm:text-xl font-bold text-ink-900 tracking-tight">3.1 운동 역사 도슨트</h1>
+            </div>
+            <div class="flex items-center gap-3 text-sm text-ink-400">
+                <span class="hidden sm:inline" title="다국어 질의를 자동 감지합니다">🌐 다국어 지원</span>
+                <span class="text-xs px-2 py-1 bg-ink-100 rounded-full text-ink-500">Knowledge Graph RAG</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- ═══════════════ MAIN ═══════════════ -->
+    <main class="max-w-5xl mx-auto px-4 sm:px-6 pb-24">
+
+        <!-- ─── Hero Search ─── -->
+        <section id="hero-section" class="pt-16 sm:pt-24 pb-8 text-center transition-all duration-500">
+            <p class="text-ink-400 text-sm mb-6 tracking-wide">1919년 3·1 운동의 인물, 사건, 장소를 지식그래프에서 탐색합니다</p>
+            <div class="max-w-2xl mx-auto">
+                <div class="flex items-center bg-white border border-ink-200 rounded-2xl shadow-lg shadow-ink-900/5 hover:shadow-xl hover:border-ink-300 transition-all duration-300 focus-within:border-taegeuk-blue focus-within:ring-2 focus-within:ring-taegeuk-blue/20">
+                    <span class="pl-5 text-ink-300">
+                        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35" stroke-linecap="round"/></svg>
+                    </span>
+                    <input id="search-input" type="text"
+                        class="flex-1 py-4 px-3 text-base sm:text-lg bg-transparent outline-none placeholder:text-ink-300 text-ink-800"
+                        placeholder="인물, 사건, 장소를 자유롭게 질문하세요..." autocomplete="off">
+                    <button id="search-btn" onclick="submitQuery()"
+                        class="mr-2 px-5 py-2.5 bg-ink-900 text-white rounded-xl text-sm font-medium hover:bg-ink-800 active:scale-95 transition-all duration-200 flex items-center gap-1.5">
+                        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M13 7l5 5m0 0l-5 5m5-5H6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                        탐색
+                    </button>
+                </div>
+            </div>
+            <!-- Suggestion Chips -->
+            <div class="mt-6 flex flex-wrap justify-center gap-2 max-w-2xl mx-auto">
+                <button onclick="setQuery('유관순의 아우내 장터 만세운동')" class="suggestion-chip px-4 py-2 bg-white border border-ink-200 rounded-full text-sm text-ink-600 hover:bg-taegeuk-red-light hover:border-taegeuk-red/30 hover:text-taegeuk-red">유관순의 아우내 장터 만세운동</button>
+                <button onclick="setQuery('이동휘의 무장투쟁 노선')" class="suggestion-chip px-4 py-2 bg-white border border-ink-200 rounded-full text-sm text-ink-600 hover:bg-taegeuk-blue-light hover:border-taegeuk-blue/30 hover:text-taegeuk-blue">이동휘의 무장투쟁 노선</button>
+                <button onclick="setQuery('수원 사강리 시위 과정')" class="suggestion-chip px-4 py-2 bg-white border border-ink-200 rounded-full text-sm text-ink-600 hover:bg-taegeuk-red-light hover:border-taegeuk-red/30 hover:text-taegeuk-red">수원 사강리 시위 과정</button>
+                <button onclick="setQuery('Who led the protests in Pyongyang?')" class="suggestion-chip px-4 py-2 bg-white border border-ink-200 rounded-full text-sm text-ink-600 hover:bg-taegeuk-blue-light hover:border-taegeuk-blue/30 hover:text-taegeuk-blue">Who led the protests in Pyongyang?</button>
+                <button onclick="setQuery('임시정부 수립')" class="suggestion-chip px-4 py-2 bg-white border border-ink-200 rounded-full text-sm text-ink-600 hover:bg-taegeuk-red-light hover:border-taegeuk-red/30 hover:text-taegeuk-red">임시정부 수립</button>
+            </div>
+        </section>
+
+        <!-- ─── Reasoning Panel ─── -->
+        <section id="reasoning-panel" class="hidden animate-fade-in mb-6">
+            <div class="bg-white border border-ink-100 rounded-xl px-5 py-4 shadow-sm">
+                <div class="flex items-center gap-2 mb-3">
+                    <div class="flex gap-1">
+                        <span class="w-1.5 h-1.5 rounded-full bg-taegeuk-blue animate-pulse-dot" style="animation-delay:0s"></span>
+                        <span class="w-1.5 h-1.5 rounded-full bg-taegeuk-blue animate-pulse-dot" style="animation-delay:0.2s"></span>
+                        <span class="w-1.5 h-1.5 rounded-full bg-taegeuk-blue animate-pulse-dot" style="animation-delay:0.4s"></span>
+                    </div>
+                    <span class="text-sm font-medium text-ink-500" id="reasoning-title">AI가 질의를 분석하고 있습니다...</span>
+                </div>
+                <div id="reasoning-steps" class="space-y-1.5 text-sm text-ink-400"></div>
+            </div>
+        </section>
+
+        <!-- ─── Context Source Badges ─── -->
+        <section id="sources-panel" class="hidden animate-slide-up mb-6">
+            <div class="flex items-center gap-2 mb-3">
+                <span class="text-xs font-semibold text-ink-400 uppercase tracking-wider">수집된 사료</span>
+                <span id="sources-count" class="text-xs px-2 py-0.5 bg-ink-100 rounded-full text-ink-500"></span>
+            </div>
+            <div id="sources-badges" class="flex flex-wrap gap-2"></div>
+        </section>
+
+        <!-- ─── Knowledge Graph ─── -->
+        <section id="graph-section" class="hidden animate-slide-up mb-6">
+            <div class="bg-white border border-ink-100 rounded-xl overflow-hidden shadow-sm">
+                <div class="flex items-center justify-between px-5 py-3 border-b border-ink-100">
+                    <div class="flex items-center gap-2">
+                        <svg class="w-4 h-4 text-ink-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4M2 12h4m12 0h4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83"/></svg>
+                        <span class="text-sm font-semibold text-ink-600">지식그래프</span>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <div class="hidden sm:flex items-center gap-3 text-xs text-ink-400">
+                            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-blue-600"></span>인물</span>
+                            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-red-600"></span>사건</span>
+                            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-green-600"></span>장소</span>
+                            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-purple-600"></span>기관</span>
+                            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-amber-500"></span>사료</span>
+                        </div>
+                        <button onclick="centerGraph()" class="text-xs text-ink-400 hover:text-ink-600 transition-colors px-2 py-1 rounded hover:bg-ink-50">가운데로</button>
+                    </div>
+                </div>
+                <div id="graph-container" class="h-[400px] sm:h-[460px] cursor-pointer"></div>
+            </div>
+            <!-- Node detail -->
+            <div id="node-info-panel" class="hidden mt-3 bg-white border border-ink-100 rounded-xl shadow-sm overflow-hidden animate-slide-up">
+                <div class="px-5 py-3 bg-ink-50 border-b border-ink-100 flex items-center gap-2">
+                    <svg class="w-4 h-4 text-taegeuk-blue" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span class="text-sm font-semibold text-ink-700">선택된 노드 상세</span>
+                </div>
+                <div id="node-info-content" class="p-5 text-sm max-h-[400px] overflow-y-auto"></div>
+            </div>
+        </section>
+
+        <!-- ─── Docent Explanation ─── -->
+        <section id="explanation-section" class="hidden animate-slide-up mb-8">
+            <div class="bg-white border border-ink-100 rounded-xl shadow-sm overflow-hidden">
+                <div class="px-5 sm:px-8 py-4 border-b border-ink-100 flex items-center justify-between flex-wrap gap-3">
+                    <div class="flex items-center gap-2">
+                        <span class="text-lg">📖</span>
+                        <h2 class="text-base font-bold text-ink-800">도슨트 해설</h2>
+                    </div>
+                    <button id="explain-btn" onclick="generateExplanation()"
+                        class="hidden px-4 py-2 bg-taegeuk-red text-white rounded-lg text-sm font-medium hover:bg-red-700 active:scale-95 transition-all duration-200 shadow-sm">
+                        ✨ 해설 생성
+                    </button>
+                </div>
+                <div id="explanation-content" class="px-5 sm:px-8 py-6 font-serif text-ink-700 leading-[1.85] text-[0.95rem] sm:text-base docent-prose min-h-[120px]">
+                    <p class="text-ink-400 italic">검색어를 입력하면 지식그래프 탐색 후 AI 도슨트 해설이 생성됩니다.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- ─── System Log (Accordion) ─── -->
+        <section id="system-log-section" class="hidden mb-8">
+            <details class="bg-white border border-ink-100 rounded-xl shadow-sm overflow-hidden group">
+                <summary class="px-5 py-3 cursor-pointer flex items-center justify-between text-sm text-ink-400 hover:text-ink-600 transition-colors select-none">
+                    <span class="flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.573-1.066z" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3"/></svg>
+                        시스템 로그
+                    </span>
+                    <svg class="w-4 h-4 transition-transform duration-200 group-open:rotate-180" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M19 9l-7 7-7-7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </summary>
+                <div class="px-5 pb-4 border-t border-ink-100 pt-3">
+                    <div id="system-log-content" class="text-xs font-mono text-ink-400 space-y-1 max-h-[240px] overflow-y-auto">
+                        <div class="text-ink-300">시스템 대기 중...</div>
+                    </div>
+                </div>
+            </details>
+        </section>
+    </main>
+
+    <!-- ═══════════════ FOOTER ═══════════════ -->
+    <footer class="fixed bottom-0 left-0 right-0 bg-white/80 backdrop-blur-md border-t border-ink-100 py-2 text-center text-xs text-ink-300 z-40">
+        제작: jo.gyungmin@gmail.com · AI API 비용은 개인 감당 · 적절한 사용 부탁드립니다
+    </footer>
+
+    <!-- ═══════════════ JAVASCRIPT ═══════════════ -->
+    <script>
+    /* ━━━ State ━━━ */
+    let network = null;
+    let lastEvidences = [];
+    let pgPrefetchTexts = [];
+    let currentNodes = [];
+    let currentEdges = [];
+    let analysisResult = null;
+    let csrfToken = '';
+
+    /* ━━━ Backend endpoint (같은 서버의 docent.php) ━━━ */
+    const API_BASE = 'docent.php';
+
+    /* ━━━ DOM ━━━ */
+    const $ = id => document.getElementById(id);
+    const $input          = $('search-input');
+    const $heroSection    = $('hero-section');
+    const $reasoningPanel = $('reasoning-panel');
+    const $reasoningSteps = $('reasoning-steps');
+    const $reasoningTitle = $('reasoning-title');
+    const $sourcesPanel   = $('sources-panel');
+    const $sourcesBadges  = $('sources-badges');
+    const $sourcesCount   = $('sources-count');
+    const $graphSection   = $('graph-section');
+    const $explanationSection = $('explanation-section');
+    const $explanationContent = $('explanation-content');
+    const $explainBtn     = $('explain-btn');
+    const $systemLogSection  = $('system-log-section');
+    const $systemLogContent  = $('system-log-content');
+    const $nodeInfoPanel  = $('node-info-panel');
+    const $nodeInfoContent= $('node-info-content');
+
+    $input.addEventListener('keydown', e => { if (e.key === 'Enter') submitQuery(); });
+
+    /* ━━━ Bootstrap: CSRF 토큰을 docent.php 세션에서 가져오기 ━━━ */
+    (async function bootstrapCsrf() {
+        try {
+            // docent.php 페이지를 한 번 GET 해서 세션 쿠키를 확보한 뒤,
+            // 아무 AJAX든 csrf_token 에러 응답에서 토큰을 갈취하지 않고,
+            // 별도의 경량 요청으로 세션을 초기화한다.
+            // 가장 단순한 방식: docent.php 본체를 fetch해 HTML에서 csrf 추출
+            const res = await fetch(API_BASE, { credentials: 'same-origin' });
+            const html = await res.text();
+            const m = html.match(/docent_csrf[^']*'([a-f0-9]{64})'/);
+            if (m) csrfToken = m[1];
+        } catch (e) { console.warn('CSRF bootstrap failed:', e); }
+    })();
+
+    /* ━━━ Helpers ━━━ */
+    function escapeHtml(s) {
+        if (s == null) return '';
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+    }
+    function setQuery(t) { $input.value = t; submitQuery(); }
+    function logSystem(msg) {
+        const ts = new Date().toLocaleTimeString('ko-KR',{hour12:false});
+        $systemLogContent.innerHTML += `<div><span class="text-ink-300">[${ts}]</span> ${escapeHtml(msg)}</div>`;
+        $systemLogContent.scrollTop = $systemLogContent.scrollHeight;
+    }
+    function addStep(icon, text, status='active') {
+        const id = 'rs-' + Date.now();
+        const c = { active:'text-taegeuk-blue', done:'text-green-600', error:'text-red-500' }[status];
+        $reasoningSteps.innerHTML += `<div id="${id}" class="reasoning-step flex items-center gap-2 ${c} animate-fade-in">
+            <span>${icon}</span><span>${escapeHtml(text)}</span>
+            ${status==='active'?'<span class="w-1 h-1 rounded-full bg-current animate-pulse-dot ml-1"></span>':''}
+        </div>`;
+        return id;
+    }
+    function doneStep(id, icon, text) {
+        const el = document.getElementById(id);
+        if (el) { el.className='reasoning-step flex items-center gap-2 text-green-600 animate-fade-in'; el.innerHTML=`<span>${icon}</span><span>${escapeHtml(text)}</span>`; }
+    }
+
+    /* ━━━ API call (CSRF 자동 첨부) ━━━ */
+    async function api(action, data={}) {
+        const fd = new FormData();
+        for (let k in data) fd.append(k, data[k]);
+        if (csrfToken) fd.append('csrf_token', csrfToken);
+        logSystem(`→ ${action}`);
+        const res = await fetch(`${API_BASE}?ajax=${action}`, {
+            method:'POST', body:fd, credentials:'same-origin',
+            headers: csrfToken ? {'X-CSRF-Token': csrfToken} : {}
+        });
+        const raw = await res.text();
+        if (!res.ok) {
+            try { const e=JSON.parse(raw); throw new Error(`[${action}] ${e.error||'HTTP '+res.status}`); }
+            catch(e) { if(e.message.startsWith(`[${action}]`)) throw e; throw new Error(`[${action}] HTTP ${res.status}`); }
+        }
+        try { const j=JSON.parse(raw); logSystem(`✓ ${action}`); return j; }
+        catch(e) { throw new Error(`[${action}] JSON 파싱 실패`); }
+    }
+
+    /* ━━━ Source Badges ━━━ */
+    function renderBadges(nodes) {
+        const iconMap = {'Person':'🧑','인물':'🧑','Event':'📜','사건':'📜','Place':'📍','장소':'📍','Organization':'🏛️','기관':'🏛️','Document':'📄','문헌':'📄','사료':'📄'};
+        const colorMap = {'Person':'bg-blue-50 text-blue-700 border-blue-200','인물':'bg-blue-50 text-blue-700 border-blue-200','Event':'bg-red-50 text-red-700 border-red-200','사건':'bg-red-50 text-red-700 border-red-200','Place':'bg-green-50 text-green-700 border-green-200','장소':'bg-green-50 text-green-700 border-green-200','Organization':'bg-purple-50 text-purple-700 border-purple-200','기관':'bg-purple-50 text-purple-700 border-purple-200','Document':'bg-amber-50 text-amber-700 border-amber-200','문헌':'bg-amber-50 text-amber-700 border-amber-200','사료':'bg-amber-50 text-amber-700 border-amber-200'};
+        let html=''; const seen=new Set();
+        nodes.forEach(n=>{
+            const lbl=(n.label||'').replace(/[\n📜👤🔥📍🏢]/g,'').trim();
+            if(seen.has(lbl)||!lbl) return; seen.add(lbl);
+            const tp=n.type||(n.labels&&n.labels[0])||'개체';
+            html+=`<button onclick="focusNode('${n.id}')" class="source-badge px-3 py-1.5 rounded-full border text-xs font-medium ${colorMap[tp]||'bg-ink-50 text-ink-600 border-ink-200'} cursor-pointer">${iconMap[tp]||'🔹'} ${escapeHtml(lbl)}</button>`;
+        });
+        $sourcesBadges.innerHTML=html;
+        $sourcesCount.textContent=`${seen.size}건`;
+    }
+
+    /* ━━━ Main: Submit Query ━━━ */
+    async function submitQuery(text) {
+        const term = text || $input.value.trim();
+        if (term.length < 2) { $input.focus(); return; }
+        $input.value = term;
+
+        // UI: collapse hero, show panels
+        $heroSection.classList.remove('pt-16','sm:pt-24'); $heroSection.classList.add('pt-6','sm:pt-8');
+        $reasoningPanel.classList.remove('hidden');
+        $sourcesPanel.classList.add('hidden');
+        $graphSection.classList.add('hidden');
+        $explanationSection.classList.remove('hidden');
+        $explainBtn.classList.add('hidden');
+        $nodeInfoPanel.classList.add('hidden');
+        $systemLogSection.classList.remove('hidden');
+        $reasoningSteps.innerHTML=''; $sourcesBadges.innerHTML='';
+        $explanationContent.innerHTML='<p class="text-ink-400 italic">사료를 탐색하고 있습니다...</p>';
+        lastEvidences=[]; pgPrefetchTexts=[]; currentNodes=[]; currentEdges=[]; analysisResult=null;
+        logSystem(`검색: "${term}"`);
+
+        try {
+            /* 1. Analyze */
+            const s1 = addStep('💡','질의 의도 분석 중...');
+            $reasoningTitle.textContent='AI가 질의를 분석하고 있습니다...';
+            const analysis = await api('analyze',{term});
+            analysisResult = analysis;
+            const kws = (analysis.search_keywords||analysis.keywords||[term]).join(', ');
+            doneStep(s1,'✅',`의도 분석 완료 — ${analysis.analyzed_intent_ko||analysis.explanation||'완료'}`);
+            logSystem(`의도: ${analysis.intent_type||analysis.intent}, KW: ${kws}, lang: ${analysis.response_language||'ko'}`);
+
+            /* 2. Graph */
+            const s2 = addStep('🔍',`지식그래프에서 "${kws}" 탐색 중...`);
+            $reasoningTitle.textContent='지식그래프 사료 탐색 중...';
+            const keywords = analysis.keywords||analysis.search_keywords||[term];
+            const gd = await api('graph',{term, keywords:JSON.stringify(keywords)});
+            lastEvidences=gd.evidences||[]; currentNodes=gd.nodes||[]; currentEdges=gd.edges||[];
+            doneStep(s2,'✅',`그래프 탐색 완료 — 노드 ${currentNodes.length}개, 관계 ${currentEdges.length}개, 사료 ${lastEvidences.length}건`);
+            logSystem(`노드 ${currentNodes.length}, 엣지 ${currentEdges.length}, 사료 ${lastEvidences.length}`);
+
+            if (currentNodes.length>0) { renderBadges(currentNodes); $sourcesPanel.classList.remove('hidden'); }
+            if (currentNodes.length>0) { $graphSection.classList.remove('hidden'); drawGraph(currentNodes,currentEdges); }
+
+            /* 3. PG prefetch */
+            const pn = (Array.isArray(gd.prefetch_names)&&gd.prefetch_names.length>0) ? gd.prefetch_names : currentNodes.map(n=>n.raw_id);
+            if (pn.length>0) {
+                const s3=addStep('📚','PostgreSQL 사료 원문 연동 중...');
+                const rows = await api('pg_prefetch',{names:JSON.stringify(pn)});
+                pgPrefetchTexts=rows.map(r=>{let s=[];for(let k in r.snippets){if(r.snippets[k])s.push(`${k}: ${r.snippets[k]}`);}return`[${r.schema}.${r.table}] node=${r.node_id} rowid=${r.rowid} :: ${s.join('; ')}`;});
+                doneStep(s3,'✅',`PostgreSQL 사료 ${pgPrefetchTexts.length}건 연동 완료`);
+                logSystem(`PG 사료: ${pgPrefetchTexts.length}건`);
+            }
+
+            /* Done */
+            $reasoningTitle.textContent='🔍 지식그래프 사료 탐색 완료';
+            $explainBtn.classList.remove('hidden');
+            $explanationContent.innerHTML=`<p class="text-ink-400 italic">사료 수집 완료. <strong class="text-taegeuk-red">'✨ 해설 생성'</strong> 버튼을 클릭하세요.</p>`;
+
+        } catch(e) {
+            console.error(e);
+            addStep('❌',e.message,'error');
+            $reasoningTitle.textContent='오류가 발생했습니다';
+            $explanationContent.innerHTML=`<div class="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700"><p class="font-semibold mb-1">데이터 탐색 실패</p><p class="font-mono text-xs break-all">${escapeHtml(e.message)}</p></div>`;
+            logSystem(`오류: ${e.message}`);
+        }
+    }
+
+    /* ━━━ Generate Explanation (SSE) ━━━ */
+    async function generateExplanation() {
+        const term=$input.value.trim(); if(!term) return;
+        const lang=analysisResult?.response_language||'ko';
+        const focus=analysisResult?.focus||'';
+
+        $explainBtn.classList.add('hidden');
+        $explanationContent.innerHTML=`<div class="flex items-center gap-2 text-ink-400 text-sm py-4">
+            <span class="w-1.5 h-1.5 rounded-full bg-taegeuk-red animate-pulse-dot"></span>
+            <span class="w-1.5 h-1.5 rounded-full bg-taegeuk-red animate-pulse-dot" style="animation-delay:.15s"></span>
+            <span class="w-1.5 h-1.5 rounded-full bg-taegeuk-red animate-pulse-dot" style="animation-delay:.3s"></span>
+            <span>사료 비판 검증 및 학술 해설 작성 중...</span>
+        </div>`;
+        const sE=addStep('✍️','AI 도슨트가 학술 해설을 작성 중입니다...');
+        logSystem(`해설 생성: lang=${lang}`);
+
+        try {
+            const fd=new FormData();
+            fd.append('term',term); fd.append('focus',focus); fd.append('lang',lang);
+            fd.append('evidences',JSON.stringify(lastEvidences));
+            fd.append('pg_texts',JSON.stringify(pgPrefetchTexts));
+            fd.append('stream','1');
+            if(csrfToken) { fd.append('csrf_token',csrfToken); }
+
+            const res=await fetch(`${API_BASE}?ajax=explain&stream=1`,{
+                method:'POST',body:fd,credentials:'same-origin',
+                headers: csrfToken?{'X-CSRF-Token':csrfToken}:{}
+            });
+            if(!res.ok) throw new Error(`HTTP ${res.status}`);
+
+            const reader=res.body.getReader(), dec=new TextDecoder('utf-8');
+            let full='', buf='';
+            while(true){
+                const{value,done}=await reader.read(); if(done) break;
+                buf+=dec.decode(value,{stream:true});
+                const lines=buf.split('\n'); buf=lines.pop();
+                for(const l of lines){
+                    const t=l.trim();
+                    if(t==='data: [DONE]') break;
+                    if(t.startsWith('data: ')){
+                        try{const p=JSON.parse(t.substring(6));if(p.chunk){full+=p.chunk;$explanationContent.innerHTML=marked.parse(full)+'<span class="typing-cursor">▌</span>';}}catch(e){}
+                    }
+                }
+            }
+            $explanationContent.innerHTML=marked.parse(full);
+            doneStep(sE,'✅','AI 도슨트 해설 작성 완료');
+            logSystem('해설 완료');
+        } catch(e) {
+            console.error(e);
+            $explanationContent.innerHTML=`<div class="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700"><p class="font-semibold mb-1">해설 생성 실패</p><p class="font-mono text-xs break-all">${escapeHtml(e.message)}</p></div>`;
+            doneStep(sE,'❌',`실패: ${e.message}`);
+            logSystem(`해설 오류: ${e.message}`);
+        }
+    }
+
+    /* ━━━ Knowledge Graph (vis.js) ━━━ */
+    function drawGraph(nodes,edges){
+        const c=$('graph-container');
+        const d={nodes:new vis.DataSet(nodes),edges:new vis.DataSet(edges)};
+        const o={
+            edges:{arrows:'to',color:{color:'#9ca3af',hover:'#6b7280',highlight:'#C8102E'},font:{size:11,align:'middle',color:'#6b7280'},smooth:{type:'continuous'}},
+            physics:{enabled:true,repulsion:{nodeDistance:240,centralGravity:0.15},stabilization:{iterations:120}},
+            interaction:{hover:true,tooltipDelay:200}
+        };
+        if(network) network.destroy();
+        network=new vis.Network(c,d,o);
+        network.on('click',p=>{
+            if(p.nodes.length>0){const n=currentNodes.find(x=>x.id===p.nodes[0]);if(n) showNodeInfo(n);}
+            else $nodeInfoPanel.classList.add('hidden');
+        });
+    }
+    function centerGraph(){if(network) network.fit({animation:{duration:600,easingFunction:'easeInOutQuad'}});}
+    function focusNode(id){
+        if(network){network.focus(id,{scale:1.2,animation:{duration:500,easingFunction:'easeInOutQuad'}});network.selectNodes([id]);}
+        const n=currentNodes.find(x=>x.id===id);if(n)showNodeInfo(n);
+    }
+
+    /* ━━━ Node Info ━━━ */
+    function showNodeInfo(node){
+        const lbl=(node.label||'').replace(/[\n📜👤🔥📍🏢]/g,'').trim();
+        let h=`<div class="flex items-center justify-between mb-3"><h3 class="font-bold text-ink-900 text-base">${escapeHtml(lbl)}</h3><span class="px-2.5 py-1 rounded-full text-xs font-medium bg-taegeuk-blue-light text-taegeuk-blue">${escapeHtml(node.type||'개체')}</span></div>`;
+        h+=`<div class="text-xs text-ink-400 mb-3 font-mono break-all">ID: ${escapeHtml(node.raw_id||node.id)}</div>`;
+        if(Array.isArray(node.aliases)&&node.aliases.length) h+=`<div class="mb-3"><span class="text-xs font-medium text-ink-500">이칭:</span> <span class="text-sm text-ink-700">${escapeHtml(node.aliases.join(', '))}</span></div>`;
+
+        if(node.props&&Object.keys(node.props).length){
+            h+=`<div class="border-t border-ink-100 pt-3 mt-3"><h4 class="text-xs font-semibold text-ink-500 mb-2">메타데이터</h4><div class="max-h-[180px] overflow-y-auto"><table class="w-full text-xs">`;
+            for(let k in node.props){if(['embedding','labels','id','uid'].includes(k))continue;const v=String(node.props[k]||'').trim();if(!v)continue;h+=`<tr class="border-b border-ink-50"><td class="py-1.5 pr-3 text-ink-400 font-medium whitespace-nowrap">${escapeHtml(k)}</td><td class="py-1.5 text-ink-700 break-all" style="white-space:pre-wrap">${escapeHtml(v)}</td></tr>`;}
+            h+=`</table></div></div>`;
+        }
+
+        const ce=currentEdges.filter(e=>e.from===node.id||e.to===node.id);
+        if(ce.length){
+            h+=`<div class="border-t border-ink-100 pt-3 mt-3"><h4 class="text-xs font-semibold text-ink-500 mb-2">연결 (${ce.length}건)</h4><div class="flex flex-wrap gap-1.5 max-h-[120px] overflow-y-auto">`;
+            ce.forEach(e=>{const o=e.from===node.id?e.to:e.from;const on=currentNodes.find(x=>x.id===o);if(on){const ol=(on.label||'').replace(/[\n📜👤🔥📍🏢]/g,'').trim();h+=`<button onclick="focusNode('${o}')" class="px-2.5 py-1 rounded-lg border border-ink-200 text-xs text-ink-600 hover:bg-ink-50"><span class="text-ink-400">${escapeHtml(e.label||'→')}</span> ${escapeHtml(ol)}</button>`;}});
+            h+=`</div></div>`;
+        }
+
+        h+=`<div id="node-pg-source-box" class="border-t border-ink-100 pt-3 mt-3"><div class="flex items-center gap-2 text-xs text-ink-400"><span class="w-3 h-3 border-2 border-ink-300 border-t-transparent rounded-full animate-spin"></span>원천 사료 조회 중...</div></div>`;
+        $nodeInfoContent.innerHTML=h;
+        $nodeInfoPanel.classList.remove('hidden');
+        loadNodePg(node);
+    }
+
+    async function loadNodePg(node){
+        const box=$('node-pg-source-box'); if(!box) return;
+        const p=node.props||{}, tbl=p['원천테이블']||p['source_table']||'', rid=p['원천rowid']||p['rowid']||'';
+        const lbl=(node.label||'').replace(/[\n📜👤🔥📍🏢]/g,'').trim();
+        try{
+            const d=await api('node_detail',{table:tbl,rowid:rid,raw_id:node.raw_id||'',label:lbl,aliases:JSON.stringify(node.aliases||[])});
+            if(d&&d.found&&d.columns&&Object.keys(d.columns).length){
+                let rh=`<h4 class="text-xs font-semibold text-green-600 mb-2">📋 원천 사료 [${escapeHtml(d.table)} #${d.rowid}]</h4><div class="max-h-[200px] overflow-y-auto"><table class="w-full text-xs">`;
+                for(let c in d.columns){const v=d.columns[c];if(v==null||v==='')continue;rh+=`<tr class="border-b border-ink-50"><td class="py-1.5 pr-3 text-ink-400 font-medium whitespace-nowrap">${escapeHtml(c)}</td><td class="py-1.5 text-ink-700 break-all" style="white-space:pre-wrap">${escapeHtml(v)}</td></tr>`;}
+                rh+=`</table></div>`;
+                if(d.tei) rh+=`<details class="mt-2"><summary class="text-xs text-taegeuk-blue cursor-pointer font-medium">📜 TEI XML 원문</summary><pre class="mt-1 text-xs bg-ink-50 p-3 rounded-lg overflow-auto max-h-[160px] font-mono text-ink-600" style="white-space:pre-wrap">${escapeHtml(d.tei)}</pre></details>`;
+                box.innerHTML=rh;
+            } else { box.innerHTML=`<div class="text-xs text-ink-300">원천 DB에 직접 대응 데이터 없음.</div>`; }
+        } catch(e){ box.innerHTML=`<div class="text-xs text-ink-300">조회 생략: ${escapeHtml(e.message)}</div>`; }
+    }
+    </script>
+</body>
+</html>

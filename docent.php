@@ -375,25 +375,28 @@ if (isset($_GET['ajax'])) {
             $term = docent_sanitize_text($_POST['term'] ?? '', 180, false);
             $initial_focus = infer_focus($term, docent_is_english());
 
-            if (docent_is_english()) {
-                $system_prompt = "You are a specialist analyst for historical knowledge search. Analyze the user's query and reply only in the following JSON format.\n"
-                               . "{\n"
-                               . "  \"intent\": \"ENTITY_SEARCH\",\n"
-                               . "  \"keywords\": [\"" . addslashes($term) . "\"],\n"
-                               . "  \"focus\": \"" . addslashes($initial_focus) . "\",\n"
-                               . "  \"explanation\": \"Keyword-based analysis completed\"\n"
-                               . "}\n"
-                               . "Choose the most relevant focus from Person, Event, Place, or Organization based on the question. Return JSON only, without additional explanation.";
-            } else {
-                $system_prompt = "당신은 역사 지식 검색을 위한 전문 분석가입니다. 사용자의 질문을 분석하여 다음 JSON 형식으로만 답하십시오.\n"
-                               . "{\n"
-                               . "  \"intent\": \"ENTITY_SEARCH\",\n"
-                               . "  \"keywords\": [\"" . addslashes($term) . "\"],\n"
-                               . "  \"focus\": \"" . addslashes($initial_focus) . "\",\n"
-                               . "  \"explanation\": \"검색어 기반 분석 수행\"\n"
-                               . "}\n"
-                               . "focus는 질문 내용에 가장 적합한 값인 '인물', '사건', '장소', '기관' 중 하나로 결정하십시오. 부가적인 설명 없이 JSON만 반환하십시오.";
-            }
+            // 다국어 통합 Query Analyzer 프롬프트 (한국어/영어 분기 제거)
+            $system_prompt = "# Role\n"
+                           . "당신은 '3.1 운동 역사 도슨트 시스템'의 다국어 질의 분석기(Query Analyzer)입니다.\n"
+                           . "사용자의 질문이 어떤 언어로 들어오든 그 역사적 의도를 파악하고, 한국어 지식그래프(Graph DB) 검색에 필요한 핵심 데이터를 추출해야 합니다.\n\n"
+                           . "# Objective\n"
+                           . "입력된 [사용자 질의]를 분석하여 지정된 JSON 형식으로만 결과를 출력하십시오.\n"
+                           . "이 JSON 데이터는 백엔드 시스템이 Neo4j 데이터베이스를 검색하는 변수로 직접 사용됩니다.\n\n"
+                           . "# Rules\n"
+                           . "1. [Translation & Intent]: 질문의 언어와 상관없이, 검색을 위한 핵심 의도는 반드시 자연스러운 한국어(analyzed_intent_ko)로 요약하십시오.\n"
+                           . "2. [Entity Extraction for DB Search]: 지식그래프 검색의 조건절(WHERE)에 들어갈 핵심 명사(인명, 지명, 사건명, 기관명 등)를 "
+                           . "반드시 역사적 맥락에 맞는 한국어(search_keywords)로 번역 및 추출하십시오. "
+                           . "(예: 'Lee Dong-hwi' -> '이동휘', 'Suwon Sagang-ri' -> '수원 사강리')\n"
+                           . "3. [Language Detection]: 최종 해설 단계에서의 언어 동기화를 위해, 사용자가 질문한 원본 언어(response_language)를 감지하여 기록하십시오. (예: 'ko', 'en', 'ja', 'zh')\n"
+                           . "4. [Strict JSON Only]: 인사말, 마크다운 코드 블록(```json 등), 부연 설명 없이 오직 유효하고 파싱 가능한 JSON 객체 하나만 출력하십시오.\n\n"
+                           . "# Output JSON Schema\n"
+                           . "{\n"
+                           . "  \"intent_type\": \"ENTITY_SEARCH | EVENT_RELATION | GENERAL_INFO\",\n"
+                           . "  \"focus\": \"인물 | 장소 | 사건 | 문헌 | 종합\",\n"
+                           . "  \"analyzed_intent_ko\": \"문장 형태의 한국어 요약 질의\",\n"
+                           . "  \"search_keywords\": [\"keyword1\", \"keyword2\"],\n"
+                           . "  \"response_language\": \"ko\"\n"
+                           . "}";
 
             $res = call_gemini([
                 ["role" => "system", "content" => $system_prompt],
@@ -401,11 +404,25 @@ if (isset($_GET['ajax'])) {
             ], true, null, 0.0, 0.8);
             
             $parsed = json_decode($res, true);
+
+            // 새 스키마 필드 파싱 + 기존 키 호환 출력 (프런트엔드 및 graph 액션 하위 호환)
+            $new_intent = $parsed['intent_type'] ?? 'ENTITY_SEARCH';
+            $new_keywords = $parsed['search_keywords'] ?? [$term];
+            $new_focus = normalize_focus($parsed['focus'] ?? $initial_focus, false); // 항상 한국어 focus
+            $new_intent_ko = $parsed['analyzed_intent_ko'] ?? '검색어 기반 분석 수행';
+            $new_resp_lang = $parsed['response_language'] ?? (docent_is_english() ? 'en' : 'ko');
+
             $output = [
-                "intent" => $parsed['intent'] ?? 'ENTITY_SEARCH',
-                "keywords" => $parsed['keywords'] ?? [$term],
-                "focus" => normalize_focus($parsed['focus'] ?? $initial_focus, docent_is_english()),
-                "explanation" => $parsed['explanation'] ?? (docent_is_english() ? 'Analysis complete' : '분석 완료')
+                // 새 스키마 필드
+                "intent_type" => $new_intent,
+                "search_keywords" => $new_keywords,
+                "analyzed_intent_ko" => $new_intent_ko,
+                "response_language" => $new_resp_lang,
+                // 기존 호환 필드 (graph 액션 등에서 사용)
+                "intent" => $new_intent,
+                "keywords" => $new_keywords,
+                "focus" => $new_focus,
+                "explanation" => $new_intent_ko
             ];
             
             echo json_encode($output, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
@@ -760,11 +777,23 @@ if (isset($_GET['ajax'])) {
 
             // 3. [2단계 파이프라인] 정제된 연결 정보 + 사료 격벽 원문 기반 도슨트 해설 원고 작성
             if ($use_english) {
-                $sys_prompt = "You are a distinguished senior historical docent and research scholar specializing in modern Korean history and the independence movement. "
-                            . "Produce a publication-ready academic documentary text based strictly on primary archival evidence and historical critique. "
-                            . "Adhere strictly to factual grounding. Never fabricate or invent connections between disparate figures or events. "
-                            . "Do NOT expose any internal AI system, engineering, or prompt jargon (e.g., 'Zero-Correlation', 'knowledge graph', 'hallucination', 'nodes', 'database', hash IDs). "
-                            . "Express all historical judgments using authentic scholarly terminology (e.g., 'critical analysis of primary sources', 'archival verification of historical divergence').";
+                $sys_prompt = "# Role\n"
+                            . "You are a 'Knowledge Graph-Based Historical Docent' specializing in the complex diffusion paths and hidden connections between figures of the March 1st Movement of 1919.\n"
+                            . "As a distinguished senior historical docent and research scholar specializing in modern Korean history and the independence movement, "
+                            . "produce a publication-ready academic documentary text based strictly on primary archival evidence and historical critique.\n\n"
+                            . "# Objective\n"
+                            . "Based on the user's query, analyze the [Source Context] retrieved from the knowledge graph (Graph DB) and explain the historical causality connecting persons, events, and places accurately and logically.\n\n"
+                            . "# Strict Rules\n"
+                            . "1. [Language Mirroring]: Detect the language of the user's query and respond in the exact same language. (Korean query → Korean response, English query → English response.)\n"
+                            . "2. [Zero Hallucination]: Use ONLY the facts (names, places, dates, events) explicitly stated in the [Source Context] below. Never fabricate or invent connections by mixing in pretrained external knowledge.\n"
+                            . "3. [Multi-hop Explanation]: If the context contains 2-hop or more connections (e.g., Person A → Shared Event → Person B → Event in Another Region), explain how this causal chain links together so the user can follow the narrative without interruption.\n"
+                            . "4. [Hard Trap Defense]: If the provided [Source Context] is empty OR no connection related to the user's query can be found, output ONLY the following sentence and immediately terminate the response — do NOT add any further explanation, commentary, or background knowledge under any circumstances: 'According to the provided historical records, no information or connection regarding your query can be found.'\n"
+                            . "5. [Tone & Style]: Maintain the professional and respectful tone of a museum docent. Begin immediately with the core causal relationship — no unnecessary preamble.\n\n"
+                            . "# Additional Guidelines\n"
+                            . "- Adhere strictly to factual grounding based on rigorous historical source criticism (史料批判). Never forcibly combine historically unrelated figures or events.\n"
+                            . "- Facts stated within each <SOURCE_EVIDENCE> block are valid ONLY for the entity, region, and event of that block. Cross-attribution is strictly prohibited.\n"
+                            . "- Do NOT expose any internal AI/system jargon (e.g., 'Zero-Correlation', 'knowledge graph', 'hallucination', 'nodes', 'database', 'prompt', hash IDs like n8774...) in the output.\n"
+                            . "- Express all historical judgments using authentic scholarly terminology (e.g., 'critical analysis of primary sources', 'archival verification of historical divergence').";
                 
                 $fact_table_section = $fact_table ? "[Stage 1: Verified Archival Fact Table (In-Context Knowledge)]\n{$fact_table}\n\n" : "";
 
@@ -799,15 +828,37 @@ if (isset($_GET['ajax'])) {
                              . "5. Synthesis & Historical Significance in Modern Korean Independence History\n\n"
                              . "[Archival Evidence Envelopes]\n{$context_str}";
             } else {
-                $sys_prompt = "당신은 한국 근현대사 및 독립운동사 전문 수석 역사 도슨트이자 정통 역사학술 연구자입니다. "
-                            . "제공된 1차 사료와 문헌 기록을 바탕으로 실제 학술 출판 및 다큐멘터리 방송에 즉시 사용할 수 있는 완성도 높은 해설 원고를 작성하십시오. "
-                            . "철저한 사료 비판(史料批判)과 사실 검증에 입각하여 서술하며, 역사적 상관관계가 없는 인물과 사건을 억지로 결합하거나 사실을 왜곡하지 마십시오. "
-                            . "원고 본문에 'Zero-Correlation', '지식 그래프', '노드', '데이터베이스', '프롬프트', '환각', '시스템', 영문 해시 식별자(예: n8774... 등)와 같은 인공지능·전산 메타 용어를 절대로 노출하지 마십시오. "
-                            . "모든 판단과 분석은 정통 역사학 연구 어휘(예: '사료 비판을 통한 실증', '당대 1차 사료군 및 공문서 판결문 분석')로 품격 있게 서술하십시오.";
+                $sys_prompt = "# 역할 (Role)\n"
+                            . "당신은 1919년 3·1 운동의 복잡한 확산 경로와 인물 간의 숨겨진 연관성을 해설하는 '지식그래프 기반 역사 전문 도슨트'입니다.\n"
+                            . "한국 근현대사 및 독립운동사 전문 수석 역사 도슨트이자 정통 역사학술 연구자로서, "
+                            . "제공된 1차 사료와 문헌 기록을 바탕으로 학술 출판 및 다큐멘터리 방송에 즉시 사용할 수 있는 완성도 높은 해설 원고를 작성하십시오.\n\n"
+                            . "# 목적 (Objective)\n"
+                            . "사용자의 질의를 바탕으로 지식그래프(Graph DB)에서 인출된 [사료 컨텍스트]를 분석하여, "
+                            . "인물-사건-장소로 이어지는 역사적 인과율을 정확하고 논리적으로 해설합니다.\n\n"
+                            . "# 절대 준수 규칙 (Strict Rules)\n"
+                            . "1. [Language Mirroring]: 사용자가 질의한 언어를 감지하여 동일한 언어로 답변하십시오. "
+                            . "(예: 영어로 질문하면 완벽한 영문 해설을, 한국어로 질문하면 한국어 해설을 제공합니다.)\n"
+                            . "2. [Zero Hallucination]: 오직 하단에 제공된 [사료 컨텍스트]에 명시된 사실(인명, 지명, 날짜, 사건)만을 사용하여 답변을 구성하십시오. "
+                            . "사전 학습된 외부 지식을 섞어 지어내지 마십시오.\n"
+                            . "3. [Multi-hop Explanation]: 컨텍스트에 2단계(2-hop) 이상의 연결 고리(예: 인물 A → 공동 사건 → 인물 B → 타지역 사건)가 있다면, "
+                            . "이 인과 과정이 어떻게 이어지는지 사용자가 이해하기 쉽게 풀어서 설명하십시오. 서사의 흐름이 끊기지 않게 연결하십시오.\n"
+                            . "4. [Hard Trap Defense]: 제공된 [사료 컨텍스트]가 비어있거나, 사용자 질의와 관련된 연관성을 찾을 수 없는 경우, "
+                            . "오직 다음 문장만 출력하고 해설을 즉시 종료하십시오. 사전 학습된 배경지식을 동원한 부연 설명이나 해설을 절대 덧붙이지 마십시오. "
+                            . "(한국어) '제공된 역사 기록(지식그래프 사료)에서는 질문하신 내용이나 개체 간의 연관성을 찾을 수 없습니다.' "
+                            . "(영어 질의 시) 'According to the provided historical records, no information or connection regarding your query can be found.'\n"
+                            . "5. [Tone & Style]: 전문적이고 정중한 박물관 해설사(도슨트)의 어조를 유지하며, 불필요한 서론 없이 핵심 인과관계부터 즉시 설명하십시오.\n\n"
+                            . "# 추가 작성 지침\n"
+                            . "- 철저한 사료 비판(史料批判)과 사실 검증에 입각하여 서술하며, 역사적 상관관계가 없는 인물과 사건을 억지로 결합하거나 사실을 왜곡하지 마십시오.\n"
+                            . "- 각 <SOURCE_EVIDENCE> 블록에 명시된 인물·행동·일자는 해당 개체·지역·사건 서술에만 유효합니다. 교차 귀속(Cross-attribution)을 엄격히 금지합니다.\n"
+                            . "- 원고 본문에 'Zero-Correlation', '지식 그래프', '노드', '데이터베이스', '프롬프트', '환각', '시스템', 영문 해시 식별자(예: n8774... 등) 같은 인공지능·전산 메타 용어를 절대 노출하지 마십시오.\n"
+                            . "- 모든 판단과 분석은 정통 역사학 연구 어휘(예: '사료 비판을 통한 실증', '당대 1차 사료군 및 공문서 판결문 분석')로 품격 있게 서술하십시오.";
                 
                 $fact_table_section = $fact_table ? "■ [1단계: 사료 비판 기반 정밀 사건-장소-인물 교차 검증표 (In-Context Knowledge Table)]\n{$fact_table}\n\n" : "";
 
-                $user_prompt = "제공된 사료와 1단계 사료 비판 검증표를 바탕으로 '{$term}'에 관한 심층 역사 해설문을 학술 다큐멘터리 원고 양식으로 작성하십시오.\n\n"
+                $user_prompt = "# 입력 변수 (Input Variables)\n"
+                             . "- [사용자 질의]: {$term}\n"
+                             . "- [사료 컨텍스트]: 아래 사료 원문 블록 및 1단계 사료 비판 검증표에 포함되어 있습니다.\n\n"
+                             . "위 [사용자 질의]에 대해, 제공된 [사료 컨텍스트]와 1단계 사료 비판 검증표를 바탕으로 '{$term}'에 관한 심층 역사 해설문을 학술 다큐멘터리 원고 양식으로 작성하십시오.\n\n"
                              . $fact_table_section
                              . "■ [핵심 원칙: 사료 비판 및 정통 역사학술 원고 작성 지침]\n"
                              . "1. 사료 격벽 준수 및 교차 귀속(Cross-attribution) 절대 금지:\n"
@@ -2131,9 +2182,9 @@ async function performSearch() {
     
     try {
         const analysis = await api('analyze', { term });
-        document.getElementById('intent-val').innerText = analysis.intent;
+        document.getElementById('intent-val').innerText = analysis.intent_type || analysis.intent;
         document.getElementById('focus-val').innerText = analysis.focus;
-        document.getElementById('explanation-val').innerText = analysis.explanation;
+        document.getElementById('explanation-val').innerText = analysis.analyzed_intent_ko || analysis.explanation;
         document.getElementById('analysis-box').style.display = 'block';
 
         const keywords = analysis.keywords || [term];
