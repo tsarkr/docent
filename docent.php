@@ -451,19 +451,60 @@ if (isset($_GET['ajax'])) {
             $keywords = array_values(array_filter(array_map(fn($kw) => docent_sanitize_text($kw, 180, false), $keywords)));
             if (empty($keywords)) $keywords = [$term];
             
-            // 복합 질의어(예: "유관순의 가족의 독립운동")에서 핵심 개체명 분리 보강
-            $expanded_keywords = $keywords;
-            if (!empty($term)) {
-                // 공백 및 특수문자 분리 토큰 추출
-                $tokens = preg_split('/[\s\.,\?!~]+/u', $term);
+            // 불용어 및 질의 의도어 정의 (단독 검색 금지)
+            static $graph_stopwords = [
+                '시위', '만세', '만세시위', '만세운동', '독립만세', '독립운동', '운동',
+                '과정', '배경', '사건', '전개', '역사', '활동', '내용', '결과',
+                '영향', '의의', '기록', '사료', '원인', '설명', '관계', '인물',
+                '장소', '지역', '단체', '조직', '관련', '조사', '보고', '개요',
+                '3.1운동', '3·1운동', '삼일운동', '3.1', '3·1',
+                '현황', '상황', '모습', '이유', '어떻게', '무엇', '누구', '언제',
+                '어디', '대해', '대한', '통해', '통한', '당시', '이후', '이전',
+                '알려줘', '설명해줘', '알고싶어', '알려주세요', '설명해주세요'
+            ];
+
+            // 광역 행정구역 및 도 단위 명칭
+            static $broad_regions = [
+                '수원', '서울', '경성', '경기', '경기도', '충남', '충북', '충청도',
+                '전남', '전북', '전라도', '경남', '경북', '경상도', '강원', '강원도',
+                '황해', '황해도', '평남', '평북', '평안도', '함남', '함북', '함경도'
+            ];
+
+            // 복합 질의어 및 추출 키워드 정제
+            $specific_candidates = [];
+            $general_candidates = [];
+
+            foreach (array_merge($keywords, [$term]) as $cand) {
+                $cand = trim((string)$cand);
+                if ($cand === '') continue;
+                $cand = preg_replace('/(3[·\.\s]*1\s*운동|삼일\s*운동|독립\s*운동|만세\s*운동|\b\d+운동)/u', ' ', $cand);
+                $tokens = preg_split('/[\s\.,\?!~]+/u', $cand);
+                $meaningful_tokens = [];
                 foreach ($tokens as $tk) {
-                    $tk = trim($tk);
-                    // 한국어 조사/접미사 제거
-                    $tk_clean = preg_replace('/(의|은|는|이|가|을|를|과|와|도|에서|에게|으로|로)$/u', '', $tk);
-                    if (mb_strlen($tk_clean) >= 2 && !in_array($tk_clean, $expanded_keywords, true)) {
-                        $expanded_keywords[] = $tk_clean;
+                    $tk_clean = preg_replace('/(의|은|는|이|가|을|를|과|와|도|에서|에게|으로|로)$/u', '', trim($tk));
+                    if (mb_strlen($tk_clean) >= 2 && !in_array($tk_clean, $graph_stopwords, true)) {
+                        $meaningful_tokens[] = $tk_clean;
                     }
                 }
+                foreach ($meaningful_tokens as $mt) {
+                    if (in_array($mt, $broad_regions, true)) {
+                        $general_candidates[] = $mt;
+                    } else {
+                        $specific_candidates[] = $mt;
+                    }
+                }
+            }
+
+            $specific_candidates = array_values(array_unique($specific_candidates));
+            $general_candidates = array_values(array_unique($general_candidates));
+
+            // 세부 고유명사(사강리, 제암리, 아우내 등)가 있으면 광역 지명(수원, 서울 등)은 완전히 제외
+            if (!empty($specific_candidates)) {
+                $expanded_keywords = $specific_candidates;
+            } elseif (!empty($general_candidates)) {
+                $expanded_keywords = $general_candidates;
+            } else {
+                $expanded_keywords = [$term];
             }
 
             $client = get_neo4j();
@@ -471,12 +512,14 @@ if (isset($_GET['ajax'])) {
             $edges = [];
             $evidences = [];
             $found_ids = [];
+            $found_candidates = [];
 
             $search_query = "
                 CALL db.index.fulltext.queryNodes('namesIndex', \$term) YIELD node, score
+                WHERE score >= 2.0
                 RETURN DISTINCT node as n, labels(node) as labels, score
                 ORDER BY score DESC
-                LIMIT 50
+                LIMIT 15
             ";
 
             $fallback_search_query = "
@@ -484,9 +527,9 @@ if (isset($_GET['ajax'])) {
                 WHERE any(k IN ['명칭','한글독음','한글명칭','제목','사건명','id','name','title','uid'] 
                           WHERE n[k] IS NOT NULL AND toLower(toString(n[k])) CONTAINS toLower(\$term))
                 RETURN DISTINCT n, labels(n) as labels
-                LIMIT 50
+                LIMIT 15
             ";
-            
+
             foreach ($expanded_keywords as $kw) {
                 if (empty($kw)) continue;
                 $escaped_kw = docent_escape_lucene($kw);
@@ -507,13 +550,15 @@ if (isset($_GET['ajax'])) {
                     $props = $nodes[$nid]['props'] ?? [];
                     $labels = $nodes[$nid]['labels'] ?? [];
                     $node_id = $nodes[$nid]['raw_id'] ?? 'unknown';
-                    
-                    // 인물(Person) 라벨 노드는 최우선 시드로 관리
-                    if (in_array('인물', $labels) || in_array('Person', $labels)) {
-                        array_unshift($found_ids, (string)$node_id);
-                    } else {
-                        $found_ids[] = (string)$node_id;
-                    }
+                    $rec_score = 1.0;
+                    try {
+                        if (isset($record['score'])) {
+                            $rec_score = (float)$record['score'];
+                        } elseif (method_exists($record, 'get')) {
+                            $rec_score = (float)$record->get('score');
+                        }
+                    } catch (\Throwable $scErr) {}
+                    $found_candidates[(string)$node_id] = max($found_candidates[(string)$node_id] ?? 0.0, $rec_score);
 
                     if (in_array('Thesaurus', $labels)) {
                         add_fact_evidence($evidences, 'node', [
@@ -575,8 +620,20 @@ if (isset($_GET['ajax'])) {
                 }
             }
 
+            $found_ids = [];
+            if (!empty($found_candidates)) {
+                $top_score = max($found_candidates);
+                $cutoff = max(2.0, $top_score * 0.65);
+                arsort($found_candidates);
+                foreach ($found_candidates as $cid => $cscore) {
+                    if ($cscore >= $cutoff) {
+                        $found_ids[] = $cid;
+                    }
+                }
+                $found_ids = array_slice($found_ids, 0, 15);
+            }
+
             if (!empty($found_ids)) {
-                $found_ids = array_values(array_unique(array_filter($found_ids, fn($id) => $id !== '')));
                 // 카테시안 곱을 제거하고 인접 엣지와 사건 동반참여자를 안전하게 서브쿼리로 제한
                 $graph_query = "
                     MATCH (n)
@@ -584,16 +641,16 @@ if (isset($_GET['ajax'])) {
                     CALL (n) {
                         OPTIONAL MATCH (n)-[r]-(m)
                         RETURN r, m, labels(m) as m_labels, r.context as rel_context
-                        LIMIT 50
+                        LIMIT 30
                     }
                     CALL (n) {
                         OPTIONAL MATCH (n)-[:P14_carried_out_by]-(e:사건)-[:P14_carried_out_by]-(p:인물)
                         WHERE n:인물 AND n <> p
                         RETURN e, p, labels(e) as e_labels, labels(p) as p_labels
-                        LIMIT 30
+                        LIMIT 20
                     }
                     RETURN DISTINCT n, labels(n) as n_labels, r, m, m_labels, rel_context, e, p, e_labels, p_labels
-                    LIMIT 100
+                    LIMIT 60
                 ";
 
                 // 타임아웃 또는 서브쿼리 미지원 시 초고속 안전 fallback
@@ -602,7 +659,7 @@ if (isset($_GET['ajax'])) {
                     WHERE any(k IN ['id','명칭','한글독음','한글명칭','name','title','uid'] WHERE n[k] IS NOT NULL AND toString(n[k]) IN \$search_ids)
                     OPTIONAL MATCH (n)-[r]-(m)
                     RETURN DISTINCT n, labels(n) as n_labels, r, m, labels(m) as m_labels, r.context as rel_context, null as e, null as p, [] as e_labels, [] as p_labels
-                    LIMIT 100
+                    LIMIT 60
                 ";
 
                 try {
@@ -759,6 +816,24 @@ if (isset($_GET['ajax'])) {
             if (!is_array($evidences)) $evidences = [];
             if (!is_array($pg_texts)) $pg_texts = [];
 
+            $is_stream = isset($_GET['stream']) || isset($_POST['stream']);
+            if ($is_stream) {
+                // 세션 락 해제 (스트리밍 중 다른 AJAX 요청 블로킹 방지)
+                if (session_status() === PHP_SESSION_ACTIVE) {
+                    session_write_close();
+                }
+
+                header('Content-Type: text/event-stream; charset=utf-8');
+                header('Cache-Control: no-cache, no-transform');
+                header('X-Accel-Buffering: no');
+                header('Connection: keep-alive');
+                while (ob_get_level()) ob_end_clean();
+
+                // 프록시/게이트웨이 타임아웃(HTTP 504) 방지를 위한 즉각적인 초기 SSE 핑 전송
+                echo ": keepalive\n\n";
+                flush();
+            }
+
             // 1. 입력 사료 컨텍스트 구성 (노드 격벽 Scoping Envelope 및 질의 초점 필터링 적용)
             $evidence_context = build_budgeted_evidence_context($evidences, $explain_lang, 30, 250, 800, 12000, $term, $focus);
             $pg_context = build_budgeted_pg_context($pg_texts, $explain_lang, 40, 180, 500, 12000, $term, $focus);
@@ -767,6 +842,10 @@ if (isset($_GET['ajax'])) {
             // 2. [1단계 파이프라인] 사료 비판 기반 정밀 사건-장소-인물 팩트 추출 (In-Context Knowledge Table 구축)
             $fact_table = '';
             if (!empty($context_str)) {
+                if ($is_stream) {
+                    echo ": stage1-fact-table\n\n";
+                    flush();
+                }
                 if ($explain_lang === 'en') {
                     $ext_sys = "You are an expert archival historian specializing in modern Korean history. "
                              . "Analyze the provided <SOURCE_EVIDENCE> blocks with strict source criticism. "
@@ -778,7 +857,7 @@ if (isset($_GET['ajax'])) {
                              . "提供された <SOURCE_EVIDENCE> 史料ブロックを史料批判に基づき精緻に分析し、"
                              . "各史料の事実関係を地域・人物の混同や交差帰属なく、以下の日本語ファクト表として抽出してください。\n"
                              . "必ず各ブロックに明記された事実のみを日本語で記述し、他地域の人物や出来事を決して混入させないでください。";
-                    $ext_user = "次の史料群から [史料ID | 対象エンティティ | 発生場所・地域 | 実際の行動人物 | 史料記録の核心事実 (1〜2行)] をMarkdown表形式で抽出してください（すべて日本語で記述し、韓国語の助詞や文を残さないでください）。\n\n[Archival Envelopes]\n{$context_str}";
+                    $ext_user = "次の史料群から [史料ID | 대상エンティティ | 発生場所・地域 | 実際の行動人物 | 史料記録の核心事実 (1〜2行)] をMarkdown表形式で抽出してください（すべて日本語で記述し、韓国語の助詞や文を残さないでください）。\n\n[Archival Envelopes]\n{$context_str}";
                 } elseif ($explain_lang === 'zh') {
                     $ext_sys = "您是精通韩国近现代史及三一运动一手史料分析的专业历史学者。"
                              . "请依据严格的史料批判方法分析所提供的 <SOURCE_EVIDENCE> 史料块，"
@@ -797,7 +876,7 @@ if (isset($_GET['ajax'])) {
                     $fact_table = call_gemini([
                         ["role" => "system", "content" => $ext_sys],
                         ["role" => "user", "content" => $ext_user]
-                    ], false, 1500, 0.0, 0.8);
+                    ], false, 1500, 0.0, 0.8, 12);
                 } catch (Throwable $extErr) {
                     error_log("Stage 1 fact extraction failed: " . $extErr->getMessage());
                 }
@@ -1010,19 +1089,7 @@ if (isset($_GET['ajax'])) {
                              . "[최종 확인]: 서론부터 제5장 결론까지 전체를 품격 있고 완결성 높은 학술 한국어로 완성하십시오.";
             }
 
-            $is_stream = isset($_GET['stream']) || isset($_POST['stream']);
             if ($is_stream) {
-                // 세션 락 해제 (스트리밍 중 다른 AJAX 요청 블로킹 방지)
-                if (session_status() === PHP_SESSION_ACTIVE) {
-                    session_write_close();
-                }
-
-                header('Content-Type: text/event-stream; charset=utf-8');
-                header('Cache-Control: no-cache, no-transform');
-                header('X-Accel-Buffering: no');
-                header('Connection: keep-alive');
-                while (ob_get_level()) ob_end_clean();
-
                 stream_gemini([
                     ["role" => "system", "content" => $sys_prompt],
                     ["role" => "user", "content" => $user_prompt]
@@ -1248,19 +1315,33 @@ function get_pg() {
     }
 }
 
-function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature = null, $top_p = null) {
+function get_gemini_candidate_models() {
+    $configured = trim((string)get_cfg('GEMINI_MODEL', 'gemini-3-flash-preview'));
+    $candidates = [
+        $configured,
+        'gemini-3-flash-preview',
+        'gemini-3.6-flash',
+        'gemini-3.1-flash-lite-preview',
+        'gemini-3.5-flash-lite',
+    ];
+    $clean = [];
+    foreach ($candidates as $cand) {
+        $cand = trim((string)$cand);
+        if ($cand !== '' && preg_match('/^[A-Za-z0-9._-]+$/', $cand) && !in_array($cand, $clean, true)) {
+            $clean[] = $cand;
+        }
+    }
+    return !empty($clean) ? $clean : ['gemini-3-flash-preview'];
+}
+
+function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature = null, $top_p = null, $timeout = 25) {
     $api_key = get_cfg('GEMINI_API_KEY');
     if (!$api_key) {
         $api_key = get_cfg('API_KEY');
     }
     if (!$api_key) return $is_json ? '{"explanation":"API Key missing"}' : docent_t("API Key가 설정되지 않았습니다.", "API key is not configured.");
 
-    $model = trim(get_cfg('GEMINI_MODEL', 'gemini-3.5-flash-lite'));
-    if (!preg_match('/^[A-Za-z0-9._-]+$/', $model)) {
-        return $is_json ? '{"explanation":"Invalid model configuration"}' : "AI 모델 설정이 올바르지 않습니다.";
-    }
-    $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent";
-
+    $candidate_models = get_gemini_candidate_models();
     $system_prompt = "";
     $contents = [];
     foreach ($msgs as $m) {
@@ -1299,52 +1380,58 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
         $payload["generationConfig"]["response_mime_type"] = "application/json";
     }
 
-    $ch = curl_init($url);
-    curl_setopt_array($ch, [
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_POST => true,
-        CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE),
-        CURLOPT_HTTPHEADER => ["Content-Type: application/json", "x-goog-api-key: {$api_key}"],
-        CURLOPT_CONNECTTIMEOUT => 10,
-        CURLOPT_TIMEOUT => 60,
-        CURLOPT_SSL_VERIFYPEER => true,
-        CURLOPT_SSL_VERIFYHOST => 2,
-    ]);
+    $last_error_message = '';
+    $post_json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
 
-    $res = curl_exec($ch);
-    $curl_errno = curl_errno($ch);
-    $curl_error = curl_error($ch);
-    $http_code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    foreach ($candidate_models as $model) {
+        $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent";
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $post_json,
+            CURLOPT_HTTPHEADER => ["Content-Type: application/json", "x-goog-api-key: {$api_key}"],
+            CURLOPT_CONNECTTIMEOUT => 6,
+            CURLOPT_TIMEOUT => max(5, (int)$timeout),
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+        ]);
 
-    if ($res === false || $curl_errno !== 0 || $http_code !== 200) {
-        $provider_message = '';
-        $error_data = json_decode((string)$res, true);
-        if (is_array($error_data['error'] ?? null)) {
-            $provider_message = docent_sanitize_text($error_data['error']['message'] ?? '', 240, false);
+        $res = curl_exec($ch);
+        $curl_errno = curl_errno($ch);
+        $curl_error = curl_error($ch);
+        $http_code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+
+        if ($res === false || $curl_errno !== 0 || $http_code !== 200) {
+            $provider_message = '';
+            $error_data = json_decode((string)$res, true);
+            if (is_array($error_data['error'] ?? null)) {
+                $provider_message = docent_sanitize_text($error_data['error']['message'] ?? '', 240, false);
+            }
+            $last_error_message = $provider_message !== '' ? "Gemini 오류 ({$model}): {$provider_message}" : "AI 요청 실패 ({$model}, HTTP {$http_code}, cURL {$curl_errno})";
+            error_log(sprintf('Gemini model %s failed: HTTP %d, cURL %d, %s, provider: %s — trying next candidate', $model, $http_code, $curl_errno, $curl_error, $provider_message));
+            continue;
         }
-        error_log(sprintf('Gemini request failed: HTTP %d, cURL %d, %s, provider: %s', $http_code, $curl_errno, $curl_error, $provider_message));
-        $safe_message = $provider_message !== '' ? "Gemini 오류: {$provider_message}" : "AI 요청에 실패했습니다. (HTTP {$http_code})";
-        return $is_json
-            ? json_encode(["explanation" => $safe_message], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE)
-            : $safe_message;
-    }
 
-    $data = json_decode($res, true);
-    
-    // 복수 parts를 안전하게 전체 결합하여 누락 방지
-    $content = '';
-    if (isset($data['candidates'][0]['content']['parts']) && is_array($data['candidates'][0]['content']['parts'])) {
-        foreach ($data['candidates'][0]['content']['parts'] as $part) {
-            if (isset($part['text'])) {
-                $content .= $part['text'];
+        $data = json_decode($res, true);
+        $content = '';
+        if (isset($data['candidates'][0]['content']['parts']) && is_array($data['candidates'][0]['content']['parts'])) {
+            foreach ($data['candidates'][0]['content']['parts'] as $part) {
+                if (isset($part['text'])) {
+                    $content .= $part['text'];
+                }
             }
         }
+
+        if (trim($content) !== '') {
+            return $content;
+        }
     }
 
-    if (trim($content) === '') {
-        return $is_json ? '{"explanation":"Empty response"}' : "AI 응답 본문이 비어 있습니다.";
-    }
-    return $content;
+    $safe_message = $last_error_message !== '' ? $last_error_message : "AI 응답을 생성하지 못했습니다.";
+    return $is_json
+        ? json_encode(["explanation" => $safe_message], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE)
+        : $safe_message;
 }
 
 function stream_gemini($msgs, callable $on_chunk, $max_tokens = 8192, $temperature = null, $top_p = null) {
@@ -1355,14 +1442,7 @@ function stream_gemini($msgs, callable $on_chunk, $max_tokens = 8192, $temperatu
         return;
     }
 
-    $model = trim(get_cfg('GEMINI_MODEL', 'gemini-3.5-flash-lite'));
-    if (!preg_match('/^[A-Za-z0-9._-]+$/', $model)) {
-        $on_chunk("AI 모델 설정이 올바르지 않습니다.");
-        return;
-    }
-
-    $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:streamGenerateContent?alt=sse";
-
+    $candidate_models = get_gemini_candidate_models();
     $system_prompt = "";
     $contents = [];
     foreach ($msgs as $m) {
@@ -1397,48 +1477,64 @@ function stream_gemini($msgs, callable $on_chunk, $max_tokens = 8192, $temperatu
         ];
     }
 
-    $buffer = '';
-    $ch = curl_init($url);
-    curl_setopt_array($ch, [
-        CURLOPT_POST => true,
-        CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE),
-        CURLOPT_HTTPHEADER => ["Content-Type: application/json", "x-goog-api-key: {$api_key}"],
-        CURLOPT_CONNECTTIMEOUT => 10,
-        CURLOPT_TIMEOUT => 90,
-        CURLOPT_SSL_VERIFYPEER => true,
-        CURLOPT_SSL_VERIFYHOST => 2,
-        CURLOPT_WRITEFUNCTION => function($ch, $data) use (&$buffer, $on_chunk) {
-            $buffer .= $data;
-            while (preg_match('/^(.*?)(?:\r?\n\r?\n)/s', $buffer, $matches)) {
-                $block = $matches[1];
-                $matched_len = strlen($matches[0]);
-                $buffer = substr($buffer, $matched_len);
+    $post_json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
 
-                $lines = preg_split('/\r?\n/', $block);
-                foreach ($lines as $line) {
-                    $line = trim($line);
-                    if (str_starts_with($line, 'data: ')) {
-                        $json_str = substr($line, 6);
-                        $parsed = json_decode($json_str, true);
-                        if (isset($parsed['candidates'][0]['content']['parts'])) {
-                            foreach ($parsed['candidates'][0]['content']['parts'] as $part) {
-                                if (isset($part['text']) && $part['text'] !== '') {
-                                    $on_chunk($part['text']);
+    foreach ($candidate_models as $model) {
+        $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:streamGenerateContent?alt=sse";
+        $buffer = '';
+        $chunks_delivered = 0;
+
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $post_json,
+            CURLOPT_HTTPHEADER => ["Content-Type: application/json", "x-goog-api-key: {$api_key}"],
+            CURLOPT_CONNECTTIMEOUT => 8,
+            CURLOPT_TIMEOUT => 90,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_WRITEFUNCTION => function($ch, $data) use (&$buffer, &$chunks_delivered, $on_chunk) {
+                $buffer .= $data;
+                while (preg_match('/^(.*?)(?:\r?\n\r?\n)/s', $buffer, $matches)) {
+                    $block = $matches[1];
+                    $matched_len = strlen($matches[0]);
+                    $buffer = substr($buffer, $matched_len);
+
+                    $lines = preg_split('/\r?\n/', $block);
+                    foreach ($lines as $line) {
+                        $line = trim($line);
+                        if (str_starts_with($line, 'data: ')) {
+                            $json_str = substr($line, 6);
+                            $parsed = json_decode($json_str, true);
+                            if (isset($parsed['candidates'][0]['content']['parts'])) {
+                                foreach ($parsed['candidates'][0]['content']['parts'] as $part) {
+                                    if (isset($part['text']) && $part['text'] !== '') {
+                                        $chunks_delivered++;
+                                        $on_chunk($part['text']);
+                                    }
                                 }
                             }
                         }
                     }
                 }
+                return strlen($data);
             }
-            return strlen($data);
-        }
-    ]);
+        ]);
 
-    curl_exec($ch);
-    $curl_errno = curl_errno($ch);
-    if ($curl_errno !== 0) {
-        $on_chunk("\n\n[연결 오류: " . curl_error($ch) . "]");
+        curl_exec($ch);
+        $curl_errno = curl_errno($ch);
+        $http_code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+
+        // 청크가 성공적으로 전달되었으면 스트리밍 완료
+        if ($chunks_delivered > 0 && $curl_errno === 0) {
+            return;
+        }
+
+        // 청크가 전달되기 전에 실패한 경우 다음 후보 모델로 fallback 시도
+        error_log(sprintf('stream_gemini model %s failed before stream (HTTP %d, cURL %d) — trying next model', $model, $http_code, $curl_errno));
     }
+
+    $on_chunk("\n\n[AI 해설 생성 중 서비스 지연이 발생했습니다. 잠시 후 다시 시도해 주세요.]");
 }
 
 
@@ -1653,6 +1749,7 @@ function select_prefetch_names_by_degree($nodes, $edges) {
 }
 
 function add_fact_evidence(&$evidences, $prefix, $hash_parts, $payload, $max_count = 30) {
+    if (!is_array($evidences)) $evidences = [];
     if (count($evidences) >= $max_count) return false;
     $hash_source = implode('|', array_map(fn($v) => (string)$v, $hash_parts));
     $key = "{$prefix}-" . sha1($hash_source);
