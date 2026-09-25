@@ -76,15 +76,23 @@
 <body class="bg-ink-50 text-ink-900 font-sans min-h-screen">
 
     <!-- ═══════════════ HEADER ═══════════════ -->
-    <header class="bg-white/80 backdrop-blur-md border-b border-ink-100 sticky top-0 z-50">
-        <div class="max-w-5xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between">
-            <div class="flex items-center gap-2.5">
-                <span class="text-xl">🇰🇷</span>
-                <h1 class="text-lg sm:text-xl font-bold text-ink-900 tracking-tight">3.1 운동 역사 도슨트</h1>
+    <header class="bg-white/90 backdrop-blur-md border-b border-ink-100 sticky top-0 z-50">
+        <div class="max-w-5xl mx-auto px-4 sm:px-6 py-2.5 flex items-center justify-between gap-3">
+            <div class="flex items-center gap-2.5 min-w-0">
+                <span class="text-xl shrink-0">🇰🇷</span>
+                <div class="min-w-0">
+                    <h1 id="header-title" class="text-base sm:text-lg font-bold text-ink-900 tracking-tight truncate">3.1 운동 역사 도슨트</h1>
+                </div>
+                <span class="hidden md:inline text-[11px] px-2 py-0.5 bg-ink-100 text-ink-500 rounded-full font-mono">Knowledge Graph RAG</span>
             </div>
-            <div class="flex items-center gap-3 text-sm text-ink-400">
-                <span class="hidden sm:inline" title="다국어 질의를 자동 감지합니다">🌐 다국어 지원</span>
-                <span class="text-xs px-2 py-1 bg-ink-100 rounded-full text-ink-500">Knowledge Graph RAG</span>
+
+            <!-- Multi-language interactive switcher -->
+            <div class="flex items-center gap-1 bg-ink-100/90 p-1 rounded-xl border border-ink-200/80 shadow-xs text-xs font-medium shrink-0">
+                <button type="button" onclick="setUiLanguage('auto')" data-lang="auto" class="lang-nav-btn px-2.5 py-1 rounded-lg text-xs font-semibold bg-white text-ink-900 shadow-xs transition-all">🌐 Auto</button>
+                <button type="button" onclick="setUiLanguage('ko')" data-lang="ko" class="lang-nav-btn px-2 py-1 rounded-lg text-xs text-ink-600 hover:text-ink-900 transition-all">🇰🇷 한국어</button>
+                <button type="button" onclick="setUiLanguage('en')" data-lang="en" class="lang-nav-btn px-2 py-1 rounded-lg text-xs text-ink-600 hover:text-ink-900 transition-all">🇺🇸 English</button>
+                <button type="button" onclick="setUiLanguage('ja')" data-lang="ja" class="lang-nav-btn px-2 py-1 rounded-lg text-xs text-ink-600 hover:text-ink-900 transition-all">🇯🇵 日本語</button>
+                <button type="button" onclick="setUiLanguage('zh')" data-lang="zh" class="lang-nav-btn px-2 py-1 rounded-lg text-xs text-ink-600 hover:text-ink-900 transition-all">🇨🇳 中文</button>
             </div>
         </div>
     </header>
@@ -93,30 +101,67 @@
     <main class="max-w-5xl mx-auto px-4 sm:px-6 pb-24">
 
         <!-- ─── Hero Search ─── -->
-        <section id="hero-section" class="pt-16 sm:pt-24 pb-8 text-center transition-all duration-500">
-            <p class="text-ink-400 text-sm mb-6 tracking-wide">1919년 3·1 운동의 인물, 사건, 장소를 지식그래프에서 탐색합니다</p>
+        <section id="hero-section" class="pt-14 sm:pt-20 pb-8 text-center transition-all duration-500">
+            <!-- Multilingual Capability Indicator Badge -->
+            <div class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-white border border-ink-200/80 text-xs text-ink-600 shadow-xs mb-4 hover:border-taegeuk-blue/40 transition-colors">
+                <span class="flex items-center gap-1.5 font-bold text-taegeuk-blue">
+                    <span class="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                    <span>🌐 Multilingual Knowledge Graph</span>
+                </span>
+                <span class="text-ink-200">|</span>
+                <span id="hero-badge-desc" class="text-ink-500">한국어 · English · 日本語 · 中文 자유 질의 지원</span>
+            </div>
+
+            <h2 id="hero-title" class="text-2xl sm:text-3xl font-extrabold text-ink-900 tracking-tight mb-2">1919년 3·1 운동 역사 도슨트</h2>
+            <p id="hero-subtitle" class="text-ink-400 text-sm mb-6 tracking-wide max-w-xl mx-auto">어떤 언어로 질문하셔도 인물·사건·장소의 1차 사료를 탐색하고 동일 언어로 학술 해설을 제공합니다</p>
+
             <div class="max-w-2xl mx-auto">
                 <div class="flex items-center bg-white border border-ink-200 rounded-2xl shadow-lg shadow-ink-900/5 hover:shadow-xl hover:border-ink-300 transition-all duration-300 focus-within:border-taegeuk-blue focus-within:ring-2 focus-within:ring-taegeuk-blue/20">
-                    <span class="pl-5 text-ink-300">
-                        <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35" stroke-linecap="round"/></svg>
+                    <!-- Real-time language detection tag -->
+                    <span id="input-lang-tag" class="ml-3 px-2 py-1 text-[11px] font-mono font-semibold rounded-md bg-ink-100 text-ink-600 border border-ink-200/70 select-none whitespace-nowrap">
+                        🌐 ALL LANG
                     </span>
                     <input id="search-input" type="text"
                         class="flex-1 py-4 px-3 text-base sm:text-lg bg-transparent outline-none placeholder:text-ink-300 text-ink-800"
                         placeholder="인물, 사건, 장소를 자유롭게 질문하세요..." autocomplete="off">
-                    <button id="search-btn" onclick="submitQuery()"
-                        class="mr-2 px-5 py-2.5 bg-ink-900 text-white rounded-xl text-sm font-medium hover:bg-ink-800 active:scale-95 transition-all duration-200 flex items-center gap-1.5">
+                    <button id="search-btn" type="button" onclick="submitQuery()"
+                        class="mr-2 px-5 py-2.5 bg-ink-900 text-white rounded-xl text-sm font-medium hover:bg-ink-800 active:scale-95 transition-all duration-200 flex items-center gap-1.5 shrink-0 cursor-pointer">
                         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M13 7l5 5m0 0l-5 5m5-5H6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                        탐색
+                        <span id="search-btn-text">탐색</span>
                     </button>
                 </div>
             </div>
-            <!-- Suggestion Chips -->
-            <div class="mt-6 flex flex-wrap justify-center gap-2 max-w-2xl mx-auto">
-                <button onclick="setQuery('유관순의 아우내 장터 만세운동')" class="suggestion-chip px-4 py-2 bg-white border border-ink-200 rounded-full text-sm text-ink-600 hover:bg-taegeuk-red-light hover:border-taegeuk-red/30 hover:text-taegeuk-red">유관순의 아우내 장터 만세운동</button>
-                <button onclick="setQuery('이동휘의 무장투쟁 노선')" class="suggestion-chip px-4 py-2 bg-white border border-ink-200 rounded-full text-sm text-ink-600 hover:bg-taegeuk-blue-light hover:border-taegeuk-blue/30 hover:text-taegeuk-blue">이동휘의 무장투쟁 노선</button>
-                <button onclick="setQuery('수원 사강리 시위 과정')" class="suggestion-chip px-4 py-2 bg-white border border-ink-200 rounded-full text-sm text-ink-600 hover:bg-taegeuk-red-light hover:border-taegeuk-red/30 hover:text-taegeuk-red">수원 사강리 시위 과정</button>
-                <button onclick="setQuery('Who led the protests in Pyongyang?')" class="suggestion-chip px-4 py-2 bg-white border border-ink-200 rounded-full text-sm text-ink-600 hover:bg-taegeuk-blue-light hover:border-taegeuk-blue/30 hover:text-taegeuk-blue">Who led the protests in Pyongyang?</button>
-                <button onclick="setQuery('임시정부 수립')" class="suggestion-chip px-4 py-2 bg-white border border-ink-200 rounded-full text-sm text-ink-600 hover:bg-taegeuk-red-light hover:border-taegeuk-red/30 hover:text-taegeuk-red">임시정부 수립</button>
+
+            <!-- Categorized Multilingual Suggestion Chips -->
+            <div id="suggestion-chips" class="mt-6 flex flex-wrap justify-center gap-2 max-w-3xl mx-auto">
+                <button type="button" data-query="유관순의 아우내 장터 만세운동" onclick="setQuery('유관순의 아우내 장터 만세운동')" class="suggestion-chip px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all flex items-center gap-1.5 cursor-pointer">
+                    <span class="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[10px] font-bold">🇰🇷 KO</span>
+                    <span>유관순의 아우내 장터 만세운동</span>
+                </button>
+                <button type="button" data-query="Who led the protests in Pyongyang?" onclick="setQuery('Who led the protests in Pyongyang?')" class="suggestion-chip px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-blue/40 hover:text-taegeuk-blue hover:shadow-sm transition-all flex items-center gap-1.5 cursor-pointer">
+                    <span class="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 text-[10px] font-bold">🇺🇸 EN</span>
+                    <span>Who led the protests in Pyongyang?</span>
+                </button>
+                <button type="button" data-query="이동휘의 무장투쟁 노선" onclick="setQuery('이동휘의 무장투쟁 노선')" class="suggestion-chip px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all flex items-center gap-1.5 cursor-pointer">
+                    <span class="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[10px] font-bold">🇰🇷 KO</span>
+                    <span>이동휘의 무장투쟁 노선</span>
+                </button>
+                <button type="button" data-query="提岩里(チェアムニ)虐殺事件の真相と背景" onclick="setQuery('提岩里(チェアムニ)虐殺事件の真相と背景')" class="suggestion-chip px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-amber-400 hover:text-amber-800 hover:shadow-sm transition-all flex items-center gap-1.5 cursor-pointer">
+                    <span class="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-[10px] font-bold">🇯🇵 JA</span>
+                    <span>提岩里虐殺事件の背景</span>
+                </button>
+                <button type="button" data-query="1919年三一运动在平壤的爆发过程与领导者" onclick="setQuery('1919年三一运动在平壤的爆发过程与领导者')" class="suggestion-chip px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-emerald-500 hover:text-emerald-800 hover:shadow-sm transition-all flex items-center gap-1.5 cursor-pointer">
+                    <span class="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 text-[10px] font-bold">🇨🇳 ZH</span>
+                    <span>三一运动在平壤的爆发过程</span>
+                </button>
+                <button type="button" data-query="What was the role of Son Byong-hi in the 1919 Movement?" onclick="setQuery('What was the role of Son Byong-hi in the 1919 Movement?')" class="suggestion-chip px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-blue/40 hover:text-taegeuk-blue hover:shadow-sm transition-all flex items-center gap-1.5 cursor-pointer">
+                    <span class="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 text-[10px] font-bold">🇺🇸 EN</span>
+                    <span>Role of Son Byong-hi</span>
+                </button>
+                <button type="button" data-query="수원 사강리 시위 과정" onclick="setQuery('수원 사강리 시위 과정')" class="suggestion-chip px-3.5 py-1.5 bg-white border border-ink-200 rounded-full text-xs text-ink-700 hover:border-taegeuk-red/40 hover:text-taegeuk-red hover:shadow-sm transition-all flex items-center gap-1.5 cursor-pointer">
+                    <span class="px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 text-[10px] font-bold">🇰🇷 KO</span>
+                    <span>수원 사강리 시위 과정</span>
+                </button>
             </div>
         </section>
 
@@ -138,7 +183,7 @@
         <!-- ─── Context Source Badges ─── -->
         <section id="sources-panel" class="hidden animate-slide-up mb-6">
             <div class="flex items-center gap-2 mb-3">
-                <span class="text-xs font-semibold text-ink-400 uppercase tracking-wider">수집된 사료</span>
+                <span id="sources-title" class="text-xs font-semibold text-ink-400 uppercase tracking-wider">수집된 사료</span>
                 <span id="sources-count" class="text-xs px-2 py-0.5 bg-ink-100 rounded-full text-ink-500"></span>
             </div>
             <div id="sources-badges" class="flex flex-wrap gap-2"></div>
@@ -150,17 +195,17 @@
                 <div class="flex items-center justify-between px-5 py-3 border-b border-ink-100">
                     <div class="flex items-center gap-2">
                         <svg class="w-4 h-4 text-ink-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4M2 12h4m12 0h4M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83M4.93 19.07l2.83-2.83m8.48-8.48l2.83-2.83"/></svg>
-                        <span class="text-sm font-semibold text-ink-600">지식그래프</span>
+                        <span id="graph-title" class="text-sm font-semibold text-ink-600">지식그래프</span>
                     </div>
                     <div class="flex items-center gap-3">
                         <div class="hidden sm:flex items-center gap-3 text-xs text-ink-400">
-                            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-blue-600"></span>인물</span>
-                            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-red-600"></span>사건</span>
-                            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-green-600"></span>장소</span>
-                            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-purple-600"></span>기관</span>
-                            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-amber-500"></span>사료</span>
+                            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-blue-600"></span><span id="legend-person">인물</span></span>
+                            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-red-600"></span><span id="legend-event">사건</span></span>
+                            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-green-600"></span><span id="legend-place">장소</span></span>
+                            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-purple-600"></span><span id="legend-org">기관</span></span>
+                            <span class="flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-sm bg-amber-500"></span><span id="legend-doc">사료</span></span>
                         </div>
-                        <button onclick="centerGraph()" class="text-xs text-ink-400 hover:text-ink-600 transition-colors px-2 py-1 rounded hover:bg-ink-50">가운데로</button>
+                        <button id="center-graph-btn" onclick="centerGraph()" class="text-xs text-ink-400 hover:text-ink-600 transition-colors px-2 py-1 rounded hover:bg-ink-50">가운데로</button>
                     </div>
                 </div>
                 <div id="graph-container" class="h-[400px] sm:h-[460px] cursor-pointer"></div>
@@ -169,7 +214,7 @@
             <div id="node-info-panel" class="hidden mt-3 bg-white border border-ink-100 rounded-xl shadow-sm overflow-hidden animate-slide-up">
                 <div class="px-5 py-3 bg-ink-50 border-b border-ink-100 flex items-center gap-2">
                     <svg class="w-4 h-4 text-taegeuk-blue" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                    <span class="text-sm font-semibold text-ink-700">선택된 노드 상세</span>
+                    <span id="node-detail-title" class="text-sm font-semibold text-ink-700">선택된 노드 상세</span>
                 </div>
                 <div id="node-info-content" class="p-5 text-sm max-h-[400px] overflow-y-auto"></div>
             </div>
@@ -178,15 +223,25 @@
         <!-- ─── Docent Explanation ─── -->
         <section id="explanation-section" class="hidden animate-slide-up mb-8">
             <div class="bg-white border border-ink-100 rounded-xl shadow-sm overflow-hidden">
-                <div class="px-5 sm:px-8 py-4 border-b border-ink-100 flex items-center justify-between flex-wrap gap-3">
-                    <div class="flex items-center gap-2">
+                <div class="px-5 sm:px-8 py-3.5 border-b border-ink-100 flex items-center justify-between flex-wrap gap-3 bg-white">
+                    <div class="flex items-center gap-2.5">
                         <span class="text-lg">📖</span>
-                        <h2 class="text-base font-bold text-ink-800">도슨트 해설</h2>
+                        <h2 id="docent-title" class="text-base font-bold text-ink-800">도슨트 해설</h2>
+                        <span id="current-explain-lang-badge" class="px-2.5 py-0.5 text-xs rounded-full bg-blue-50 text-blue-700 font-medium border border-blue-200">🇰🇷 한국어</span>
                     </div>
-                    <button id="explain-btn" onclick="generateExplanation()"
-                        class="hidden px-4 py-2 bg-taegeuk-red text-white rounded-lg text-sm font-medium hover:bg-red-700 active:scale-95 transition-all duration-200 shadow-sm">
-                        ✨ 해설 생성
-                    </button>
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <div class="flex items-center gap-1 text-xs text-ink-400 bg-ink-50 px-2 py-1 rounded-lg border border-ink-100">
+                            <span id="reexplain-label" class="mr-1 text-[11px] font-medium text-ink-500">언어 전환:</span>
+                            <button onclick="reExplainWithLang('ko')" class="explain-lang-btn px-2 py-0.5 rounded text-ink-600 hover:text-ink-900 hover:bg-white text-[11px] font-medium transition-all">🇰🇷 KO</button>
+                            <button onclick="reExplainWithLang('en')" class="explain-lang-btn px-2 py-0.5 rounded text-ink-600 hover:text-ink-900 hover:bg-white text-[11px] font-medium transition-all">🇺🇸 EN</button>
+                            <button onclick="reExplainWithLang('ja')" class="explain-lang-btn px-2 py-0.5 rounded text-ink-600 hover:text-ink-900 hover:bg-white text-[11px] font-medium transition-all">🇯🇵 JA</button>
+                            <button onclick="reExplainWithLang('zh')" class="explain-lang-btn px-2 py-0.5 rounded text-ink-600 hover:text-ink-900 hover:bg-white text-[11px] font-medium transition-all">🇨🇳 ZH</button>
+                        </div>
+                        <button id="explain-btn" onclick="generateExplanation()"
+                            class="hidden px-4 py-1.5 bg-taegeuk-red text-white rounded-lg text-xs font-semibold hover:bg-red-700 active:scale-95 transition-all shadow-xs">
+                            ✨ 해설 생성
+                        </button>
+                    </div>
                 </div>
                 <div id="explanation-content" class="px-5 sm:px-8 py-6 font-serif text-ink-700 leading-[1.85] text-[0.95rem] sm:text-base docent-prose min-h-[120px]">
                     <p class="text-ink-400 italic">검색어를 입력하면 지식그래프 탐색 후 AI 도슨트 해설이 생성됩니다.</p>
@@ -200,7 +255,7 @@
                 <summary class="px-5 py-3 cursor-pointer flex items-center justify-between text-sm text-ink-400 hover:text-ink-600 transition-colors select-none">
                     <span class="flex items-center gap-2">
                         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.573-1.066z" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3"/></svg>
-                        시스템 로그
+                        <span id="system-log-title">시스템 로그</span>
                     </span>
                     <svg class="w-4 h-4 transition-transform duration-200 group-open:rotate-180" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M19 9l-7 7-7-7" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 </summary>
@@ -215,11 +270,119 @@
 
     <!-- ═══════════════ FOOTER ═══════════════ -->
     <footer class="fixed bottom-0 left-0 right-0 bg-white/80 backdrop-blur-md border-t border-ink-100 py-2 text-center text-xs text-ink-300 z-40">
-        제작: jo.gyungmin@gmail.com · AI API 비용은 개인 감당 · 적절한 사용 부탁드립니다
+        <span id="footer-text">제작: jo.gyungmin@gmail.com · AI API 비용은 개인 감당 · 적절한 사용 부탁드립니다</span>
     </footer>
 
     <!-- ═══════════════ JAVASCRIPT ═══════════════ -->
     <script>
+    /* ━━━ I18N Localization Dictionary ━━━ */
+    const I18N = {
+        ko: {
+            pageTitle: "3.1 운동 역사 도슨트 — 지식그래프 기반 다국어 역사 해설 시스템",
+            headerTitle: "3.1 운동 역사 도슨트",
+            heroTitle: "1919년 3·1 운동 역사 도슨트",
+            heroBadgeDesc: "한국어 · English · 日本語 · 中文 자유 질의 지원",
+            heroSubtitle: "어떤 언어로 질문하셔도 인물·사건·장소의 1차 사료를 탐색하고 동일 언어로 학술 해설을 제공합니다",
+            searchBtn: "탐색",
+            reasoningInitial: "AI가 질의를 분석하고 있습니다...",
+            sourcesTitle: "수집된 사료",
+            graphTitle: "지식그래프",
+            centerGraph: "가운데로",
+            nodeDetailTitle: "선택된 노드 상세",
+            docentTitle: "도슨트 해설",
+            explainBtn: "✨ 해설 생성",
+            explainPlaceholder: "검색어를 입력하면 지식그래프 탐색 후 AI 도슨트 해설이 생성됩니다.",
+            systemLogTitle: "시스템 로그",
+            footer: "제작: jo.gyungmin@gmail.com · AI API 비용은 개인 감당 · 적절한 사용 부탁드립니다",
+            legendPerson: "인물",
+            legendEvent: "사건",
+            legendPlace: "장소",
+            legendOrg: "기관",
+            legendDoc: "사료",
+            reExplainLabel: "언어 전환:",
+            langName: "한국어",
+            langBadge: "🇰🇷 한국어 해설"
+        },
+        en: {
+            pageTitle: "March 1st Movement Historical Docent — Multilingual Knowledge Graph RAG",
+            headerTitle: "March 1st Movement Docent",
+            heroTitle: "1919 March 1st Movement Docent",
+            heroBadgeDesc: "Supports Korean, English, Japanese, and Chinese queries",
+            heroSubtitle: "Ask in any language: AI explores primary historical records and provides authentic scholarly commentary.",
+            searchBtn: "Search",
+            reasoningInitial: "AI is analyzing your historical query...",
+            sourcesTitle: "Archival Sources",
+            graphTitle: "Knowledge Graph",
+            centerGraph: "Recenter",
+            nodeDetailTitle: "Selected Entity Details",
+            docentTitle: "Docent Commentary",
+            explainBtn: "✨ Generate Commentary",
+            explainPlaceholder: "Enter a question above to retrieve archival records and generate an AI docent commentary.",
+            systemLogTitle: "System Logs",
+            footer: "Author: jo.gyungmin@gmail.com · Powered by Knowledge Graph RAG & Gemini AI",
+            legendPerson: "Person",
+            legendEvent: "Event",
+            legendPlace: "Place",
+            legendOrg: "Organization",
+            legendDoc: "Source",
+            reExplainLabel: "Translate to:",
+            langName: "English",
+            langBadge: "🇺🇸 English Commentary"
+        },
+        ja: {
+            pageTitle: "3.1独立運動 歴史ドーセント — 知識グラフ基盤の多言語歴史解説システム",
+            headerTitle: "3.1独立運動 歴史ドーセント",
+            heroTitle: "1919年 3・1独立運動 歴史ドーセント",
+            heroBadgeDesc: "韓国語・英語・日本語・中国語での自由な質問に対応",
+            heroSubtitle: "どの言語で質問しても、一次史料を探索し同一言語で学術的な歴史解説をお届けします。",
+            searchBtn: "検索",
+            reasoningInitial: "AIが質問の歴史的意図を分析しています...",
+            sourcesTitle: "収集された一次史料",
+            graphTitle: "知識グラフ",
+            centerGraph: "中央に戻す",
+            nodeDetailTitle: "選択された項目の詳細",
+            docentTitle: "ドーセント歴史解説",
+            explainBtn: "✨ 解説を生成",
+            explainPlaceholder: "質問を入力すると、知識グラフの探索後にAIドーセントによる学術解説が生成されます。",
+            systemLogTitle: "システムログ",
+            footer: "制作: jo.gyungmin@gmail.com · 知識グラフRAG＆Gemini AI搭載",
+            legendPerson: "人物",
+            legendEvent: "事件",
+            legendPlace: "場所",
+            legendOrg: "機関",
+            legendDoc: "史料",
+            reExplainLabel: "言語切り替え:",
+            langName: "日本語",
+            langBadge: "🇯🇵 日本語解説"
+        },
+        zh: {
+            pageTitle: "三一运动 历史智能导览 — 基于知识图谱的多语言历史解说系统",
+            headerTitle: "三一运动 历史智能导览",
+            heroTitle: "1919年 三一运动 历史智能导览",
+            heroBadgeDesc: "支持韩语、英语、日语、中文自然语言提问",
+            heroSubtitle: "无论您以何种语言提问，系统均将探索一手史料并以相同语言提供学术级专业解说。",
+            searchBtn: "探索",
+            reasoningInitial: "AI正在深度解析您的历史查询意图...",
+            sourcesTitle: "已检索一手史料",
+            graphTitle: "知识图谱",
+            centerGraph: "重置中心",
+            nodeDetailTitle: "选定节点史料详情",
+            docentTitle: "智能导览解说",
+            explainBtn: "✨ 生成导览解说",
+            explainPlaceholder: "输入查询内容后，系统将检索知识图谱并生成AI历史学者级导览解说。",
+            systemLogTitle: "系统运行日志",
+            footer: "制作: jo.gyungmin@gmail.com · 知识图谱RAG与AI技术驱动",
+            legendPerson: "人物",
+            legendEvent: "事件",
+            legendPlace: "地点",
+            legendOrg: "机构",
+            legendDoc: "史料",
+            reExplainLabel: "切换解说语言:",
+            langName: "中文",
+            langBadge: "🇨🇳 中文解说"
+        }
+    };
+
     /* ━━━ State ━━━ */
     let network = null;
     let lastEvidences = [];
@@ -227,12 +390,13 @@
     let currentNodes = [];
     let currentEdges = [];
     let analysisResult = null;
-    let csrfToken = '';
+    let csrfToken = (typeof window !== 'undefined' && window.__PRELOADED_CSRF__) ? window.__PRELOADED_CSRF__ : '';
+    let selectedUiLang = 'auto'; // 'auto' | 'ko' | 'en' | 'ja' | 'zh'
 
-    /* ━━━ Backend endpoint (같은 서버의 docent.php) ━━━ */
+    /* ━━━ Backend endpoint ━━━ */
     const API_BASE = 'docent.php';
 
-    /* ━━━ DOM ━━━ */
+    /* ━━━ DOM Elements ━━━ */
     const $ = id => document.getElementById(id);
     const $input          = $('search-input');
     const $heroSection    = $('hero-section');
@@ -253,47 +417,218 @@
 
     $input.addEventListener('keydown', e => { if (e.key === 'Enter') submitQuery(); });
 
-    /* ━━━ Bootstrap: CSRF 토큰을 docent.php 세션에서 가져오기 ━━━ */
-    (async function bootstrapCsrf() {
-        try {
-            // docent.php 페이지를 한 번 GET 해서 세션 쿠키를 확보한 뒤,
-            // 아무 AJAX든 csrf_token 에러 응답에서 토큰을 갈취하지 않고,
-            // 별도의 경량 요청으로 세션을 초기화한다.
-            // 가장 단순한 방식: docent.php 본체를 fetch해 HTML에서 csrf 추출
-            const res = await fetch(API_BASE, { credentials: 'same-origin' });
-            const html = await res.text();
-            const m = html.match(/docent_csrf[^']*'([a-f0-9]{64})'/);
-            if (m) csrfToken = m[1];
-        } catch (e) { console.warn('CSRF bootstrap failed:', e); }
-    })();
+    /* ━━━ Multilingual UI Language Switcher ━━━ */
+    function setUiLanguage(lang) {
+        selectedUiLang = lang;
+        document.querySelectorAll('.lang-nav-btn').forEach(btn => {
+            if (btn.dataset.lang === lang) {
+                btn.className = "lang-nav-btn px-2.5 py-1 rounded-lg text-xs font-semibold bg-white text-ink-900 shadow-xs transition-all";
+            } else {
+                btn.className = "lang-nav-btn px-2 py-1 rounded-lg text-xs text-ink-600 hover:text-ink-900 transition-all";
+            }
+        });
+
+        const activeDict = I18N[lang === 'auto' ? 'ko' : lang] || I18N.ko;
+        document.title = activeDict.pageTitle;
+        if ($('header-title')) $('header-title').textContent = activeDict.headerTitle;
+        if ($('hero-title')) $('hero-title').textContent = activeDict.heroTitle;
+        if ($('hero-badge-desc')) $('hero-badge-desc').textContent = activeDict.heroBadgeDesc;
+        if ($('hero-subtitle')) $('hero-subtitle').textContent = activeDict.heroSubtitle;
+        if ($('search-btn-text')) $('search-btn-text').textContent = activeDict.searchBtn;
+        if ($('sources-title')) $('sources-title').textContent = activeDict.sourcesTitle;
+        if ($('graph-title')) $('graph-title').textContent = activeDict.graphTitle;
+        if ($('center-graph-btn')) $('center-graph-btn').textContent = activeDict.centerGraph;
+        if ($('node-detail-title')) $('node-detail-title').textContent = activeDict.nodeDetailTitle;
+        if ($('docent-title')) $('docent-title').textContent = activeDict.docentTitle;
+        if ($('explain-btn')) $('explain-btn').textContent = activeDict.explainBtn;
+        if ($('system-log-title')) $('system-log-title').textContent = activeDict.systemLogTitle;
+        if ($('reexplain-label')) $('reexplain-label').textContent = activeDict.reExplainLabel;
+        if ($('footer-text')) $('footer-text').textContent = activeDict.footer;
+
+        if ($('legend-person')) $('legend-person').textContent = activeDict.legendPerson;
+        if ($('legend-event')) $('legend-event').textContent = activeDict.legendEvent;
+        if ($('legend-place')) $('legend-place').textContent = activeDict.legendPlace;
+        if ($('legend-org')) $('legend-org').textContent = activeDict.legendOrg;
+        if ($('legend-doc')) $('legend-doc').textContent = activeDict.legendDoc;
+
+        updateInputLanguageBadge();
+        logSystem(`UI 언어 전환: ${lang.toUpperCase()}`);
+    }
+
+    /* ━━━ Real-time Input Language Detection ━━━ */
+    function detectInputLanguage(text) {
+        if (!text || !text.trim()) return 'auto';
+        if (/[\uac00-\ud7af\u1100-\u11ff]/.test(text)) return 'ko';
+        if (/[\u3040-\u309f\u30a0-\u30ff]/.test(text)) return 'ja';
+        if (/[\u4e00-\u9fff]/.test(text)) return 'zh';
+        if (/[a-zA-Z]/.test(text)) return 'en';
+        return 'auto';
+    }
+
+    function updateInputLanguageBadge() {
+        const val = $input.value.trim();
+        const tag = $('input-lang-tag');
+        if (!tag) return;
+        if (!val) {
+            tag.className = "ml-3 px-2 py-0.5 text-[11px] font-mono font-semibold rounded-md bg-ink-100 text-ink-600 border border-ink-200/70 select-none whitespace-nowrap transition-colors";
+            tag.textContent = selectedUiLang === 'auto' ? "🌐 ALL LANG" : `🌐 ${selectedUiLang.toUpperCase()}`;
+            return;
+        }
+        const detected = detectInputLanguage(val);
+        if (detected === 'ko') {
+            tag.className = "ml-3 px-2 py-0.5 text-[11px] font-mono font-semibold rounded-md bg-blue-100 text-blue-800 border border-blue-200 select-none whitespace-nowrap transition-colors";
+            tag.textContent = "🇰🇷 한국어";
+        } else if (detected === 'ja') {
+            tag.className = "ml-3 px-2 py-0.5 text-[11px] font-mono font-semibold rounded-md bg-amber-100 text-amber-800 border border-amber-200 select-none whitespace-nowrap transition-colors";
+            tag.textContent = "🇯🇵 日本語";
+        } else if (detected === 'zh') {
+            tag.className = "ml-3 px-2 py-0.5 text-[11px] font-mono font-semibold rounded-md bg-emerald-100 text-emerald-800 border border-emerald-200 select-none whitespace-nowrap transition-colors";
+            tag.textContent = "🇨🇳 中文";
+        } else if (detected === 'en') {
+            tag.className = "ml-3 px-2 py-0.5 text-[11px] font-mono font-semibold rounded-md bg-indigo-100 text-indigo-800 border border-indigo-200 select-none whitespace-nowrap transition-colors";
+            tag.textContent = "🇺🇸 English";
+        } else {
+            tag.className = "ml-3 px-2 py-0.5 text-[11px] font-mono font-semibold rounded-md bg-ink-100 text-ink-600 border border-ink-200/70 select-none whitespace-nowrap transition-colors";
+            tag.textContent = "🌐 MULTI";
+        }
+    }
+    $input.addEventListener('input', updateInputLanguageBadge);
+
+    /* ━━━ Dynamic Rotating Multilingual Placeholder ━━━ */
+    const ROTATING_PLACEHOLDERS = [
+        { lang: 'ko', text: '인물, 사건, 장소를 한국어로 자유롭게 질문하세요 (예: 유관순의 아우내 장터 만세운동)' },
+        { lang: 'en', text: 'Ask freely in English (e.g. Who led the protests in Pyongyang?)' },
+        { lang: 'ja', text: '日本語で質問できます (例: 李東輝の武装闘争路線と新韓青年党)' },
+        { lang: 'zh', text: '支持中文自然语言提问 (例: 1919年三一运动在平壤的爆发过程)' }
+    ];
+    let placeholderIdx = 0;
+    let placeholderCharIdx = 0;
+    let isDeletingPlaceholder = false;
+    let placeholderTimer = null;
+
+    function stepPlaceholder() {
+        if (document.activeElement === $input || $input.value.trim().length > 0) {
+            placeholderTimer = setTimeout(stepPlaceholder, 800);
+            return;
+        }
+        const current = ROTATING_PLACEHOLDERS[placeholderIdx];
+        const full = current.text;
+
+        if (isDeletingPlaceholder) {
+            placeholderCharIdx--;
+            $input.placeholder = full.substring(0, placeholderCharIdx);
+            if (placeholderCharIdx <= 0) {
+                isDeletingPlaceholder = false;
+                placeholderIdx = (placeholderIdx + 1) % ROTATING_PLACEHOLDERS.length;
+                placeholderTimer = setTimeout(stepPlaceholder, 300);
+                return;
+            }
+            placeholderTimer = setTimeout(stepPlaceholder, 20);
+        } else {
+            placeholderCharIdx++;
+            $input.placeholder = full.substring(0, placeholderCharIdx);
+            if (placeholderCharIdx >= full.length) {
+                isDeletingPlaceholder = true;
+                placeholderTimer = setTimeout(stepPlaceholder, 2500);
+                return;
+            }
+            placeholderTimer = setTimeout(stepPlaceholder, 40);
+        }
+    }
+    placeholderTimer = setTimeout(stepPlaceholder, 1000);
+
+    /* ━━━ Bootstrap: CSRF Token ━━━ */
+    let csrfFetchingPromise = null;
+
+    async function ensureCsrf(forceRefresh = false) {
+        if (csrfToken && !forceRefresh) return csrfToken;
+        if (csrfFetchingPromise && !forceRefresh) return csrfFetchingPromise;
+
+        csrfFetchingPromise = (async () => {
+            try {
+                const res = await fetch(`${API_BASE}?csrf=1`, { credentials: 'same-origin' });
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data && data.csrf_token) {
+                        csrfToken = data.csrf_token;
+                        return csrfToken;
+                    }
+                }
+            } catch (_) {}
+
+            try {
+                const res = await fetch(API_BASE, { credentials: 'same-origin' });
+                const html = await res.text();
+                const m = html.match(/(?:csrfToken|docent_csrf)\s*=\s*['"]([a-f0-9]{64})['"]/i)
+                       || html.match(/['"]([a-f0-9]{64})['"]/);
+                if (m) {
+                    csrfToken = m[1];
+                    return csrfToken;
+                }
+            } catch (e) {
+                console.warn('CSRF extraction fallback failed:', e);
+            }
+            return csrfToken;
+        })().finally(() => {
+            csrfFetchingPromise = null;
+        });
+
+        return csrfFetchingPromise;
+    }
+    ensureCsrf();
 
     /* ━━━ Helpers ━━━ */
     function escapeHtml(s) {
         if (s == null) return '';
         return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
     }
-    function setQuery(t) { $input.value = t; submitQuery(); }
-    function logSystem(msg) {
-        const ts = new Date().toLocaleTimeString('ko-KR',{hour12:false});
-        $systemLogContent.innerHTML += `<div><span class="text-ink-300">[${ts}]</span> ${escapeHtml(msg)}</div>`;
-        $systemLogContent.scrollTop = $systemLogContent.scrollHeight;
-    }
-    function addStep(icon, text, status='active') {
-        const id = 'rs-' + Date.now();
-        const c = { active:'text-taegeuk-blue', done:'text-green-600', error:'text-red-500' }[status];
-        $reasoningSteps.innerHTML += `<div id="${id}" class="reasoning-step flex items-center gap-2 ${c} animate-fade-in">
-            <span>${icon}</span><span>${escapeHtml(text)}</span>
-            ${status==='active'?'<span class="w-1 h-1 rounded-full bg-current animate-pulse-dot ml-1"></span>':''}
-        </div>`;
-        return id;
-    }
-    function doneStep(id, icon, text) {
-        const el = document.getElementById(id);
-        if (el) { el.className='reasoning-step flex items-center gap-2 text-green-600 animate-fade-in'; el.innerHTML=`<span>${icon}</span><span>${escapeHtml(text)}</span>`; }
+
+    function renderMarkdown(md) {
+        if (typeof marked !== 'undefined' && typeof marked.parse === 'function') {
+            try { return marked.parse(md); } catch (_) {}
+        }
+        return escapeHtml(md).replace(/\n/g, '<br>');
     }
 
-    /* ━━━ API call (CSRF 자동 첨부) ━━━ */
-    async function api(action, data={}) {
+    function setQuery(t) {
+        const term = (typeof t === 'string' ? t : '').trim();
+        if (!term) return;
+        if ($input) $input.value = term;
+        updateInputLanguageBadge();
+        submitQuery(term);
+    }
+
+    function logSystem(msg) {
+        const ts = new Date().toLocaleTimeString('ko-KR',{hour12:false});
+        if ($systemLogContent) {
+            $systemLogContent.innerHTML += `<div><span class="text-ink-300">[${ts}]</span> ${escapeHtml(msg)}</div>`;
+            $systemLogContent.scrollTop = $systemLogContent.scrollHeight;
+        }
+    }
+
+    function addStep(icon, text, status='active') {
+        const id = 'rs-' + Date.now() + '-' + Math.floor(Math.random()*1000);
+        const c = { active:'text-taegeuk-blue', done:'text-green-600', error:'text-red-500' }[status] || 'text-ink-500';
+        if ($reasoningSteps) {
+            $reasoningSteps.innerHTML += `<div id="${id}" class="reasoning-step flex items-center gap-2 ${c} animate-fade-in">
+                <span>${icon}</span><span>${escapeHtml(text)}</span>
+                ${status==='active'?'<span class="w-1 h-1 rounded-full bg-current animate-pulse-dot ml-1"></span>':''}
+            </div>`;
+        }
+        return id;
+    }
+
+    function doneStep(id, icon, text) {
+        const el = document.getElementById(id);
+        if (el) {
+            el.className = 'reasoning-step flex items-center gap-2 text-green-600 animate-fade-in';
+            el.innerHTML = `<span>${icon}</span><span>${escapeHtml(text)}</span>`;
+        }
+    }
+
+    /* ━━━ API call (CSRF 자동 첨부 및 만료시 1회 자동 재시도) ━━━ */
+    async function api(action, data={}, isRetry = false) {
+        await ensureCsrf();
         const fd = new FormData();
         for (let k in data) fd.append(k, data[k]);
         if (csrfToken) fd.append('csrf_token', csrfToken);
@@ -304,8 +639,23 @@
         });
         const raw = await res.text();
         if (!res.ok) {
-            try { const e=JSON.parse(raw); throw new Error(`[${action}] ${e.error||'HTTP '+res.status}`); }
-            catch(e) { if(e.message.startsWith(`[${action}]`)) throw e; throw new Error(`[${action}] HTTP ${res.status}`); }
+            let errorMsg = `HTTP ${res.status}`;
+            let isCsrfError = false;
+            try {
+                const e = JSON.parse(raw);
+                errorMsg = e.error || errorMsg;
+                if (res.status === 403 && (errorMsg.includes('보안 토큰') || errorMsg.includes('CSRF'))) {
+                    isCsrfError = true;
+                }
+            } catch (_) {}
+
+            if (isCsrfError && !isRetry) {
+                logSystem(`🔄 보안 토큰 재발급 후 재시도 (${action})`);
+                await ensureCsrf(true);
+                return api(action, data, true);
+            }
+
+            throw new Error(`[${action}] ${errorMsg}`);
         }
         try { const j=JSON.parse(raw); logSystem(`✓ ${action}`); return j; }
         catch(e) { throw new Error(`[${action}] JSON 파싱 실패`); }
@@ -320,53 +670,94 @@
             const lbl=(n.label||'').replace(/[\n📜👤🔥📍🏢]/g,'').trim();
             if(seen.has(lbl)||!lbl) return; seen.add(lbl);
             const tp=n.type||(n.labels&&n.labels[0])||'개체';
-            html+=`<button onclick="focusNode('${n.id}')" class="source-badge px-3 py-1.5 rounded-full border text-xs font-medium ${colorMap[tp]||'bg-ink-50 text-ink-600 border-ink-200'} cursor-pointer">${iconMap[tp]||'🔹'} ${escapeHtml(lbl)}</button>`;
+            html+=`<button type="button" onclick="focusNode('${n.id}')" class="source-badge px-3 py-1.5 rounded-full border text-xs font-medium ${colorMap[tp]||'bg-ink-50 text-ink-600 border-ink-200'} cursor-pointer">${iconMap[tp]||'🔹'} ${escapeHtml(lbl)}</button>`;
         });
-        $sourcesBadges.innerHTML=html;
-        $sourcesCount.textContent=`${seen.size}건`;
+        if ($sourcesBadges) $sourcesBadges.innerHTML=html;
+        if ($sourcesCount) $sourcesCount.textContent=`${seen.size}건`;
     }
+
+    /* ━━━ Update Docent Explanation Language Badge ━━━ */
+    function updateExplainLangBadge(lang) {
+        const badge = $('current-explain-lang-badge');
+        if (!badge) return;
+        const labels = {
+            ko: '🇰🇷 한국어 해설',
+            en: '🇺🇸 English Commentary',
+            ja: '🇯🇵 日本語解説',
+            zh: '🇨🇳 中文解说'
+        };
+        badge.textContent = labels[lang] || `🌐 ${lang.toUpperCase()}`;
+    }
+
+    let isSubmitting = false;
 
     /* ━━━ Main: Submit Query ━━━ */
     async function submitQuery(text) {
-        const term = text || $input.value.trim();
-        if (term.length < 2) { $input.focus(); return; }
-        $input.value = term;
+        if (isSubmitting) return;
+        const rawTerm = (typeof text === 'string') ? text : ($input ? $input.value : '');
+        const term = (rawTerm || '').trim();
+        if (term.length < 2) { 
+            if ($input) $input.focus(); 
+            return; 
+        }
+        isSubmitting = true;
+        if ($input) $input.value = term;
+        updateInputLanguageBadge();
 
         // UI: collapse hero, show panels
-        $heroSection.classList.remove('pt-16','sm:pt-24'); $heroSection.classList.add('pt-6','sm:pt-8');
-        $reasoningPanel.classList.remove('hidden');
-        $sourcesPanel.classList.add('hidden');
-        $graphSection.classList.add('hidden');
-        $explanationSection.classList.remove('hidden');
-        $explainBtn.classList.add('hidden');
-        $nodeInfoPanel.classList.add('hidden');
-        $systemLogSection.classList.remove('hidden');
-        $reasoningSteps.innerHTML=''; $sourcesBadges.innerHTML='';
-        $explanationContent.innerHTML='<p class="text-ink-400 italic">사료를 탐색하고 있습니다...</p>';
+        if ($heroSection) {
+            $heroSection.classList.remove('pt-14','sm:pt-20');
+            $heroSection.classList.add('pt-4','sm:pt-6');
+        }
+        if ($reasoningPanel) $reasoningPanel.classList.remove('hidden');
+        if ($sourcesPanel) $sourcesPanel.classList.add('hidden');
+        if ($graphSection) $graphSection.classList.add('hidden');
+        if ($explanationSection) $explanationSection.classList.remove('hidden');
+        if ($explainBtn) $explainBtn.classList.add('hidden');
+        if ($nodeInfoPanel) $nodeInfoPanel.classList.add('hidden');
+        if ($systemLogSection) $systemLogSection.classList.remove('hidden');
+        if ($reasoningSteps) $reasoningSteps.innerHTML=''; 
+        if ($sourcesBadges) $sourcesBadges.innerHTML='';
+        if ($explanationContent) $explanationContent.innerHTML='<p class="text-ink-400 italic">지식그래프 및 1차 사료를 탐색하고 있습니다...</p>';
         lastEvidences=[]; pgPrefetchTexts=[]; currentNodes=[]; currentEdges=[]; analysisResult=null;
-        logSystem(`검색: "${term}"`);
+        logSystem(`검색 시작: "${term}"`);
 
         try {
             /* 1. Analyze */
-            const s1 = addStep('💡','질의 의도 분석 중...');
-            $reasoningTitle.textContent='AI가 질의를 분석하고 있습니다...';
+            const s1 = addStep('💡','다국어 질의 의도 분석 및 DB 키워드 매핑 중...');
+            if ($reasoningTitle) $reasoningTitle.textContent='AI가 질의를 분석하고 있습니다...';
             const analysis = await api('analyze',{term});
             analysisResult = analysis;
+            
+            // Multilingual detection feedback
+            const detectedLang = analysis.response_language || detectInputLanguage(term) || 'ko';
+            const langLabels = { ko: '🇰🇷 한국어 (Korean)', en: '🇺🇸 English (영문)', ja: '🇯🇵 日本語 (Japanese)', zh: '🇨🇳 中文 (Chinese)' };
+            const detectedName = langLabels[detectedLang] || `🌐 ${detectedLang.toUpperCase()}`;
+            
+            doneStep(s1, '✅', `의도 분석 완료 — ${analysis.analyzed_intent_ko||analysis.explanation||'완료'}`);
+            addStep('🌐', `[다국어 감지] 질의 언어 감지: ${detectedName} → 한국어 지식그래프 교차 탐색 후 ${detectedName}로 해설 작성`, 'done');
+            updateExplainLangBadge(detectedLang);
+
             const kws = (analysis.search_keywords||analysis.keywords||[term]).join(', ');
-            doneStep(s1,'✅',`의도 분석 완료 — ${analysis.analyzed_intent_ko||analysis.explanation||'완료'}`);
-            logSystem(`의도: ${analysis.intent_type||analysis.intent}, KW: ${kws}, lang: ${analysis.response_language||'ko'}`);
+            logSystem(`의도: ${analysis.intent_type||analysis.intent}, KW: ${kws}, 감지언어: ${detectedLang}`);
 
             /* 2. Graph */
             const s2 = addStep('🔍',`지식그래프에서 "${kws}" 탐색 중...`);
-            $reasoningTitle.textContent='지식그래프 사료 탐색 중...';
+            if ($reasoningTitle) $reasoningTitle.textContent='지식그래프 사료 탐색 중...';
             const keywords = analysis.keywords||analysis.search_keywords||[term];
             const gd = await api('graph',{term, keywords:JSON.stringify(keywords)});
             lastEvidences=gd.evidences||[]; currentNodes=gd.nodes||[]; currentEdges=gd.edges||[];
             doneStep(s2,'✅',`그래프 탐색 완료 — 노드 ${currentNodes.length}개, 관계 ${currentEdges.length}개, 사료 ${lastEvidences.length}건`);
             logSystem(`노드 ${currentNodes.length}, 엣지 ${currentEdges.length}, 사료 ${lastEvidences.length}`);
 
-            if (currentNodes.length>0) { renderBadges(currentNodes); $sourcesPanel.classList.remove('hidden'); }
-            if (currentNodes.length>0) { $graphSection.classList.remove('hidden'); drawGraph(currentNodes,currentEdges); }
+            if (currentNodes.length>0) { 
+                renderBadges(currentNodes); 
+                if ($sourcesPanel) $sourcesPanel.classList.remove('hidden'); 
+                if ($graphSection) {
+                    $graphSection.classList.remove('hidden'); 
+                    drawGraph(currentNodes,currentEdges);
+                }
+            }
 
             /* 3. PG prefetch */
             const pn = (Array.isArray(gd.prefetch_names)&&gd.prefetch_names.length>0) ? gd.prefetch_names : currentNodes.map(n=>n.raw_id);
@@ -378,37 +769,58 @@
                 logSystem(`PG 사료: ${pgPrefetchTexts.length}건`);
             }
 
-            /* Done */
-            $reasoningTitle.textContent='🔍 지식그래프 사료 탐색 완료';
-            $explainBtn.classList.remove('hidden');
-            $explanationContent.innerHTML=`<p class="text-ink-400 italic">사료 수집 완료. <strong class="text-taegeuk-red">'✨ 해설 생성'</strong> 버튼을 클릭하세요.</p>`;
+            /* 4. Automatically trigger docent explanation */
+            if ($reasoningTitle) $reasoningTitle.textContent='🔍 사료 탐색 완료 → AI 도슨트 해설 생성 중...';
+            if ($explainBtn) $explainBtn.classList.remove('hidden');
+            await generateExplanation(detectedLang);
 
         } catch(e) {
             console.error(e);
             addStep('❌',e.message,'error');
-            $reasoningTitle.textContent='오류가 발생했습니다';
-            $explanationContent.innerHTML=`<div class="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700"><p class="font-semibold mb-1">데이터 탐색 실패</p><p class="font-mono text-xs break-all">${escapeHtml(e.message)}</p></div>`;
+            if ($reasoningTitle) $reasoningTitle.textContent='오류가 발생했습니다';
+            if ($explanationContent) {
+                $explanationContent.innerHTML=`<div class="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700"><p class="font-semibold mb-1">데이터 탐색 실패</p><p class="font-mono text-xs break-all">${escapeHtml(e.message)}</p></div>`;
+            }
             logSystem(`오류: ${e.message}`);
+        } finally {
+            isSubmitting = false;
         }
     }
 
-    /* ━━━ Generate Explanation (SSE) ━━━ */
-    async function generateExplanation() {
-        const term=$input.value.trim(); if(!term) return;
-        const lang=analysisResult?.response_language||'ko';
-        const focus=analysisResult?.focus||'';
+    /* ━━━ Re-Explain in Different Language ━━━ */
+    async function reExplainWithLang(targetLang) {
+        if (!lastEvidences || lastEvidences.length === 0) {
+            logSystem(`사료가 아직 수집되지 않았습니다.`);
+            return;
+        }
+        logSystem(`언어 전환 요청: ${targetLang.toUpperCase()}`);
+        updateExplainLangBadge(targetLang);
+        await generateExplanation(targetLang);
+    }
 
-        $explainBtn.classList.add('hidden');
-        $explanationContent.innerHTML=`<div class="flex items-center gap-2 text-ink-400 text-sm py-4">
-            <span class="w-1.5 h-1.5 rounded-full bg-taegeuk-red animate-pulse-dot"></span>
-            <span class="w-1.5 h-1.5 rounded-full bg-taegeuk-red animate-pulse-dot" style="animation-delay:.15s"></span>
-            <span class="w-1.5 h-1.5 rounded-full bg-taegeuk-red animate-pulse-dot" style="animation-delay:.3s"></span>
-            <span>사료 비판 검증 및 학술 해설 작성 중...</span>
-        </div>`;
-        const sE=addStep('✍️','AI 도슨트가 학술 해설을 작성 중입니다...');
-        logSystem(`해설 생성: lang=${lang}`);
+    /* ━━━ Generate Explanation (SSE Stream) ━━━ */
+    async function generateExplanation(overrideLang) {
+        const rawTerm = $input ? $input.value : '';
+        const term = rawTerm.trim(); 
+        if(!term) return;
+        const lang = overrideLang || (selectedUiLang !== 'auto' ? selectedUiLang : (analysisResult?.response_language || detectInputLanguage(term) || 'ko'));
+        const focus = analysisResult?.focus||'';
+        updateExplainLangBadge(lang);
+
+        if ($explainBtn) $explainBtn.classList.add('hidden');
+        if ($explanationContent) {
+            $explanationContent.innerHTML=`<div class="flex items-center gap-2 text-ink-400 text-sm py-4">
+                <span class="w-1.5 h-1.5 rounded-full bg-taegeuk-red animate-pulse-dot"></span>
+                <span class="w-1.5 h-1.5 rounded-full bg-taegeuk-red animate-pulse-dot" style="animation-delay:.15s"></span>
+                <span class="w-1.5 h-1.5 rounded-full bg-taegeuk-red animate-pulse-dot" style="animation-delay:.3s"></span>
+                <span>사료 비판 검증 및 학술 해설 작성 중... [${lang.toUpperCase()}]</span>
+            </div>`;
+        }
+        const sE=addStep('✍️',`AI 도슨트가 학술 해설을 작성 중입니다... [${lang.toUpperCase()}]`);
+        logSystem(`해설 생성 시작: lang=${lang}`);
 
         try {
+            await ensureCsrf();
             const fd=new FormData();
             fd.append('term',term); fd.append('focus',focus); fd.append('lang',lang);
             fd.append('evidences',JSON.stringify(lastEvidences));
@@ -416,10 +828,20 @@
             fd.append('stream','1');
             if(csrfToken) { fd.append('csrf_token',csrfToken); }
 
-            const res=await fetch(`${API_BASE}?ajax=explain&stream=1`,{
+            let res=await fetch(`${API_BASE}?ajax=explain&stream=1`,{
                 method:'POST',body:fd,credentials:'same-origin',
                 headers: csrfToken?{'X-CSRF-Token':csrfToken}:{}
             });
+            if(res.status === 403) {
+                await ensureCsrf(true);
+                if(csrfToken) {
+                    fd.set('csrf_token', csrfToken);
+                    res=await fetch(`${API_BASE}?ajax=explain&stream=1`,{
+                        method:'POST',body:fd,credentials:'same-origin',
+                        headers: {'X-CSRF-Token':csrfToken}
+                    });
+                }
+            }
             if(!res.ok) throw new Error(`HTTP ${res.status}`);
 
             const reader=res.body.getReader(), dec=new TextDecoder('utf-8');
@@ -432,17 +854,30 @@
                     const t=l.trim();
                     if(t==='data: [DONE]') break;
                     if(t.startsWith('data: ')){
-                        try{const p=JSON.parse(t.substring(6));if(p.chunk){full+=p.chunk;$explanationContent.innerHTML=marked.parse(full)+'<span class="typing-cursor">▌</span>';}}catch(e){}
+                        try{
+                            const p=JSON.parse(t.substring(6));
+                            if(p.chunk){
+                                full+=p.chunk;
+                                if ($explanationContent) {
+                                    $explanationContent.innerHTML=renderMarkdown(full)+'<span class="typing-cursor">▌</span>';
+                                }
+                            }
+                        }catch(e){}
                     }
                 }
             }
-            $explanationContent.innerHTML=marked.parse(full);
-            doneStep(sE,'✅','AI 도슨트 해설 작성 완료');
-            logSystem('해설 완료');
+            if ($explanationContent) $explanationContent.innerHTML=renderMarkdown(full);
+            doneStep(sE,'✅',`AI 도슨트 해설 작성 완료 [${lang.toUpperCase()}]`);
+            if ($reasoningTitle) $reasoningTitle.textContent='✨ 도슨트 해설 완료';
+            if ($explainBtn) $explainBtn.classList.remove('hidden');
+            logSystem(`해설 완료 [${lang.toUpperCase()}]`);
         } catch(e) {
             console.error(e);
-            $explanationContent.innerHTML=`<div class="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700"><p class="font-semibold mb-1">해설 생성 실패</p><p class="font-mono text-xs break-all">${escapeHtml(e.message)}</p></div>`;
+            if ($explanationContent) {
+                $explanationContent.innerHTML=`<div class="bg-red-50 border border-red-200 rounded-lg p-4 text-sm text-red-700"><p class="font-semibold mb-1">해설 생성 실패</p><p class="font-mono text-xs break-all">${escapeHtml(e.message)}</p></div>`;
+            }
             doneStep(sE,'❌',`실패: ${e.message}`);
+            if ($explainBtn) $explainBtn.classList.remove('hidden');
             logSystem(`해설 오류: ${e.message}`);
         }
     }
@@ -450,18 +885,27 @@
     /* ━━━ Knowledge Graph (vis.js) ━━━ */
     function drawGraph(nodes,edges){
         const c=$('graph-container');
-        const d={nodes:new vis.DataSet(nodes),edges:new vis.DataSet(edges)};
-        const o={
-            edges:{arrows:'to',color:{color:'#9ca3af',hover:'#6b7280',highlight:'#C8102E'},font:{size:11,align:'middle',color:'#6b7280'},smooth:{type:'continuous'}},
-            physics:{enabled:true,repulsion:{nodeDistance:240,centralGravity:0.15},stabilization:{iterations:120}},
-            interaction:{hover:true,tooltipDelay:200}
-        };
-        if(network) network.destroy();
-        network=new vis.Network(c,d,o);
-        network.on('click',p=>{
-            if(p.nodes.length>0){const n=currentNodes.find(x=>x.id===p.nodes[0]);if(n) showNodeInfo(n);}
-            else $nodeInfoPanel.classList.add('hidden');
-        });
+        if (!c) return;
+        if (typeof vis === 'undefined' || !vis.DataSet || !vis.Network) {
+            logSystem('⚠️ vis.js 로딩 대기 중...');
+            return;
+        }
+        try {
+            const d={nodes:new vis.DataSet(nodes),edges:new vis.DataSet(edges)};
+            const o={
+                edges:{arrows:'to',color:{color:'#9ca3af',hover:'#6b7280',highlight:'#C8102E'},font:{size:11,align:'middle',color:'#6b7280'},smooth:{type:'continuous'}},
+                physics:{enabled:true,repulsion:{nodeDistance:240,centralGravity:0.15},stabilization:{iterations:120}},
+                interaction:{hover:true,tooltipDelay:200}
+            };
+            if(network) network.destroy();
+            network=new vis.Network(c,d,o);
+            network.on('click',p=>{
+                if(p.nodes.length>0){const n=currentNodes.find(x=>x.id===p.nodes[0]);if(n) showNodeInfo(n);}
+                else if ($nodeInfoPanel) $nodeInfoPanel.classList.add('hidden');
+            });
+        } catch(err) {
+            console.warn('vis.js drawGraph error:', err);
+        }
     }
     function centerGraph(){if(network) network.fit({animation:{duration:600,easingFunction:'easeInOutQuad'}});}
     function focusNode(id){
@@ -485,13 +929,13 @@
         const ce=currentEdges.filter(e=>e.from===node.id||e.to===node.id);
         if(ce.length){
             h+=`<div class="border-t border-ink-100 pt-3 mt-3"><h4 class="text-xs font-semibold text-ink-500 mb-2">연결 (${ce.length}건)</h4><div class="flex flex-wrap gap-1.5 max-h-[120px] overflow-y-auto">`;
-            ce.forEach(e=>{const o=e.from===node.id?e.to:e.from;const on=currentNodes.find(x=>x.id===o);if(on){const ol=(on.label||'').replace(/[\n📜👤🔥📍🏢]/g,'').trim();h+=`<button onclick="focusNode('${o}')" class="px-2.5 py-1 rounded-lg border border-ink-200 text-xs text-ink-600 hover:bg-ink-50"><span class="text-ink-400">${escapeHtml(e.label||'→')}</span> ${escapeHtml(ol)}</button>`;}});
+            ce.forEach(e=>{const o=e.from===node.id?e.to:e.from;const on=currentNodes.find(x=>x.id===o);if(on){const ol=(on.label||'').replace(/[\n📜👤🔥📍🏢]/g,'').trim();h+=`<button type="button" onclick="focusNode('${o}')" class="px-2.5 py-1 rounded-lg border border-ink-200 text-xs text-ink-600 hover:bg-ink-50 cursor-pointer"><span class="text-ink-400">${escapeHtml(e.label||'→')}</span> ${escapeHtml(ol)}</button>`;}});
             h+=`</div></div>`;
         }
 
         h+=`<div id="node-pg-source-box" class="border-t border-ink-100 pt-3 mt-3"><div class="flex items-center gap-2 text-xs text-ink-400"><span class="w-3 h-3 border-2 border-ink-300 border-t-transparent rounded-full animate-spin"></span>원천 사료 조회 중...</div></div>`;
-        $nodeInfoContent.innerHTML=h;
-        $nodeInfoPanel.classList.remove('hidden');
+        if ($nodeInfoContent) $nodeInfoContent.innerHTML=h;
+        if ($nodeInfoPanel) $nodeInfoPanel.classList.remove('hidden');
         loadNodePg(node);
     }
 
@@ -510,6 +954,15 @@
             } else { box.innerHTML=`<div class="text-xs text-ink-300">원천 DB에 직접 대응 데이터 없음.</div>`; }
         } catch(e){ box.innerHTML=`<div class="text-xs text-ink-300">조회 생략: ${escapeHtml(e.message)}</div>`; }
     }
+
+    /* ━━━ Global window bindings for foolproof HTML onclick execution ━━━ */
+    window.setQuery = setQuery;
+    window.submitQuery = submitQuery;
+    window.generateExplanation = generateExplanation;
+    window.reExplainWithLang = reExplainWithLang;
+    window.centerGraph = centerGraph;
+    window.focusNode = focusNode;
+    window.setUiLanguage = setUiLanguage;
     </script>
 </body>
 </html>

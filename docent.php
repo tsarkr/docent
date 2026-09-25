@@ -332,6 +332,20 @@ function normalize_focus($focus, $is_english = false) {
     return $is_english ? 'Person' : '인물';
 }
 
+// 1.5 CSRF Token Endpoint (Lightweight for headless frontends like docent.html)
+if (isset($_GET['csrf']) || (isset($_GET['ajax']) && $_GET['ajax'] === 'csrf')) {
+    header('Content-Type: application/json; charset=utf-8');
+    header('X-Content-Type-Options: nosniff');
+    header('X-Frame-Options: SAMEORIGIN');
+    if (!docent_check_same_origin()) {
+        http_response_code(403);
+        echo json_encode(['error' => '접속 출처가 올바르지 않습니다.'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+        exit;
+    }
+    echo json_encode(['csrf_token' => $_SESSION['docent_csrf']], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+    exit;
+}
+
 // 2. API Logic (AJAX Handlers)
 if (isset($_GET['ajax'])) {
     header('Content-Type: application/json; charset=utf-8');
@@ -736,7 +750,9 @@ if (isset($_GET['ajax'])) {
         if ($action === 'explain') {
             $term = docent_sanitize_text($_POST['term'] ?? '', 180, false);
             $focus = docent_sanitize_text($_POST['focus'] ?? '', 100, false);
-            $explain_lang = in_array(strtolower((string)($_POST['lang'] ?? '')), ['en', 'ko'], true) ? strtolower((string)$_POST['lang']) : (docent_is_english() ? 'en' : 'ko');
+            $req_lang = strtolower(trim((string)($_POST['lang'] ?? '')));
+            $supported_langs = ['en', 'ko', 'ja', 'zh'];
+            $explain_lang = in_array($req_lang, $supported_langs, true) ? $req_lang : (docent_is_english() ? 'en' : 'ko');
             $use_english = ($explain_lang === 'en');
             $evidences = json_decode($_POST['evidences'] ?? '[]', true);
             $pg_texts = json_decode($_POST['pg_texts'] ?? '[]', true);
@@ -744,26 +760,38 @@ if (isset($_GET['ajax'])) {
             if (!is_array($pg_texts)) $pg_texts = [];
 
             // 1. 입력 사료 컨텍스트 구성 (노드 격벽 Scoping Envelope 및 질의 초점 필터링 적용)
-            $evidence_context = build_budgeted_evidence_context($evidences, $use_english, 30, 250, 800, 12000, $term, $focus);
-            $pg_context = build_budgeted_pg_context($pg_texts, $use_english, 40, 180, 500, 12000, $term, $focus);
+            $evidence_context = build_budgeted_evidence_context($evidences, $explain_lang, 30, 250, 800, 12000, $term, $focus);
+            $pg_context = build_budgeted_pg_context($pg_texts, $explain_lang, 40, 180, 500, 12000, $term, $focus);
             $context_str = trim($evidence_context . ($evidence_context && $pg_context ? "\n\n" : "") . $pg_context);
 
             // 2. [1단계 파이프라인] 사료 비판 기반 정밀 사건-장소-인물 팩트 추출 (In-Context Knowledge Table 구축)
             $fact_table = '';
             if (!empty($context_str)) {
-                $ext_sys = $use_english
-                    ? "You are an expert archival historian specializing in modern Korean history. "
-                    . "Analyze the provided <SOURCE_EVIDENCE> blocks with strict source criticism. "
-                    . "Extract a clean, verified fact table strictly without cross-attribution or regional mixing. "
-                    . "Never blend figures or actions across different regions."
-                    : "당신은 한국 근현대사 1차 사료 분석 전문가입니다. "
-                    . "제공된 <SOURCE_EVIDENCE> 사료 블록들을 사료 비판적으로 정밀 분석하여, "
-                    . "각 사료별 사실관계를 왜곡이나 교차 귀속(인물/지역 혼합) 없이 다음 정밀 팩트 표로 추출하십시오.\n"
-                    . "반드시 각 블록에 명시된 사실만 기록하고, 타 지역 사건의 인물을 섞지 마십시오.";
-
-                $ext_user = $use_english
-                    ? "Extract a verified markdown table from the sources: [Source ID | Entity | Location/Region | Actual Actor | Key Fact (1-2 lines)].\n\n[Archival Envelopes]\n{$context_str}"
-                    : "다음 사료군에서 [사료 ID | 대상 개체 | 발생 장소/지역 | 실제 행동 인물 | 사료에 기록된 핵심 팩트(1~2줄)] 표를 마크다운 표로 추출하십시오.\n\n[사료 원문 블록]\n{$context_str}";
+                if ($explain_lang === 'en') {
+                    $ext_sys = "You are an expert archival historian specializing in modern Korean history. "
+                             . "Analyze the provided <SOURCE_EVIDENCE> blocks with strict source criticism. "
+                             . "Extract a clean, verified fact table strictly without cross-attribution or regional mixing. "
+                             . "Never blend figures or actions across different regions.";
+                    $ext_user = "Extract a verified markdown table from the sources in English: [Source ID | Entity | Location/Region | Actual Actor | Key Fact (1-2 lines)].\n\n[Archival Envelopes]\n{$context_str}";
+                } elseif ($explain_lang === 'ja') {
+                    $ext_sys = "あなたは韓国近現代史および3・1運動の一次史料・公文書を専門とする歴史学者です。"
+                             . "提供された <SOURCE_EVIDENCE> 史料ブロックを史料批判に基づき精緻に分析し、"
+                             . "各史料の事実関係を地域・人物の混同や交差帰属なく、以下の日本語ファクト表として抽出してください。\n"
+                             . "必ず各ブロックに明記された事実のみを日本語で記述し、他地域の人物や出来事を決して混入させないでください。";
+                    $ext_user = "次の史料群から [史料ID | 対象エンティティ | 発生場所・地域 | 実際の行動人物 | 史料記録の核心事実 (1〜2行)] をMarkdown表形式で抽出してください（すべて日本語で記述し、韓国語の助詞や文を残さないでください）。\n\n[Archival Envelopes]\n{$context_str}";
+                } elseif ($explain_lang === 'zh') {
+                    $ext_sys = "您是精通韩国近现代史及三一运动一手史料分析的专业历史学者。"
+                             . "请依据严格的史料批判方法分析所提供的 <SOURCE_EVIDENCE> 史料块，"
+                             . "切勿跨区域混淆人物或事件，提取出客观准确的中文事实核查表。\n"
+                             . "仅记录各史料块中明确记载的事实，严禁混入其他地区的人物或行动。";
+                    $ext_user = "请从以下史料群中提取 [史料ID | 对象实体 | 发生地点/区域 | 实际行动人物 | 史料核心事实 (1~2行)] Markdown表格（全部使用规范简体中文描述，切勿残留韩语助词或句子）。\n\n[Archival Envelopes]\n{$context_str}";
+                } else {
+                    $ext_sys = "당신은 한국 근현대사 1차 사료 분석 전문가입니다. "
+                             . "제공된 <SOURCE_EVIDENCE> 사료 블록들을 사료 비판적으로 정밀 분석하여, "
+                             . "각 사료별 사실관계를 왜곡이나 교차 귀속(인물/지역 혼합) 없이 다음 정밀 팩트 표로 추출하십시오.\n"
+                             . "반드시 각 블록에 명시된 사실만 기록하고, 타 지역 사건의 인물을 섞지 마십시오.";
+                    $ext_user = "다음 사료군에서 [사료 ID | 대상 개체 | 발생 장소/지역 | 실제 행동 인물 | 사료에 기록된 핵심 팩트(1~2줄)] 표를 마크다운 표로 추출하십시오.\n\n[사료 원문 블록]\n{$context_str}";
+                }
 
                 try {
                     $fact_table = call_gemini([
@@ -776,7 +804,7 @@ if (isset($_GET['ajax'])) {
             }
 
             // 3. [2단계 파이프라인] 정제된 연결 정보 + 사료 격벽 원문 기반 도슨트 해설 원고 작성
-            if ($use_english) {
+            if ($explain_lang === 'en') {
                 $sys_prompt = "# Role\n"
                             . "You are a 'Knowledge Graph-Based Historical Docent' specializing in the complex diffusion paths and hidden connections between figures of the March 1st Movement of 1919.\n"
                             . "As a distinguished senior historical docent and research scholar specializing in modern Korean history and the independence movement, "
@@ -784,49 +812,141 @@ if (isset($_GET['ajax'])) {
                             . "# Objective\n"
                             . "Based on the user's query, analyze the [Source Context] retrieved from the knowledge graph (Graph DB) and explain the historical causality connecting persons, events, and places accurately and logically.\n\n"
                             . "# Strict Rules\n"
-                            . "1. [Language Mirroring]: Detect the language of the user's query and respond in the exact same language. (Korean query → Korean response, English query → English response.)\n"
-                            . "2. [Zero Hallucination]: Use ONLY the facts (names, places, dates, events) explicitly stated in the [Source Context] below. Never fabricate or invent connections by mixing in pretrained external knowledge.\n"
-                            . "3. [Multi-hop Explanation]: If the context contains 2-hop or more connections (e.g., Person A → Shared Event → Person B → Event in Another Region), explain how this causal chain links together so the user can follow the narrative without interruption.\n"
-                            . "4. [Hard Trap Defense]: If the provided [Source Context] is empty OR no connection related to the user's query can be found, output ONLY the following sentence and immediately terminate the response — do NOT add any further explanation, commentary, or background knowledge under any circumstances: 'According to the provided historical records, no information or connection regarding your query can be found.'\n"
+                            . "1. [Output Language & Zero Drift - CRITICAL]: Write the ENTIRE text in fluent, publication-ready academic English from start to finish. All titles, subtitles, section headings, narrative analysis, and final conclusion MUST be 100% in English. Never leak Korean particles, verbs, or sentences into sections 3, 4, or 5. Korean historical names and locations should be transliterated in English with original Hanja/Hangul in parentheses only when first introduced (e.g., 'Sagan-ri, Songsan-myeon, Suwon-gun', 'Yu Gwan-sun (柳寬順)'). Every paragraph must be complete in English.\n"
+                            . "2. [Zero Hallucination]: Use ONLY the facts (names, places, dates, events) explicitly stated in the [Source Context] below and the Stage 1 fact table. Never fabricate or invent connections by mixing in pretrained external knowledge.\n"
+                            . "3. [Multi-hop Explanation]: If the context contains 2-hop or more connections, explain how this causal chain links together logically so the user can follow the narrative seamlessly.\n"
+                            . "4. [Hard Trap Defense]: If the provided [Source Context] is empty OR no connection related to the user's query can be found, output ONLY the following sentence and immediately terminate: 'According to the provided historical records, no information or connection regarding your query can be found.'\n"
                             . "5. [Tone & Style]: Maintain the professional and respectful tone of a museum docent. Begin immediately with the core causal relationship — no unnecessary preamble.\n\n"
                             . "# Additional Guidelines\n"
                             . "- Adhere strictly to factual grounding based on rigorous historical source criticism (史料批判). Never forcibly combine historically unrelated figures or events.\n"
                             . "- Facts stated within each <SOURCE_EVIDENCE> block are valid ONLY for the entity, region, and event of that block. Cross-attribution is strictly prohibited.\n"
                             . "- Do NOT expose any internal AI/system jargon (e.g., 'Zero-Correlation', 'knowledge graph', 'hallucination', 'nodes', 'database', 'prompt', hash IDs like n8774...) in the output.\n"
-                            . "- Express all historical judgments using authentic scholarly terminology (e.g., 'critical analysis of primary sources', 'archival verification of historical divergence').";
-                
+                            . "- Express all historical judgments using authentic scholarly terminology.";
+
                 $fact_table_section = $fact_table ? "[Stage 1: Verified Archival Fact Table (In-Context Knowledge)]\n{$fact_table}\n\n" : "";
 
-                $user_prompt = "Produce an authoritative academic documentary text regarding '{$term}' based on the provided archival sources and verified fact table.\n\n"
+                $user_prompt = "■ Research Topic\n"
+                             . "- Target Topic: {$term}\n"
+                             . "(Note: Even if the query is in Korean or another language, produce the ENTIRE commentary, all section titles, and conclusion in 100% fluent academic English.)\n\n"
+                             . "Produce an authoritative academic documentary text regarding '{$term}' based on the provided archival sources and verified fact table.\n\n"
                              . $fact_table_section
                              . "■ [CRITICAL HISTORICAL METHODOLOGY & GROUNDING RULES]\n"
                              . "1. SCOPING ENVELOPE & CROSS-ATTRIBUTION GUARD:\n"
                              . "   - Each <SOURCE_EVIDENCE> block is strictly scoped to its assigned entity, region, and event.\n"
                              . "   - The persons, actions, and dates within a block apply SOLELY to that specific entity and region. NEVER cross-attribute figures or actions to other regions or disparate demonstrations.\n"
-                             . "2. OVERARCHING COMPARATIVE THEME (Resolving Disparate Topics):\n"
-                             . "   - If the query links disparate subjects from different geographical, temporal, or operational spheres (e.g., 'Lee Dong-hwi and Aunae Market Demonstration'), DO NOT treat them as an awkward forced pair. Instead, formulate a coherent overarching academic theme and subtitle:\n"
-                             . "     Example:\n"
-                             . "     # The Multi-Layered Topography of the March 1st Movement: Comparing Overseas Armed Leadership and Domestic Grassroots Uprising\n"
-                             . "     ## — Focusing on Lee Dong-hwi's Northern Campaign and the Cheonan Aunae Market Protest —\n"
-                             . "   - In the introduction, articulate why comparing these two distinct axes illuminates the breadth of the 1919 movement, while establishing through rigorous historical critique that there was no direct organizational link or joint on-site operation between the two.\n"
+                             . "2. OVERARCHING COMPARATIVE THEME:\n"
+                             . "   - Formulate a coherent overarching academic theme and subtitle reflecting the historical breadth of the movement.\n"
                              . "3. FACTUAL GROUNDING & PHYSICAL/TEMPORAL INTEGRITY:\n"
-                             . "   - When primary records mention prominent leaders in contemporaneous rosters, DO NOT misinterpret mere document co-occurrence as physical participation in localized domestic street protests.\n"
-                             . "   - Note historical realities strictly: Son Byong-hi was imprisoned immediately after March 1; figures like Ahn Chang-ho and Syngman Rhee were active abroad in exile.\n"
-                             . "4. CONTEXT SEPARATION:\n"
-                             . "   - Analyze each entity's distinct theater of operations, historical trajectory, and ideology in dedicated, independent sections.\n"
-                             . "5. NO AI/SYSTEM JARGON:\n"
-                             . "   - Absolutely never mention 'Zero-Correlation', 'hallucination', 'knowledge graph', 'nodes', 'database', 'prompt', or internal alphanumeric IDs (e.g., n8774...). Use refined academic vocabulary.\n"
-                             . "6. KINSHIP / SOLIDARITY CONTEXT:\n"
-                             . "   - If the query concerns family lineages or comrades (e.g., Yu Gwan-sun's family members), detail their documented shared struggle and sacrifices using provided records.\n\n"
-                             . "■ [Structural Outline]\n"
+                             . "   - Distinguish documentary co-occurrence in records from physical presence at local protests.\n"
+                             . "4. 100% ENGLISH CONSISTENCY:\n"
+                             . "   - Maintain fluent English throughout all sections including the conclusion. Do not revert to Korean.\n\n"
+                             . "■ [Structural Outline - Follow Exactly]\n"
                              . "# [Master Academic Title]\n"
                              . "## [Academic Subtitle]\n"
-                             . "1. Introduction: Comparative Historical Framing & Archival Verification of Historical Divergence\n"
+                             . "1. Introduction: Comparative Historical Framing & Archival Verification of Regional Dynamics\n"
                              . "2. Trajectory of Primary Leadership / Regional Movement: Theaters of Operation and Strategy\n"
                              . "3. Localized Grassroots Uprising / Specific Development: The Battlefield of Demonstration\n"
                              . "4. Critical Cross-Examination of Primary Archives, Judicial Rulings, and Press Dispatches\n"
                              . "5. Synthesis & Historical Significance in Modern Korean Independence History\n\n"
-                             . "[Archival Evidence Envelopes]\n{$context_str}";
+                             . "[Archival Evidence Envelopes]\n{$context_str}\n\n"
+                             . "[CRITICAL FINAL REMINDER - ZERO LANGUAGE DRIFT]: You must produce the ENTIRE commentary in 100% fluent academic English from the master title to the final word of Section 5 Conclusion. Do not leave any Korean particles or sentences untranslated.";
+
+            } elseif ($explain_lang === 'ja') {
+                $sys_prompt = "# 役割 (Role)\n"
+                            . "あなたは1919年3・1独立万世運動の地域的拡散経路と人物間の連関を解明する「知識グラフ基盤・歴史専門ドキュメンタリー・ドーセント（学術解説員）」です。\n"
+                            . "韓国近現代史および東アジア近代独立運動史の首席研究員・学術解説者として、提供された一次史料・公文書（京城地方法院検事局調書、高等法院判決文、警察訊問調書、新聞・電報等）を綿密に検証し、学術出版やテレビドキュメンタリー放送の基準を満たす、極めて格調高く流麗な日本語の学術解説原稿を執筆してください。\n\n"
+                            . "# 目的 (Objective)\n"
+                            . "ユーザーの質問に基づき、知識グラフから抽出された［史料コンテキスト］および第1段階検証表を分析し、人物・事件・場所へと連なる歴史的因果律を精緻かつ論理的に解説します。\n\n"
+                            . "# 絶対遵守規則 (Strict Rules)\n"
+                            . "1. 【出力言語の絶対的厳格性（最重要・言語ドリフト完全防止）】\n"
+                            . "   - 全編（主タイトル、副題、章見出し、本文各段落、第5章結論に至るまで）を、100%流麗かつ洗練された学術日本語で記述してください。\n"
+                            . "   - 【厳禁】韓国語の助詞（은, 는, 이, 가, 을, 를, 와, 과, 의, 에, 로, 으로 등）や文末・動詞（~하였다, ~되었다, ~이다, ~라 등）を日本語文中に残すことを絶対に禁止します。\n"
+                            . "   - 【厳禁】史料中のハングル名詞（시위, 사건, 참살, 만세, 훈장, 추서, 경찰, 군중 등）をそのまま放置せず、必ず正確な日本語（示威・デモ、事件、殺害・処断、万歳、勲章、追叙、警察、群衆等）に翻訳して記述してください。\n"
+                            . "   - 人名・地名は原則として漢字表記（例：張韶鎭、車喜植、民泳雲、文相翊、水原郡松山面泗江里、陸日光里、長安面）を用い、漢字が特定できない場合はカタカナ（例：チャ・インボム）を併記し、ハングル文字を地の文に混入させないでください。\n"
+                            . "   - 【言語逆戻りの防止】特に後半部（第3章、第4章、そして第5章の結論）において韓国語に逆戻りする現象（言語ドリフト）を徹底的に防止し、最後の結びの1文字に至るまで、品格ある学術日本語で完結させてください。\n"
+                            . "2. 【ゼロ・ハルシネーション（史料批判の徹底）】\n"
+                            . "   - 下記［史料コンテキスト］および第1段階ファクト表に明記された事実（人名、地名、日付、事件）のみを用いて構成してください。外部の未確認知識を勝手に創作・混入させてはなりません。\n"
+                            . "3. 【マルチホップ因果関係の明解な解説】\n"
+                            . "   - 史料間に2段階（2-hop）以上の連関がある場合、その歴史的因果関係を読者が明瞭に理解できるよう論理的かつ説得力をもって展開してください。\n"
+                            . "4. 【史料不在時の安全防護（Hard Trap Defense）】\n"
+                            . "   - 該当する史料が存在しない場合は、次の1文のみを出力して直ちに終了してください：『提供された歴史記録（知識グラフ史料）においては、お問い合わせの事象や実体間の関連性を確認することができません。』\n"
+                            . "5. 【トーン＆マナー】\n"
+                            . "   - 博物館の首席学術解説員たる風格を保ち、無駄な前置きやAIメタ言及（「知識グラフ」「ノード」「プロンプト」「ハルシネーション」等）を一切排し、核心的な歴史的因果律から論述を開始してください。\n\n"
+                            . "# 史料批判と記述上の禁則事項\n"
+                            . "- <SOURCE_EVIDENCE> ブロックで区切られた人名・行動・日付は、該当する地域・事件の記述にのみ有効です。他地域の人物や行動を混同・交差帰属（Cross-attribution）させることを固く禁じます。\n"
+                            . "- 「Zero-Correlation」「知識グラフ」「ノード」「データベース」「プロンプト」「ハルシネーション」「システム」等のAI・情報処理用語、および内部英数字識別子（n8774...等）を一切露出させてはなりません。";
+
+                $fact_table_section = $fact_table ? "■［第1段階：史料批判に基づく検証済みファクト表（前提知識）］\n{$fact_table}\n\n" : "";
+
+                $user_prompt = "■ 入力課題\n"
+                             . "- 探究テーマ：{$term}\n"
+                             . "（※探究テーマが韓国語または他言語であっても、解説本文・見出し・第5章結論に至るまですべて完全な学術日本語で執筆してください）\n"
+                             . "- 史料コンテキスト：以下の一次史料ブロックおよび第1段階検証表に収蔵されています。\n\n"
+                             . "上記テーマについて、提供された史料およびファクト表に基づき、学術ドキュメンタリー原稿を執筆してください。\n\n"
+                             . $fact_table_section
+                             . "■ 執筆ガイドライン\n"
+                             . "1. 史料隔壁の厳守：各史料ブロックの人物・日付・行動はその地域・事件にのみ帰属させて記述すること。\n"
+                             . "2. 巨視的・比較史的主題の設定：テーマの本質を捉えた格調高い主タイトルと学術副題を日本語で提示すること。\n"
+                             . "3. 時空間の実在性検証：文書上の単なる連名記載と、実際の現場参加・直接行動を厳密に区別すること。\n"
+                             . "4. 全文日本語の厳格維持：韓国語の助詞（은/는/이/가/을/를 등）や文末（~되었다 등）、未翻訳ハングルを一切残さず、すべての見出し・本文・結論を格式ある学術日本語で記述すること。特に第5章「結論」が韓国語に戻らないよう厳格に注意すること。\n\n"
+                             . "■ 構成フォーマット（必ず以下の章構成に沿って執筆してください）\n"
+                             . "# ［総合学術大主題］\n"
+                             . "## ［学術副題］\n"
+                             . "1. 序論：3・1独立運動の地域的展開と史料批判的アプローチ\n"
+                             . "2. 当該地域・主導勢力における蜂起の胎動と組織的軌跡\n"
+                             . "3. 地域基層民衆の自発的抗争と現場での実力行動の推移\n"
+                             . "4. 当代一次史料および司法・警察記録（検事局調書・判決文・電報等）の批判的検証\n"
+                             . "5. 結論：韓国近代独立運動史における本事件の歴史的位相と学術的意義\n\n"
+                             . "［一次史料原文ブロック］\n{$context_str}\n\n"
+                             . "【最重要・出力言語の厳守命令】全編（タイトルから第5章結論まで）を完全に格調高い学術日本語で出力してください。韓国語の助詞（은, 는, 이, 가, 을, 를, 와, 과, 의 等）、語尾、未翻訳ハングルは1文字たりとも残さず、全て日本語として完結させてください。";
+
+            } elseif ($explain_lang === 'zh') {
+                $sys_prompt = "# 角色定位 (Role)\n"
+                            . "您是专门解读1919年三一独立运动复杂扩散路径与历史人物隐性关联的“知识图谱历史学术讲解员（AI Historical Docent）”。\n"
+                            . "作为韩国近现代史与东亚近代独立运动史资深首席研究员兼学术讲解员，请依据提供的一手史料与司法档案（京城地方法院检察局调书、高等法院判决书、警察讯问调书、新闻电报等），撰写符合学术出版与高水准历史纪录片解说标准的中文学术文献原稿。\n\n"
+                            . "# 核心目标 (Objective)\n"
+                            . "根据用户的提问，严密分析从知识图谱提取的［史料语境］及第一阶段事实核查表，清晰、客观、逻辑严谨地阐明人物、事件与地域之间的历史因果律。\n\n"
+                            . "# 严格遵守规则 (Strict Rules)\n"
+                            . "1. 【输出语言绝对规范性（最高优先级・防止语言漂移）】\n"
+                            . "   - 全篇文稿（大标题、副标题、章节标题、各段正文及第5章最终结论）必须100%使用规范严谨的学术简体中文撰写。\n"
+                            . "   - 【严禁】在正文或结论中混入任何韩语助词（如 은, 는, 이, 가, 을, 를, 와, 과, 의 等）、终结词尾（如 ~하였다, ~되었다 等）或未翻译的谚文单词（如 시위, 사건, 참살, 훈장 等）。\n"
+                            . "   - 朝鲜历史人名、地名等专有名词优先使用正统汉字表述（如 张韶镇、车喜植、闵泳云、文相翊、水原郡松山面泗江里、长安面等），切勿遗留未翻译的纯韩文字母。\n"
+                            . "   - 【防止回漂】坚决杜绝后半部分（第3章至第5章结论）发生语言漂移回韩语的现象，整篇文稿直至最后一个标点符号均须保持典雅纯正的中文学术散文体。\n"
+                            . "2. 【零幻觉（严格史料批判）】\n"
+                            . "   - 仅依据下述［史料语境］及第一阶段事实核查表明确记载的事实（人名、地名、日期、事件）进行严密论述，绝不凭空臆造或掺杂外部未经核实的知识。\n"
+                            . "3. 【多跳因果链条的清晰贯通】\n"
+                            . "   - 若史料中存在2跳及以上的关联纽带，须向读者清晰剖析其因果承接脉络，使历史叙事一气呵成。\n"
+                            . "4. 【无史料时的安全防御机制（Hard Trap Defense）】\n"
+                            . "   - 若提供的史料中未发现与提问相关的线索，仅输出以下一句话并立即终止：“根据现存历史档案记录（知识图谱史料），未发现与您查询内容相关的历史关联信息。”\n"
+                            . "5. 【基调与风格】\n"
+                            . "   - 保持历史博物馆资深馆员的专业庄重口吻，直入历史因果核心，严禁出现“零相关”、“知识图谱”、“节点”、“数据库”、“提示词”等计算机与AI技术元术语。\n\n"
+                            . "# 史料隔离与交叉归属禁令\n"
+                            . "- 每个 <SOURCE_EVIDENCE> 史料块中记载的人物与行动仅对其标明的特定地域与事件有效，严禁跨区域生搬硬套或混淆人物归属。";
+
+                $fact_table_section = $fact_table ? "■［第一阶段：基于史料批判的核实事实表（背景知识）］\n{$fact_table}\n\n" : "";
+
+                $user_prompt = "■ 输入主题\n"
+                             . "- 探讨主题：{$term}\n"
+                             . "（※即使探讨主题包含韩语或其他语种，解说全文、所有小标题及第5章结论均必须全部使用规范学术简体中文撰写）\n"
+                             . "- 史料语境：收录于以下一手史料块及第一阶段事实表中。\n\n"
+                             . "请针对上述主题，依据一手史料与事实核查表，撰写权威学术纪录片解说文稿。\n\n"
+                             . $fact_table_section
+                             . "■ 撰写规范\n"
+                             . "1. 严守史料隔离：各史料块的人物与事件仅在对应地域范畴内分析，严禁跨地域混淆。\n"
+                             . "2. 确立宏观比较史主题：拟定富有学术深度的大标题与副标题。\n"
+                             . "3. 时空真实性甄别：严格区分档案同案列名与实际现场直接参与行动的区别。\n"
+                             . "4. 全文纯正中文：杜绝任何韩语残留，从章节标题到结论全部采用学术规范简体中文，严防第5章结论漂移回韩文。\n\n"
+                             . "■ 结构提纲（请严格遵循以下章节结构撰写）\n"
+                             . "# ［总括学术大标题］\n"
+                             . "## ［学术副标题］\n"
+                             . "1. 引言：三一独立运动的地域扩散态势与史料批判导论\n"
+                             . "2. 核心领导力量与区域抗争脉络：行动舞台与斗争策略\n"
+                             . "3. 基层民众的自发抗暴斗争与现场示威演进：民众实力抗争过程\n"
+                             . "4. 当代一手史料与司法警察档案（检察局调书、判决书、电报等）的批判性互证\n"
+                             . "5. 结论：本案在韩国近代独立运动史中的历史定位与学术启示\n\n"
+                             . "［一手史料原文块］\n{$context_str}\n\n"
+                             . "【最高优先级・输出语言严令】全篇（从主标题到第5章结论）必须全部输出为规范典雅的学术简体中文。严禁残留任何韩语助词（은, 는, 이, 가, 을, 를 等）、词尾或谚文字母，必须一气呵成以中文完结，防止后半部分漂移回韩语。";
+
             } else {
                 $sys_prompt = "# 역할 (Role)\n"
                             . "당신은 1919년 3·1 운동의 복잡한 확산 경로와 인물 간의 숨겨진 연관성을 해설하는 '지식그래프 기반 역사 전문 도슨트'입니다.\n"
@@ -836,23 +956,21 @@ if (isset($_GET['ajax'])) {
                             . "사용자의 질의를 바탕으로 지식그래프(Graph DB)에서 인출된 [사료 컨텍스트]를 분석하여, "
                             . "인물-사건-장소로 이어지는 역사적 인과율을 정확하고 논리적으로 해설합니다.\n\n"
                             . "# 절대 준수 규칙 (Strict Rules)\n"
-                            . "1. [Language Mirroring]: 사용자가 질의한 언어를 감지하여 동일한 언어로 답변하십시오. "
-                            . "(예: 영어로 질문하면 완벽한 영문 해설을, 한국어로 질문하면 한국어 해설을 제공합니다.)\n"
+                            . "1. [Language Consistency]: 전체 해설을 품격 있고 정제된 학술 한국어로 일관되게 작성하십시오.\n"
                             . "2. [Zero Hallucination]: 오직 하단에 제공된 [사료 컨텍스트]에 명시된 사실(인명, 지명, 날짜, 사건)만을 사용하여 답변을 구성하십시오. "
                             . "사전 학습된 외부 지식을 섞어 지어내지 마십시오.\n"
                             . "3. [Multi-hop Explanation]: 컨텍스트에 2단계(2-hop) 이상의 연결 고리(예: 인물 A → 공동 사건 → 인물 B → 타지역 사건)가 있다면, "
                             . "이 인과 과정이 어떻게 이어지는지 사용자가 이해하기 쉽게 풀어서 설명하십시오. 서사의 흐름이 끊기지 않게 연결하십시오.\n"
                             . "4. [Hard Trap Defense]: 제공된 [사료 컨텍스트]가 비어있거나, 사용자 질의와 관련된 연관성을 찾을 수 없는 경우, "
                             . "오직 다음 문장만 출력하고 해설을 즉시 종료하십시오. 사전 학습된 배경지식을 동원한 부연 설명이나 해설을 절대 덧붙이지 마십시오. "
-                            . "(한국어) '제공된 역사 기록(지식그래프 사료)에서는 질문하신 내용이나 개체 간의 연관성을 찾을 수 없습니다.' "
-                            . "(영어 질의 시) 'According to the provided historical records, no information or connection regarding your query can be found.'\n"
+                            . "'제공된 역사 기록(지식그래프 사료)에서는 질문하신 내용이나 개체 간의 연관성을 찾을 수 없습니다.'\n"
                             . "5. [Tone & Style]: 전문적이고 정중한 박물관 해설사(도슨트)의 어조를 유지하며, 불필요한 서론 없이 핵심 인과관계부터 즉시 설명하십시오.\n\n"
                             . "# 추가 작성 지침\n"
                             . "- 철저한 사료 비판(史料批判)과 사실 검증에 입각하여 서술하며, 역사적 상관관계가 없는 인물과 사건을 억지로 결합하거나 사실을 왜곡하지 마십시오.\n"
                             . "- 각 <SOURCE_EVIDENCE> 블록에 명시된 인물·행동·일자는 해당 개체·지역·사건 서술에만 유효합니다. 교차 귀속(Cross-attribution)을 엄격히 금지합니다.\n"
                             . "- 원고 본문에 'Zero-Correlation', '지식 그래프', '노드', '데이터베이스', '프롬프트', '환각', '시스템', 영문 해시 식별자(예: n8774... 등) 같은 인공지능·전산 메타 용어를 절대 노출하지 마십시오.\n"
                             . "- 모든 판단과 분석은 정통 역사학 연구 어휘(예: '사료 비판을 통한 실증', '당대 1차 사료군 및 공문서 판결문 분석')로 품격 있게 서술하십시오.";
-                
+
                 $fact_table_section = $fact_table ? "■ [1단계: 사료 비판 기반 정밀 사건-장소-인물 교차 검증표 (In-Context Knowledge Table)]\n{$fact_table}\n\n" : "";
 
                 $user_prompt = "# 입력 변수 (Input Variables)\n"
@@ -887,8 +1005,9 @@ if (isset($_GET['ajax'])) {
                              . "2. 국외 항일 무장투쟁 지도부 / 지역 중심 궤적: 활동 무대와 노선 (심층 분석)\n"
                              . "3. 국내 기층 민중의 자발적 항쟁 / 국지적 시위 전개: 현장 전개와 민중의 저항 (심층 분석)\n"
                              . "4. 당대 1차 사료군 및 관찬·보도 기록의 비판적 검토 (외신 전보, 판결문, 보고서 정밀 교차 검증 및 단순 연계 왜곡 시정)\n"
-                             . "5. 종합 결론: 한국독립운동사에서 두 궤적이 지니는 역사적 위상과 교훈\n\n"
-                             . "[사료 원문 블록]\n{$context_str}";
+                             . "5. 결론: 한국 근현대 독립운동사에서의 역사적 위상과 학술적 의의\n\n"
+                             . "[사료 원문 블록]\n{$context_str}\n\n"
+                             . "[최종 확인]: 서론부터 제5장 결론까지 전체를 품격 있고 완결성 높은 학술 한국어로 완성하십시오.";
             }
 
             $is_stream = isset($_GET['stream']) || isset($_POST['stream']);
@@ -1547,7 +1666,10 @@ function normalize_whitespace_text($text) {
     return trim($text ?? '');
 }
 
-function build_budgeted_evidence_context($evidences, $use_english, $max_items, $min_chars, $max_chars, $total_char_budget, $term = '', $focus = '') {
+function build_budgeted_evidence_context($evidences, $lang, $max_items, $min_chars, $max_chars, $total_char_budget, $term = '', $focus = '') {
+    if (is_bool($lang)) {
+        $lang = $lang ? 'en' : 'ko';
+    }
     $lines = [];
     $used_chars = 0;
     foreach ((array)$evidences as $idx => $e) {
@@ -1595,10 +1717,28 @@ function build_budgeted_evidence_context($evidences, $use_english, $max_items, $
             $body = mb_substr($text, 0, $body_cap);
         }
 
+        if ($lang === 'ja') {
+            $comment_str = "<!-- この史料の内容は [{$entity_attr}" . ($region ? " / {$region}" : "") . ($event ? " / {$event}" : "") . "] の記述にのみ有効であり他地域・事件との混同厳禁 -->";
+            $doc_lbl = "史料";
+            $body_lbl = "記述";
+        } elseif ($lang === 'zh') {
+            $comment_str = "<!-- 本史料内容仅对 [{$entity_attr}" . ($region ? " / {$region}" : "") . ($event ? " / {$event}" : "") . "] 的记述有效，严禁跨区域混淆 -->";
+            $doc_lbl = "文献";
+            $body_lbl = "内容";
+        } elseif ($lang === 'en') {
+            $comment_str = "<!-- This archival evidence applies strictly to [{$entity_attr}" . ($region ? " / {$region}" : "") . ($event ? " / {$event}" : "") . "] and must NOT be attributed to other regions/events -->";
+            $doc_lbl = "Document";
+            $body_lbl = "Content";
+        } else {
+            $comment_str = "<!-- 이 사료의 내용은 오직 [{$entity_attr}" . ($region ? " / {$region}" : "") . ($event ? " / {$event}" : "") . "] 서술에만 유효하며 타 지역/사건과 결합 금지 -->";
+            $doc_lbl = "문서";
+            $body_lbl = "내용";
+        }
+
         $envelope = "<SOURCE_EVIDENCE id=\"{$id_attr}\" entity=\"{$entity_attr}\"" . ($region ? " region=\"{$region}\"" : "") . ($event ? " event=\"{$event}\"" : "") . ">\n"
-                  . "  <!-- 이 사료의 내용은 오직 [{$entity_attr}" . ($region ? " / {$region}" : "") . ($event ? " / {$event}" : "") . "] 서술에만 유효하며 타 지역/사건과 결합 금지 -->\n"
-                  . "  [문서] {$doc}\n"
-                  . "  [내용] {$body}\n"
+                  . "  {$comment_str}\n"
+                  . "  [{$doc_lbl}] {$doc}\n"
+                  . "  [{$body_lbl}] {$body}\n"
                   . "</SOURCE_EVIDENCE>";
 
         $line_len = mb_strlen($envelope);
@@ -1610,7 +1750,10 @@ function build_budgeted_evidence_context($evidences, $use_english, $max_items, $
     return implode("\n\n", $lines);
 }
 
-function build_budgeted_pg_context($pg_texts, $use_english, $max_items, $min_chars, $max_chars, $total_char_budget, $term = '', $focus = '') {
+function build_budgeted_pg_context($pg_texts, $lang, $max_items, $min_chars, $max_chars, $total_char_budget, $term = '', $focus = '') {
+    if (is_bool($lang)) {
+        $lang = $lang ? 'en' : 'ko';
+    }
     $lines = [];
     $used_chars = 0;
     foreach ((array)$pg_texts as $idx => $t) {
@@ -1659,8 +1802,18 @@ function build_budgeted_pg_context($pg_texts, $use_english, $max_items, $min_cha
             $body = mb_substr($text, 0, $body_cap);
         }
 
+        if ($lang === 'ja') {
+            $comment_str = "<!-- この史料の内容は [{$entity_attr}" . ($region ? " / {$region}" : "") . ($event ? " / {$event}" : "") . "] の記述にのみ有効であり他地域・事件との混同厳禁 -->";
+        } elseif ($lang === 'zh') {
+            $comment_str = "<!-- 本史料内容仅对 [{$entity_attr}" . ($region ? " / {$region}" : "") . ($event ? " / {$event}" : "") . "] 的记述有效，严禁跨区域混淆 -->";
+        } elseif ($lang === 'en') {
+            $comment_str = "<!-- This archival evidence applies strictly to [{$entity_attr}" . ($region ? " / {$region}" : "") . ($event ? " / {$event}" : "") . "] and must NOT be attributed to other regions/events -->";
+        } else {
+            $comment_str = "<!-- 이 사료의 내용은 오직 [{$entity_attr}" . ($region ? " / {$region}" : "") . ($event ? " / {$event}" : "") . "] 서술에만 유효하며 타 지역/사건과 결합 금지 -->";
+        }
+
         $envelope = "<SOURCE_EVIDENCE id=\"{$id_attr}\" entity=\"{$entity_attr}\"" . ($region ? " region=\"{$region}\"" : "") . ($event ? " event=\"{$event}\"" : "") . ">\n"
-                  . "  <!-- 이 사료의 내용은 오직 [{$entity_attr}" . ($region ? " / {$region}" : "") . ($event ? " / {$event}" : "") . "] 서술에만 유효하며 타 지역/사건과 결합 금지 -->\n"
+                  . "  {$comment_str}\n"
                   . "  {$body}\n"
                   . "</SOURCE_EVIDENCE>";
 
@@ -1672,7 +1825,15 @@ function build_budgeted_pg_context($pg_texts, $use_english, $max_items, $min_cha
     }
 
     if (empty($lines)) return '';
-    $header = $use_english ? "[Primary Archival Sources (PostgreSQL)]\n" : "[1차 사료 원문 (PostgreSQL)]\n";
+    if ($lang === 'ja') {
+        $header = "[一次史料原文（PostgreSQL所蔵公文書）]\n";
+    } elseif ($lang === 'zh') {
+        $header = "[一手史料原文（PostgreSQL历史档案）]\n";
+    } elseif ($lang === 'en') {
+        $header = "[Primary Archival Sources (PostgreSQL)]\n";
+    } else {
+        $header = "[1차 사료 원문 (PostgreSQL)]\n";
+    }
     return $header . implode("\n\n", $lines);
 }
 
@@ -1961,616 +2122,20 @@ function fetch_pg_rows_for_names($pdo, $names, $tables_meta) {
     }
     return $out;
 }
+
+// 4. Render frontend (docent.html with active session CSRF token)
+if (!isset($_GET['ajax']) && !isset($_GET['csrf'])) {
+    $csrf_token = htmlspecialchars($_SESSION['docent_csrf'] ?? '', ENT_QUOTES, 'UTF-8');
+    $html_file = __DIR__ . '/docent.html';
+    if (file_exists($html_file)) {
+        $html = file_get_contents($html_file);
+        $html = str_replace(
+            '<head>',
+            "<head>\n    <script>window.__PRELOADED_CSRF__ = '{$csrf_token}';</script>",
+            $html
+        );
+        echo $html;
+        exit;
+    }
+}
 ?>
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>3.1 운동 역사 도슨트</title>
-    <!-- Google tag (gtag.js) -->
-    <script async src="https://www.googletagmanager.com/gtag/js?id=G-GRES32XWER"></script>
-    <script>
-        window.dataLayer = window.dataLayer || [];
-        function gtag(){dataLayer.push(arguments);} 
-        gtag('js', new Date());
-        gtag('config', 'G-GRES32XWER', {
-            send_page_view: true,
-            page_path: window.location.pathname
-        });
-    </script>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
-    <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <style>
-        body { background-color: #f0f2f6; font-family: 'Pretendard', sans-serif; }
-        .sidebar { height: 100vh; overflow-y: auto; background: #fff; border-right: 1px solid #dee2e6; padding: 2rem 1.5rem; }
-        .main-content { padding: 2rem; height: 100vh; overflow-y: auto; }
-        #graph { height: 460px; background: #fff; border-radius: 15px; border: 1px solid #dee2e6; margin-bottom: 1.5rem; cursor: pointer; }
-        .docent-card { background: #fff; border-radius: 15px; border: 1px solid #dee2e6; padding: 2rem; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
-        .legend-item { display: flex; align-items: center; gap: 8px; font-size: 0.85rem; font-weight: bold; }
-        .legend-color { width: 14px; height: 14px; border-radius: 3px; }
-        #status-log { font-size: 0.75rem; border-top: 1px solid #eee; padding-top: 1rem; margin-top: 2rem; }
-        /* ✨ 새로 추가된 노드 정보 패널 스타일 */
-        #node-info-panel { border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.08); border: none; overflow: hidden; }
-        #node-info-panel .card-header { border-bottom: 2px solid #dee2e6; background-color: #f8f9fa; }
-        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
-        .animate-blink { animation: blink 0.8s infinite; display: inline-block; font-weight: bold; margin-left: 2px; }
-    </style>
-</head>
-<body>
-<div class="container-fluid">
-    <div class="row">
-        <div class="col-md-2 sidebar">
-            <h4 class="mb-4 fw-bold text-primary">🇰🇷 3.1 운동 역사 도슨트</h4>
-            <div class="mb-4">
-                <label class="form-label small fw-bold text-muted">통합 검색</label>
-                <div class="input-group input-group-sm">
-                    <input type="text" id="q" class="form-control" placeholder="인물, 사건, 장소...">
-                    <button onclick="performSearch()" class="btn btn-primary">탐색</button>
-                </div>
-            </div>
-            
-            <div class="mb-4">
-                <label class="form-label small fw-bold text-muted">추천 키워드</label>
-                <div class="d-grid gap-2">
-                    <?php foreach (["유관순", "안중근", "이동휘", "시위", "임시정부"] as $kw): ?>
-                        <button onclick="setQuery('<?= $kw ?>')" class="btn btn-outline-secondary btn-sm text-start keyword-btn" data-ko-label="<?= $kw ?>">📌 <?= $kw ?></button>
-                    <?php endforeach; ?>
-                </div>
-            </div>
-
-            <div id="analysis-box" class="card bg-light p-3 mb-3 small" style="display:none">
-                <div class="fw-bold text-primary mb-2"><i class="bi bi-cpu"></i> AI 질의 분석</div>
-                <div class="mb-1">🎯 <strong>의도:</strong> <span id="intent-val"></span></div>
-                <div class="mb-1">🔍 <strong>초점:</strong> <span id="focus-val"></span></div>
-                <div class="text-muted mt-1" id="explanation-val" style="font-size:0.75rem;"></div>
-            </div>
-
-            <div class="card bg-warning-subtle p-3 mb-3 small border-1 border-warning" style="border-radius: 10px;">
-                <div class="fw-bold mb-2"><i class="bi bi-info-circle"></i> 📋 기본정보</div>
-                <div class="text-muted small" style="line-height: 1.5;">
-                    <p class="mb-1"><strong>제작자:</strong> jo.gyungmin@gmail.com</p>
-                    <p class="mb-1"><strong>💰 AI API 비용:</strong> 개인 감당 / 적절한 사용 부탁</p>
-                    <p class="mb-0"><strong>🌐 English:</strong> Explanation only</p>
-                </div>
-            </div>
-
-            <div id="status-log" class="text-muted">
-                <div id="status-text">준비됨.</div>
-            </div>
-        </div>
-
-        <div class="col-md-10 main-content">
-            <h3 id="search-title" class="mb-4 fw-bold">역사를 탐색해 보세요.</h3>
-            <div class="row">
-                <div class="col-lg-6">
-                    <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
-                        <div class="small fw-bold text-muted">지식그래프</div>
-                        <button type="button" class="btn btn-sm btn-outline-primary" onclick="centerGraph()">
-                            <i class="bi bi-bullseye"></i> 가운데로 다시 불러오기
-                        </button>
-                    </div>
-                    <div id="graph"></div>
-                    <div class="d-flex justify-content-center gap-3 mb-4 flex-wrap">
-                        <div class="legend-item"><div class="legend-color" style="background: #F7A01F;"></div> 사료</div>
-                        <div class="legend-item"><div class="legend-color" style="background: #2563EB;"></div> 인물</div>
-                        <div class="legend-item"><div class="legend-color" style="background: #DC2626;"></div> 사건</div>
-                        <div class="legend-item"><div class="legend-color" style="background: #16A34A;"></div> 장소</div>
-                        <div class="legend-item"><div class="legend-color" style="background: #7C3AED;"></div> 기관</div>
-                    </div>
-                    
-                    <div id="node-info-panel" class="card mb-4" style="display:none;">
-                        <div class="card-header fw-bold text-primary">
-                            <i class="bi bi-info-circle-fill"></i> 선택된 노드 상세 정보
-                        </div>
-                        <div class="card-body" id="node-info-content">
-                            </div>
-                    </div>
-                </div>
-
-                <div class="col-lg-6">
-                    <div class="docent-card">
-                        <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
-                            <h5 class="fw-bold m-0"><i class="bi bi-chat-dots-fill text-primary"></i> 도슨트 해설</h5>
-                            <button id="explainBtn" onclick="generateExplanation()" class="btn btn-sm btn-primary" style="display:none;">
-                                <i class="bi bi-stars"></i> 해설 생성
-                            </button>
-                        </div>
-                        <div class="border rounded-3 bg-light p-3 mb-3">
-                            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
-                                <div class="small fw-bold text-muted">해설 언어</div>
-                                <div class="btn-group btn-group-sm" role="group" aria-label="해설 언어 토글">
-                                    <input type="radio" class="btn-check" name="explanation-lang" id="explanation-lang-ko" value="ko" <?php echo docent_is_english() ? '' : 'checked'; ?>>
-                                    <label class="btn btn-outline-primary" for="explanation-lang-ko">한국어</label>
-                                    <input type="radio" class="btn-check" name="explanation-lang" id="explanation-lang-en" value="en" <?php echo docent_is_english() ? 'checked' : ''; ?>>
-                                    <label class="btn btn-outline-primary" for="explanation-lang-en">English</label>
-                                </div>
-                            </div>
-                            <div id="explanation-content" class="text-secondary" style="line-height: 1.7; min-height: 100px;">
-                                검색어를 입력하고 탐색 버튼을 누르면 인프라가 작동합니다.
-                            </div>
-                        </div>
-                        
-                        <div id="rag-section" style="display:none">
-                            <h6 class="fw-bold mt-5 mb-3 border-top pt-3"><i class="bi bi-journal-text"></i> 수집된 사료/PG 근거</h6>
-                            <div id="rag-evidence-list" class="small" style="max-height: 320px; overflow-y: auto;"></div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<script>
-let network = null;
-let lastEvidences = [];
-let pgPrefetchTexts = [];
-let currentNodes = []; // ✨ 검색된 노드 목록 보관용
-let currentEdges = []; // ✨ 검색된 엣지 목록 보관용
-
-function restoreSuggestedKeywords() {
-    if (document.documentElement.lang !== 'en') return;
-    document.querySelectorAll('.keyword-btn').forEach((button) => {
-        const label = button.dataset.koLabel || button.textContent.replace(/^📌\s*/, '');
-        button.textContent = `📌 ${label}`;
-    });
-}
-
-restoreSuggestedKeywords();
-
-function setQuery(q) {
-    document.getElementById('q').value = q;
-    performSearch();
-}
-
-function trackAnalyticsEvent(name, params = {}) {
-    if (typeof gtag === 'function') {
-        gtag('event', name, params);
-    }
-}
-
-async function api(act, data = {}) {
-    const fd = new FormData();
-    for (let k in data) fd.append(k, data[k]);
-    const csrfToken = '<?= htmlspecialchars($_SESSION['docent_csrf'], ENT_QUOTES, 'UTF-8') ?>';
-    fd.append('csrf_token', csrfToken);
-    const response = await fetch(`?ajax=${act}`, {
-        method: 'POST',
-        body: fd,
-        credentials: 'same-origin',
-        headers: { 'X-CSRF-Token': csrfToken }
-    });
-    
-    const rawText = await response.text();
-    
-    if (!response.ok) {
-        try {
-            const err = JSON.parse(rawText);
-            const errMsg = err.error || ('HTTP ' + response.status + ' 오류');
-            throw new Error('[' + act + ' 단계 HTTP ' + response.status + '] ' + errMsg);
-        } catch(e) {
-            if (e instanceof Error && e.message.startsWith('[' + act + ' 단계 HTTP ')) throw e;
-            throw new Error('[' + act + ' 단계 HTTP ' + response.status + '] ' + rawText.substring(0, 300));
-        }
-    }
-    
-    try {
-        return JSON.parse(rawText);
-    } catch (e) {
-        throw new Error('[' + act + ' ' + '단계 JSON 파싱 실패] ' + '원문: ' + rawText.substring(0, 150));
-    }
-}
-
-async function performSearch() {
-    const term = document.getElementById('q').value.trim();
-    if (term.length < 2) return alert('2글자 이상 입력하세요.');
-
-    trackAnalyticsEvent('search', { search_term: term });
-
-    document.getElementById('analysis-box').style.display = 'none';
-    document.getElementById('explainBtn').style.display = 'none';
-    document.getElementById('rag-section').style.display = 'none';
-    document.getElementById('node-info-panel').style.display = 'none'; // 초기화 시 노드 정보 패널 숨김
-    pgPrefetchTexts = [];
-    currentNodes = [];
-
-    setStatus('<span class="spinner-border spinner-border-sm"></span> 의도 분석 중...');
-    document.getElementById('search-title').innerText = `'${term}' ` + '분석 중...';
-    
-    try {
-        const analysis = await api('analyze', { term });
-        document.getElementById('intent-val').innerText = analysis.intent_type || analysis.intent;
-        document.getElementById('focus-val').innerText = analysis.focus;
-        document.getElementById('explanation-val').innerText = analysis.analyzed_intent_ko || analysis.explanation;
-        document.getElementById('analysis-box').style.display = 'block';
-
-        const keywords = analysis.keywords || [term];
-        
-        setStatus('<span class="spinner-border spinner-border-sm"></span> 지식망 및 사료 검색...');
-        const graphData = await api('graph', { term, keywords: JSON.stringify(keywords) });
-        lastEvidences = graphData.evidences;
-        currentNodes = graphData.nodes; // ✨ 노드 데이터를 보관
-        currentEdges = graphData.edges || []; // ✨ 엣지 데이터를 보관
-        
-        draw(graphData.nodes, graphData.edges);
-
-        const nodeNames = Array.isArray(graphData.prefetch_names) && graphData.prefetch_names.length > 0
-            ? graphData.prefetch_names
-            : graphData.nodes.map(n => n.raw_id);
-        if (nodeNames.length > 0) {
-            setStatus('<span class="spinner-border spinner-border-sm"></span> PostgreSQL 사료 원문 연동 중...');
-            const pgRows = await api('pg_prefetch', { names: JSON.stringify(nodeNames) });
-            
-            pgPrefetchTexts = pgRows.map(r => {
-                let sStr = [];
-                for(let k in r.snippets) { if(r.snippets[k]) sStr.push(`${k}: ${r.snippets[k]}`); }
-                return `[${r.schema}.${r.table}] node=${r.node_id} rowid=${r.rowid} :: ${sStr.join('; ')}`;
-            });
-        }
-
-        document.getElementById('search-title').innerText = `'${term}' ` + '지식망 탐색 완료';
-        document.getElementById('explanation-content').innerHTML = "지식 구조 및 근거 수집 완료. <strong>'해설 생성'</strong> 버튼을 클릭하면 RAG 분석이 시작됩니다.";
-        document.getElementById('explainBtn').style.display = 'inline-block';
-
-        let ragHtml = '';
-        lastEvidences.forEach(ev => {
-            ragHtml += `<div class="p-2 mb-2 bg-light border-start border-warning border-3 rounded small">
-                <div class="fw-bold text-dark">📜 ${ev.doc} (개체: ${ev.concept})</div>
-                <div class="text-muted mt-1">${ev.text.substring(0, 300)}...</div>
-            </div>`;
-        });
-        pgPrefetchTexts.forEach(txt => {
-            ragHtml += `<div class="p-2 mb-2 bg-light border-start border-success border-3 rounded small">
-                <div class="fw-bold text-dark"><i class="bi bi-database"></i> PostgreSQL 사료</div>
-                <div class="text-muted mt-1">${txt}</div>
-            </div>`;
-        });
-
-        if (ragHtml) {
-            document.getElementById('rag-evidence-list').innerHTML = ragHtml;
-            document.getElementById('rag-section').style.display = 'block';
-        }
-        setStatus('완료');
-
-    } catch (e) {
-        console.error(e);
-        setStatus('<span class="text-danger"><i class="bi bi-exclamation-triangle"></i> ' + '에러: ' + e.message + '</span>');
-        document.getElementById('explanation-content').innerHTML = 
-            `<div class="alert alert-danger mb-0 text-start">` +
-            `<div class="fw-bold mb-1"><i class="bi bi-exclamation-octagon-fill me-1"></i> 데이터 탐색 실패</div>` +
-            `<div class="small font-monospace text-break mb-1">${e.message}</div>` +
-            `<small class="text-muted">서버 오류 상세 정보를 확인하고 설정을 점검해 주세요.</small>` +
-            `</div>`;
-    }
-}
-
-async function generateExplanation() {
-    const term = document.getElementById('q').value.trim();
-    const langInput = document.querySelector('input[name="explanation-lang"]:checked');
-    const lang = langInput ? langInput.value : 'ko';
-    trackAnalyticsEvent('generate_explanation', {
-        search_term: term,
-        evidence_count: lastEvidences.length,
-        pg_count: pgPrefetchTexts.length,
-        explanation_lang: lang
-    });
-
-    const expContent = document.getElementById('explanation-content');
-    expContent.innerHTML = '<div class="text-muted small py-3"><span class="spinner-border spinner-border-sm text-primary me-2"></span> 1단계: 사료별 사건·장소·인물 교차 격벽 검증 및 학술 해설 작성 준비 중...</div>';
-    
-    try {
-        const csrfToken = '<?= htmlspecialchars($_SESSION['docent_csrf'], ENT_QUOTES, 'UTF-8') ?>';
-        const currentFocus = document.getElementById('focus-val') ? document.getElementById('focus-val').innerText : '';
-        const fd = new FormData();
-        fd.append('term', term);
-        fd.append('focus', currentFocus);
-        fd.append('lang', lang);
-        fd.append('evidences', JSON.stringify(lastEvidences));
-        fd.append('pg_texts', JSON.stringify(pgPrefetchTexts));
-        fd.append('csrf_token', csrfToken);
-        fd.append('stream', '1');
-
-        const response = await fetch('?ajax=explain&stream=1', {
-            method: 'POST',
-            body: fd,
-            credentials: 'same-origin',
-            headers: { 'X-CSRF-Token': csrfToken }
-        });
-
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status} 오류`);
-        }
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder('utf-8');
-        let fullText = '';
-        let buffer = '';
-
-        while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop(); // 미완성 행 보존
-
-            for (const line of lines) {
-                const trimmed = line.trim();
-                if (trimmed === 'data: [DONE]') {
-                    break;
-                }
-                if (trimmed.startsWith('data: ')) {
-                    try {
-                        const parsed = JSON.parse(trimmed.substring(6));
-                        if (parsed.chunk) {
-                            fullText += parsed.chunk;
-                            expContent.innerHTML = marked.parse(fullText) + '<span class="text-primary animate-blink">▌</span>';
-                        }
-                    } catch (e) {}
-                }
-            }
-        }
-
-        // 스트리밍 완료 후 최종 렌더링 (커서 제거)
-        expContent.innerHTML = marked.parse(fullText);
-
-    } catch (e) {
-        console.error(e);
-        expContent.innerHTML = `<div class="alert alert-danger mb-0 text-start">` +
-            `<div class="fw-bold mb-1"><i class="bi bi-exclamation-octagon-fill me-1"></i> 해설 생성 실패</div>` +
-            `<div class="small font-monospace text-break mb-1">${escapeHtml(e.message)}</div>` +
-            `<small class="text-muted">서버 오류 상세 정보를 확인하고 설정을 점검해 주세요.</small>` +
-            `</div>`;
-    }
-}
-
-function centerGraph() {
-    if (!network) {
-        setStatus('먼저 지식그래프를 탐색해 주세요.');
-        return;
-    }
-
-    network.fit({
-        animation: {
-            duration: 600,
-            easingFunction: 'easeInOutQuad'
-        }
-    });
-}
-
-function setStatus(html) {
-    document.getElementById('status-text').innerHTML = html;
-}
-
-function escapeHtml(str) {
-    if (str === null || str === undefined) return '';
-    return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-}
-
-function focusNode(nodeId) {
-    if (network) {
-        network.focus(nodeId, { scale: 1.2, animation: { duration: 500, easingFunction: 'easeInOutQuad' } });
-        network.selectNodes([nodeId]);
-    }
-    const targetNode = currentNodes.find(n => n.id === nodeId);
-    if (targetNode) {
-        showNodeInfo(targetNode);
-    }
-}
-
-// ✨ 노드 정보를 패널에 렌더링하는 함수
-function showNodeInfo(node) {
-    const panel = document.getElementById('node-info-panel');
-    const content = document.getElementById('node-info-content');
-    
-    // 1. 기본 정보 헤더
-    const cleanLabel = node.label.replace(/[\n📜👤🔥📍🏢]/g, '').trim();
-    let html = `<div class="d-flex justify-content-between align-items-center mb-3">
-        <h5 class="fw-bold text-dark m-0">${escapeHtml(cleanLabel)}</h5>
-        <span class="badge bg-primary fs-6">${escapeHtml(node.type || '개체')}</span>
-    </div>`;
-
-    html += `<div class="mb-2"><span class="badge bg-secondary me-2">개체 ID</span> <span class="font-monospace text-muted small text-break">${escapeHtml(node.raw_id)}</span></div>`;
-    
-    if (Array.isArray(node.aliases) && node.aliases.length > 0) {
-        html += `<div class="mb-2"><span class="badge bg-info text-dark me-2">이칭/한자</span> <span class="text-dark fw-semibold">${escapeHtml(node.aliases.join(', '))}</span></div>`;
-    }
-
-    if (node.labels && node.labels.length > 0) {
-        html += `<div class="mb-3"><span class="badge bg-secondary me-2">속성 라벨</span> <span class="text-primary small">${escapeHtml(node.labels.join(', '))}</span></div>`;
-    }
-
-    // 2. Neo4j 노드 기본 속성 테이블 (Properties)
-    if (node.props && Object.keys(node.props).length > 0) {
-        let propRows = '';
-        const propLabels = {
-            '제목': '제목', 'title': '제목', 'name': '명칭', '사건명': '사건명',
-            '설명': '설명', 'description': '설명', '날짜': '날짜', 'category': '분류',
-            '원천테이블': '원천 테이블', 'source_table': '원천 테이블',
-            '원천rowid': '원천 행 번호', 'rowid': '행 번호', '원본id': '원본 식별자',
-            '한글독음': '한글 독음', '한자': '한자 표기', 'type': '유형'
-        };
-        for (let k in node.props) {
-            if (['embedding', 'labels', 'id', 'uid'].includes(k)) continue;
-            const val = String(node.props[k] || '').trim();
-            if (!val) continue;
-            const displayKey = propLabels[k] || k;
-            propRows += `<tr>
-                <td class="text-muted small fw-bold text-nowrap bg-light" style="width: 30%;">${escapeHtml(displayKey)}</td>
-                <td class="small text-break" style="white-space: pre-wrap;">${escapeHtml(val)}</td>
-            </tr>`;
-        }
-        if (propRows) {
-            html += `<hr><h6 class="fw-bold text-dark mb-2"><i class="bi bi-card-list"></i> 노드 상세 메타데이터</h6>`;
-            html += `<div class="table-responsive mb-3" style="max-height: 200px; overflow-y: auto;">
-                <table class="table table-sm table-bordered bg-light mb-0">${propRows}</table>
-            </div>`;
-        }
-    }
-
-    // 3. 그래프 상 직접 연결된 이웃 개체 (Connected Entities in Graph)
-    const connectedEdges = currentEdges.filter(e => e.from === node.id || e.to === node.id);
-    if (connectedEdges.length > 0) {
-        html += `<hr><h6 class="fw-bold text-primary mb-2"><i class="bi bi-diagram-3"></i> 그래프 연결 관계 (${connectedEdges.length}건)</h6>`;
-        html += `<div class="d-flex flex-wrap gap-1 mb-3" style="max-height: 140px; overflow-y: auto;">`;
-        connectedEdges.forEach(e => {
-            const isOutgoing = (e.from === node.id);
-            const otherId = isOutgoing ? e.to : e.from;
-            const otherNode = currentNodes.find(n => n.id === otherId);
-            if (otherNode) {
-                const otherLabel = otherNode.label.replace(/[\n📜👤🔥📍🏢]/g, '').trim();
-                const edgeLabel = e.label || (isOutgoing ? '연결 ➔' : '🠔 연결');
-                html += `<button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2 small text-start" onclick="focusNode('${otherId}')" title="${escapeHtml(e.type || '')}">
-                    <span class="badge bg-light text-dark border me-1">${escapeHtml(edgeLabel)}</span> ${escapeHtml(otherLabel)}
-                </button>`;
-            }
-        });
-        html += `</div>`;
-    }
-
-    // 4. PostgreSQL 원천 레코드 비동기 로딩 영역
-    html += `<div id="node-pg-source-box">
-        <hr><div class="d-flex align-items-center text-muted small py-2">
-            <span class="spinner-border spinner-border-sm me-2 text-success"></span> 원천 사료 데이터(PostgreSQL) 실시간 조회 중...
-        </div>
-    </div>`;
-
-    // 5. 관련된 Neo4j 사료 증거 찾기
-    const relatedEvidences = lastEvidences.filter(ev => {
-        if (ev.concept === node.raw_id || ev.concept === node.id) return true;
-        if (Array.isArray(node.aliases) && node.aliases.includes(ev.concept)) return true;
-        return false;
-    });
-    if (relatedEvidences.length > 0) {
-        html += `<hr><h6 class="fw-bold text-warning mb-2"><i class="bi bi-journal-bookmark-fill"></i> Neo4j 관련 사료 기록 (${relatedEvidences.length}건)</h6>`;
-        html += `<div style="max-height: 200px; overflow-y: auto; padding-right: 4px;">`;
-        relatedEvidences.forEach(ev => {
-            html += `<div class="mb-2 p-2 bg-light border rounded small" style="white-space: pre-wrap; word-break: break-word;">
-                <strong class="text-dark">${escapeHtml(ev.doc)}</strong><br>
-                <span class="text-muted">${escapeHtml(ev.text.substring(0, 200))}...</span>
-            </div>`;
-        });
-        html += `</div>`;
-    }
-
-    content.innerHTML = html;
-    panel.style.display = 'block';
-
-    // 6. 비동기로 PostgreSQL 원천 레코드 실시간 조회
-    loadNodeSourceDetail(node);
-}
-
-async function loadNodeSourceDetail(node) {
-    const box = document.getElementById('node-pg-source-box');
-    if (!box) return;
-
-    const props = node.props || {};
-    const table = props['원천테이블'] || props['source_table'] || '';
-    const rowid = props['원천rowid'] || props['rowid'] || '';
-
-    const cleanLabel = (node.label || '').replace(/[\n📜👤🔥📍🏢]/g, '').trim();
-
-    try {
-        const detail = await api('node_detail', {
-            table: table,
-            rowid: rowid,
-            raw_id: node.raw_id || '',
-            label: cleanLabel,
-            aliases: JSON.stringify(node.aliases || [])
-        });
-
-        if (detail && detail.found && detail.columns && Object.keys(detail.columns).length > 0) {
-            let rowHtml = `<hr><h6 class="fw-bold text-success mb-2">
-                <i class="bi bi-database-check"></i> 원천 사료 원문 [${escapeHtml(detail.table)} 행 #${detail.rowid}]
-            </h6>`;
-            rowHtml += `<div class="table-responsive" style="max-height: 250px; overflow-y: auto;">
-                <table class="table table-sm table-striped table-bordered small mb-2">
-                    <tbody>`;
-            for (let col in detail.columns) {
-                const val = detail.columns[col];
-                if (val === null || val === '') continue;
-                rowHtml += `<tr>
-                    <th class="bg-light text-muted" style="width: 32%;">${escapeHtml(col)}</th>
-                    <td class="text-break" style="white-space: pre-wrap;">${escapeHtml(val)}</td>
-                </tr>`;
-            }
-            rowHtml += `</tbody></table></div>`;
-
-            if (detail.tei) {
-                rowHtml += `<details class="small mt-2 mb-2">
-                    <summary class="text-primary fw-bold" style="cursor: pointer;">📜 TEI 마크업 XML 원문 확인</summary>
-                    <pre class="bg-light p-2 border rounded mt-1 small font-monospace text-break" style="max-height: 200px; overflow-y: auto; white-space: pre-wrap;">${escapeHtml(detail.tei)}</pre>
-                </details>`;
-            }
-            box.innerHTML = rowHtml;
-        } else {
-            // 원천 행을 찾지 못한 경우 기존 사전조회 PG 텍스트 매칭
-            const relatedPg = pgPrefetchTexts.filter(txt => {
-                if (txt.includes(`node=${node.raw_id}`)) return true;
-                if (Array.isArray(node.aliases) && node.aliases.some(a => txt.includes(`node=${a}`))) return true;
-                return false;
-            });
-            if (relatedPg.length > 0) {
-                let pgHtml = `<hr><h6 class="fw-bold text-success mb-2"><i class="bi bi-database-fill"></i> PostgreSQL 관련 근거</h6>`;
-                pgHtml += `<div style="max-height: 180px; overflow-y: auto; padding-right: 4px;">`;
-                relatedPg.forEach(txt => {
-                    const parts = txt.split('::');
-                    const source = parts[0];
-                    const detailText = parts[1] ? parts[1] : '';
-                    pgHtml += `<div class="mb-2 p-2 bg-light border rounded small">
-                        <strong class="text-success">${escapeHtml(source.replace(/\[|\]/g, ''))}</strong><br>
-                        <div class="text-muted" style="max-height: 120px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;">${escapeHtml(detailText)}</div>
-                    </div>`;
-                });
-                pgHtml += `</div>`;
-                box.innerHTML = pgHtml;
-            } else {
-                box.innerHTML = `<hr><div class="text-muted small py-1"><i class="bi bi-info-circle"></i> 원천 DB 테이블에 직접 대응되는 데이터가 없습니다.</div>`;
-            }
-        }
-    } catch (e) {
-        box.innerHTML = `<hr><div class="text-muted small py-1"><i class="bi bi-exclamation-circle text-warning"></i> 원천 데이터 상세 조회 생략: ${escapeHtml(e.message)}</div>`;
-    }
-}
-
-function draw(nodes, edges) {
-    const container = document.getElementById('graph');
-    const data = { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) };
-    const options = {
-        edges: { arrows: 'to', color: '#848484', font: { size: 11, align: 'middle' }, smooth: { type: 'continuous' } },
-        physics: { enabled: true, repulsion: { nodeDistance: 240, centralGravity: 0.15 }, stabilization: { iterations: 120 } }
-    };
-    
-    if (network) network.destroy();
-    network = new vis.Network(container, data, options);
-
-    // ✨ 마우스 클릭 이벤트 리스너 추가
-    network.on("click", function(params) {
-        if (params.nodes.length > 0) {
-            const nodeId = params.nodes[0];
-            const clickedNode = currentNodes.find(n => n.id === nodeId);
-            if (clickedNode) {
-                trackAnalyticsEvent('node_click', {
-                    node_id: clickedNode.raw_id || nodeId,
-                    node_labels: (clickedNode.labels || []).join('|')
-                });
-                showNodeInfo(clickedNode);
-            }
-        } else {
-            // 빈 공간(배경) 클릭 시 패널 숨김
-            document.getElementById('node-info-panel').style.display = 'none';
-        }
-    });
-}
-</script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-</body>
-</html>
