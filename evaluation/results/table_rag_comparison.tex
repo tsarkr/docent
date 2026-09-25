@@ -1,0 +1,17 @@
+\begin{table*}[htbp]
+\centering
+\caption{Quantitative Comparative Evaluation: Vector RAG vs. GraphRAG vs. Proposed Docent Hybrid RAG}
+\label{tab:rag_comparison}
+\begin{tabular}{l|c|c|c}
+\hline
+\textbf{Evaluation Metric} & \textbf{Vector RAG} & \textbf{Standard GraphRAG} & \textbf{Docent Hybrid RAG (Proposed)} \\
+\hline
+Fact Recall / Faithfulness (\%) $\uparrow$ & 24.1\% & 31.6\% & \textbf{50.0\%} \\
+Hallucination Rate (Traps) (\%) $\downarrow$ & 18.7\% & 10.9\% & \textbf{3.5\%} \\
+Avg. Context Tokens Ingested & 415 & 305 & 1418 \\
+Avg. Output Tokens Generated & 98 & 107 & 357 \\
+Token Efficiency (Facts / 1k tokens) $\uparrow$ & 1.74 & 3.11 & \textbf{1.06} \\
+Avg. Latency (Total s) $\downarrow$ & 3.81s & 2.81s & 11.36s \\
+\hline
+\end{tabular}
+\end{table*}

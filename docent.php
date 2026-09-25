@@ -34,6 +34,19 @@ header('Pragma: no-cache');
 if (file_exists(__DIR__ . '/.env')) {
     $dotenv = Dotenv::createImmutable(__DIR__);
     $dotenv->load();
+} elseif (file_exists(__DIR__ . '/.streamlit/secrets.toml')) {
+    $secrets_content = file_get_contents(__DIR__ . '/.streamlit/secrets.toml');
+    if ($secrets_content !== false) {
+        if (preg_match_all('/^\s*([A-Za-z0-9_]+)\s*=\s*["\'](.*?)["\']\s*$/m', $secrets_content, $matches, PREG_SET_ORDER)) {
+            foreach ($matches as $m) {
+                $k = $m[1]; $v = $m[2];
+                if (getenv($k) === false) {
+                    putenv("{$k}={$v}");
+                    $_ENV[$k] = $v;
+                }
+            }
+        }
+    }
 }
 
 // Utility to get config safely
@@ -385,7 +398,7 @@ if (isset($_GET['ajax'])) {
             $res = call_gemini([
                 ["role" => "system", "content" => $system_prompt],
                 ["role" => "user", "content" => (string)$term]
-            ], true);
+            ], true, null, 0.0, 0.8);
             
             $parsed = json_decode($res, true);
             $output = [
@@ -407,6 +420,21 @@ if (isset($_GET['ajax'])) {
             $keywords = array_values(array_filter(array_map(fn($kw) => docent_sanitize_text($kw, 180, false), $keywords)));
             if (empty($keywords)) $keywords = [$term];
             
+            // 복합 질의어(예: "유관순의 가족의 독립운동")에서 핵심 개체명 분리 보강
+            $expanded_keywords = $keywords;
+            if (!empty($term)) {
+                // 공백 및 특수문자 분리 토큰 추출
+                $tokens = preg_split('/[\s\.,\?!~]+/u', $term);
+                foreach ($tokens as $tk) {
+                    $tk = trim($tk);
+                    // 한국어 조사/접미사 제거
+                    $tk_clean = preg_replace('/(의|은|는|이|가|을|를|과|와|도|에서|에게|으로|로)$/u', '', $tk);
+                    if (mb_strlen($tk_clean) >= 2 && !in_array($tk_clean, $expanded_keywords, true)) {
+                        $expanded_keywords[] = $tk_clean;
+                    }
+                }
+            }
+
             $client = get_neo4j();
             $nodes = [];
             $edges = [];
@@ -428,7 +456,7 @@ if (isset($_GET['ajax'])) {
                 LIMIT 50
             ";
             
-            foreach ($keywords as $kw) {
+            foreach ($expanded_keywords as $kw) {
                 if (empty($kw)) continue;
                 $escaped_kw = docent_escape_lucene($kw);
                 if ($escaped_kw === '') continue;
@@ -442,31 +470,19 @@ if (isset($_GET['ajax'])) {
                     $node = $record->get('n');
                     $labels_iterable = $record->get('labels');
                     
-                    // 안전한 프로퍼티 및 라벨 추출
-                    $props = [];
-                    if ($node && method_exists($node, 'getProperties')) {
-                        foreach ($node->getProperties() as $k => $v) {
-                            if ($k === 'embedding') continue; // 768차원 벡터 데이터는 속성 맵에서 제외
-                            
-                            if (is_scalar($v)) {
-                                $props[$k] = $v;
-                            } elseif (is_iterable($v)) {
-                                $props[$k] = json_encode(iterator_to_array($v), JSON_UNESCAPED_UNICODE);
-                            } else {
-                                $props[$k] = (string)$v;
-                            }
-                        }
+                    // add_node_to_map에서 프로퍼티/라벨을 일괄 추출 (중복 제거)
+                    $nid = add_node_to_map($nodes, $node, $labels_iterable);
+                    if (!$nid) continue;
+                    $props = $nodes[$nid]['props'] ?? [];
+                    $labels = $nodes[$nid]['labels'] ?? [];
+                    $node_id = $nodes[$nid]['raw_id'] ?? 'unknown';
+                    
+                    // 인물(Person) 라벨 노드는 최우선 시드로 관리
+                    if (in_array('인물', $labels) || in_array('Person', $labels)) {
+                        array_unshift($found_ids, (string)$node_id);
+                    } else {
+                        $found_ids[] = (string)$node_id;
                     }
-                    
-                    $labels = [];
-                    if (is_iterable($labels_iterable)) {
-                        foreach ($labels_iterable as $l) $labels[] = (string)$l;
-                    }
-                    
-                    $node_id = $props['uid'] ?? $props['id'] ?? $props['명칭'] ?? $props['name'] ?? $props['title'] ?? 'unknown';
-                    $found_ids[] = (string)$node_id;
-                    
-                    add_node_to_map($nodes, $node, $labels_iterable);
 
                     if (in_array('Thesaurus', $labels)) {
                         add_fact_evidence($evidences, 'node', [
@@ -479,6 +495,28 @@ if (isset($_GET['ajax'])) {
                             "concept" => (string)($props['name'] ?? $node_id),
                             "text" => "분류: " . (string)($props['category'] ?? '') . "\n설명: " . mb_substr((string)($props['description'] ?? $props['설명'] ?? ''), 0, 1000)
                         ], 40);
+                    } elseif (in_array('인물', $labels) || in_array('Person', $labels)) {
+                        // ✨ 핵심 인물 노드 Evidence 수집 (유관순, 유중권 등 핵심 인물 사실 확보)
+                        $p_name = (string)($props['명칭'] ?? $props['name'] ?? $node_id);
+                        $p_reading = (string)($props['한글독음'] ?? '');
+                        $p_desc = (string)($props['설명'] ?? $props['description'] ?? '');
+                        $title_str = ($p_reading && $p_name !== $p_reading) ? "{$p_name} ({$p_reading})" : $p_name;
+                        $text_lines = ["인물: {$title_str}"];
+                        if ($p_desc) $text_lines[] = "설명: {$p_desc}";
+                        if (!empty($props['본적'])) $text_lines[] = "본적: " . $props['본적'];
+                        if (!empty($props['주소'])) $text_lines[] = "주소: " . $props['주소'];
+                        if (!empty($props['신분'])) $text_lines[] = "신분: " . $props['신분'];
+
+                        add_fact_evidence($evidences, 'node', [
+                            (string)$node_id,
+                            $p_name,
+                            implode(' / ', $text_lines)
+                        ], [
+                            "doc" => "[인물] " . $title_str,
+                            "quote" => mb_substr($p_desc ?: $title_str, 0, 500),
+                            "concept" => (string)$node_id,
+                            "text" => implode("\n", $text_lines)
+                        ], 45);
                     } elseif (in_array('문건', $labels) || in_array('사료', $labels)) {
                         add_fact_evidence($evidences, 'node', [
                             (string)$node_id,
@@ -556,20 +594,28 @@ if (isset($_GET['ajax'])) {
                         $edges[] = ["from" => $n_nid, "to" => $m_nid, "type" => $rel_type, "label" => _get_rel_label($rel_type)];
 
                         $rel_context_text = trim(mb_substr((string)($rel_context ?? ''), 0, 1000));
+                        $n_raw_id = $nodes[$n_nid]['raw_id'] ?? $n_nid;
+                        $m_raw_id = $nodes[$m_nid]['raw_id'] ?? $m_nid;
+
+                        // ✨ 가족 관계(P152_has_parent 등) 엣지는 최고 우선순위(50)로 RAG 근거 등록
+                        $is_family = ($rel_type === 'P152_has_parent' || strpos($rel_type, 'parent') !== false || strpos($rel_type, 'family') !== false);
+                        $score = $is_family ? 50 : 30;
+                        if ($rel_context_text === '' && $is_family) {
+                            $rel_context_text = "{$n_raw_id}와(과) {$m_raw_id}의 가족 관계 (부모-자녀/혈연)";
+                        }
+
                         if ($rel_context_text !== '') {
-                            $n_raw_id = $nodes[$n_nid]['raw_id'] ?? $n_nid;
-                            $m_raw_id = $nodes[$m_nid]['raw_id'] ?? $m_nid;
                             add_fact_evidence($evidences, 'rel', [
                                 $n_raw_id,
                                 $m_raw_id,
                                 $rel_type,
                                 $rel_context_text
                             ], [
-                                "doc" => "[EDGE] {$n_raw_id} - {$rel_type} - {$m_raw_id}",
+                                "doc" => "[관계] {$n_raw_id} - " . _get_rel_label($rel_type) . " - {$m_raw_id}",
                                 "quote" => mb_substr($rel_context_text, 0, 500),
                                 "concept" => (string)$n_raw_id,
                                 "text" => $rel_context_text
-                            ], 30);
+                            ], $score);
                         }
                     }
 
@@ -578,6 +624,29 @@ if (isset($_GET['ajax'])) {
                         $p_nid = add_node_to_map($nodes, $p, $rec->get('p_labels'));
                         if ($n_nid && $e_nid) $edges[] = ["from" => $n_nid, "to" => $e_nid, "type" => "P14_carried_out_by", "label" => docent_t("수행/참여", "Performed/Participated")];
                         if ($e_nid && $p_nid) $edges[] = ["from" => $e_nid, "to" => $p_nid, "type" => "P14_carried_out_by", "label" => docent_t("수행/참여", "Performed/Participated")];
+
+                        // 사건/문건 관련 인물 연계 Evidence 등록
+                        $n_raw_id = $nodes[$n_nid]['raw_id'] ?? $n_nid;
+                        $p_raw_id = $nodes[$p_nid]['raw_id'] ?? $p_nid;
+                        $e_props = $nodes[$e_nid]['props'] ?? [];
+                        $e_title = $e_props['사건명'] ?? $e_props['title'] ?? $e_props['명칭'] ?? '관련 사건/문건';
+                        if (preg_match('/^[a-z0-9_]{10,}$/i', (string)$e_title)) {
+                            $e_title = '3·1운동 관련 사료/사건';
+                        }
+                        $e_desc = $e_props['설명'] ?? $e_props['참가자수_설명'] ?? $e_props['사망자수_설명'] ?? '';
+                        $co_text = "당대 사료 문건 [{$e_title}]에 관련 인물로 {$n_raw_id}와(과) {$p_raw_id}의 정황이 함께 언급·기재됨.";
+                        if ($e_desc) $co_text .= "\n문건 요약: " . mb_substr($e_desc, 0, 300);
+
+                        add_fact_evidence($evidences, 'co_participate', [
+                            $n_raw_id,
+                            (string)$nodes[$e_nid]['raw_id'],
+                            $p_raw_id
+                        ], [
+                            "doc" => "[사료 연계] {$e_title}",
+                            "quote" => "{$n_raw_id} 및 {$p_raw_id} 관련 기록",
+                            "concept" => (string)$n_raw_id,
+                            "text" => $co_text
+                        ], 38);
                     }
                 }
             }
@@ -591,6 +660,17 @@ if (isset($_GET['ajax'])) {
             }
 
             $prefetch_names = select_prefetch_names_by_degree($nodes, array_values($unique_edges));
+
+            // ✨ 사건(Event) 노드의 ID(예: a_00351) 및 사건명을 prefetch_names에 포함하여 PostgreSQL 사료 결합
+            foreach ($nodes as $node_item) {
+                $lbls = $node_item['labels'] ?? [];
+                if (in_array('사건', $lbls) || in_array('Event', $lbls)) {
+                    $event_raw_id = (string)($node_item['raw_id'] ?? '');
+                    if ($event_raw_id !== '' && !in_array($event_raw_id, $prefetch_names, true)) {
+                        $prefetch_names[] = $event_raw_id;
+                    }
+                }
+            }
 
             echo json_encode([
                 "nodes" => array_values($nodes),
@@ -635,55 +715,164 @@ if (isset($_GET['ajax'])) {
             exit;
         }
 
-// [Action 4] AI RAG 도슨트 해설 생성
+// [Action 4] AI RAG 도슨트 해설 생성 (2단계 파이프라인: 정밀 추출 -> 학술 합성)
         if ($action === 'explain') {
             $term = docent_sanitize_text($_POST['term'] ?? '', 180, false);
+            $focus = docent_sanitize_text($_POST['focus'] ?? '', 100, false);
             $explain_lang = in_array(strtolower((string)($_POST['lang'] ?? '')), ['en', 'ko'], true) ? strtolower((string)$_POST['lang']) : (docent_is_english() ? 'en' : 'ko');
             $use_english = ($explain_lang === 'en');
             $evidences = json_decode($_POST['evidences'] ?? '[]', true);
             $pg_texts = json_decode($_POST['pg_texts'] ?? '[]', true);
             if (!is_array($evidences)) $evidences = [];
             if (!is_array($pg_texts)) $pg_texts = [];
-            $evidence_context = build_budgeted_evidence_context($evidences, $use_english, 16, 220, 420, 4200);
-            $pg_context = build_budgeted_pg_context($pg_texts, $use_english, 10, 140, 240, 1600);
+
+            // 1. 입력 사료 컨텍스트 구성 (노드 격벽 Scoping Envelope 및 질의 초점 필터링 적용)
+            $evidence_context = build_budgeted_evidence_context($evidences, $use_english, 30, 250, 800, 12000, $term, $focus);
+            $pg_context = build_budgeted_pg_context($pg_texts, $use_english, 40, 180, 500, 12000, $term, $focus);
             $context_str = trim($evidence_context . ($evidence_context && $pg_context ? "\n\n" : "") . $pg_context);
 
-            if ($use_english) {
-                $sys_prompt = "You are a professional historical docent synthesizing claim-level evidence. "
-                            . "Synthesize claim-level evidence faithfully, keep uncertainty explicit, and write only in English. "
-                            . "Provide a complete, well-structured, and fully finished narrative without cutting off sentences.";
-                
-                $user_prompt = "You are a history docent following a GraphRAG-style claim synthesis process. Explain about '{$term}'.\n"
-                             . "- Distinguish verified facts, inferences, and contested points.\n"
-                             . "- Prioritize high-degree graph entities when establishing the narrative backbone.\n"
-                             . "- Cite concrete evidence details from edge contexts and node evidence.\n"
-                             . "- Avoid emotional or exaggerated language and keep a neutral academic tone.\n"
-                             . "- Clearly state evidence limits when claims are weak.\n"
-                             . "- Write COMPLETELY IN ENGLISH and translate Korean source details into English.\n\n"
-                             . "[Sources / PG Evidence]\n{$context_str}";
+            // 2. [1단계 파이프라인] 사료 비판 기반 정밀 사건-장소-인물 팩트 추출 (In-Context Knowledge Table 구축)
+            $fact_table = '';
+            if (!empty($context_str)) {
+                $ext_sys = $use_english
+                    ? "You are an expert archival historian specializing in modern Korean history. "
+                    . "Analyze the provided <SOURCE_EVIDENCE> blocks with strict source criticism. "
+                    . "Extract a clean, verified fact table strictly without cross-attribution or regional mixing. "
+                    . "Never blend figures or actions across different regions."
+                    : "당신은 한국 근현대사 1차 사료 분석 전문가입니다. "
+                    . "제공된 <SOURCE_EVIDENCE> 사료 블록들을 사료 비판적으로 정밀 분석하여, "
+                    . "각 사료별 사실관계를 왜곡이나 교차 귀속(인물/지역 혼합) 없이 다음 정밀 팩트 표로 추출하십시오.\n"
+                    . "반드시 각 블록에 명시된 사실만 기록하고, 타 지역 사건의 인물을 섞지 마십시오.";
 
-                $res = call_gemini([
-                    ["role" => "system", "content" => $sys_prompt],
-                    ["role" => "user", "content" => $user_prompt]
-                ], false, 4096);
-            } else {
-                $sys_prompt = "당신은 역사 지식망(GraphRAG)을 기반으로 사료와 사실을 분석하는 전문 역사 도슨트입니다. "
-                            . "한국어 해설만 작성하되, 중간에 끊기지 않도록 완결된 문장 구조로 끝까지 작성하십시오.";
+                $ext_user = $use_english
+                    ? "Extract a verified markdown table from the sources: [Source ID | Entity | Location/Region | Actual Actor | Key Fact (1-2 lines)].\n\n[Archival Envelopes]\n{$context_str}"
+                    : "다음 사료군에서 [사료 ID | 대상 개체 | 발생 장소/지역 | 실제 행동 인물 | 사료에 기록된 핵심 팩트(1~2줄)] 표를 마크다운 표로 추출하십시오.\n\n[사료 원문 블록]\n{$context_str}";
 
-                $user_prompt = "다음 사료 및 지식그래프 근거를 종합하여 '{$term}'에 대한 완결된 역사 해설을 작성해 주십시오.\n\n"
-                             . "- 서론, 본론, 결론을 갖춘 온전한 해설문 형태로 작성합니다.\n"
-                             . "- 사실/추정/논쟁 지점을 구분해 서술합니다.\n"
-                             . "- 연결 차수가 높은 핵심 개체를 우선 서사 축으로 삼습니다.\n"
-                             . "- 엣지 문맥과 노드 사료에서 확인되는 구체적인 사료 근거를 제시합니다.\n"
-                             . "- 감정적·과장 표현을 피하고 중립적 학술 어조를 유지합니다.\n"
-                             . "- 근거가 부족한 부분은 명확히 한계를 밝힙니다.\n\n"
-                             . "[사료/PG 근거]\n{$context_str}";
-
-                $res = call_gemini([
-                    ["role" => "system", "content" => $sys_prompt],
-                    ["role" => "user", "content" => $user_prompt]
-                ], false, 4096);
+                try {
+                    $fact_table = call_gemini([
+                        ["role" => "system", "content" => $ext_sys],
+                        ["role" => "user", "content" => $ext_user]
+                    ], false, 1500, 0.0, 0.8);
+                } catch (Throwable $extErr) {
+                    error_log("Stage 1 fact extraction failed: " . $extErr->getMessage());
+                }
             }
+
+            // 3. [2단계 파이프라인] 정제된 연결 정보 + 사료 격벽 원문 기반 도슨트 해설 원고 작성
+            if ($use_english) {
+                $sys_prompt = "You are a distinguished senior historical docent and research scholar specializing in modern Korean history and the independence movement. "
+                            . "Produce a publication-ready academic documentary text based strictly on primary archival evidence and historical critique. "
+                            . "Adhere strictly to factual grounding. Never fabricate or invent connections between disparate figures or events. "
+                            . "Do NOT expose any internal AI system, engineering, or prompt jargon (e.g., 'Zero-Correlation', 'knowledge graph', 'hallucination', 'nodes', 'database', hash IDs). "
+                            . "Express all historical judgments using authentic scholarly terminology (e.g., 'critical analysis of primary sources', 'archival verification of historical divergence').";
+                
+                $fact_table_section = $fact_table ? "[Stage 1: Verified Archival Fact Table (In-Context Knowledge)]\n{$fact_table}\n\n" : "";
+
+                $user_prompt = "Produce an authoritative academic documentary text regarding '{$term}' based on the provided archival sources and verified fact table.\n\n"
+                             . $fact_table_section
+                             . "■ [CRITICAL HISTORICAL METHODOLOGY & GROUNDING RULES]\n"
+                             . "1. SCOPING ENVELOPE & CROSS-ATTRIBUTION GUARD:\n"
+                             . "   - Each <SOURCE_EVIDENCE> block is strictly scoped to its assigned entity, region, and event.\n"
+                             . "   - The persons, actions, and dates within a block apply SOLELY to that specific entity and region. NEVER cross-attribute figures or actions to other regions or disparate demonstrations.\n"
+                             . "2. OVERARCHING COMPARATIVE THEME (Resolving Disparate Topics):\n"
+                             . "   - If the query links disparate subjects from different geographical, temporal, or operational spheres (e.g., 'Lee Dong-hwi and Aunae Market Demonstration'), DO NOT treat them as an awkward forced pair. Instead, formulate a coherent overarching academic theme and subtitle:\n"
+                             . "     Example:\n"
+                             . "     # The Multi-Layered Topography of the March 1st Movement: Comparing Overseas Armed Leadership and Domestic Grassroots Uprising\n"
+                             . "     ## — Focusing on Lee Dong-hwi's Northern Campaign and the Cheonan Aunae Market Protest —\n"
+                             . "   - In the introduction, articulate why comparing these two distinct axes illuminates the breadth of the 1919 movement, while establishing through rigorous historical critique that there was no direct organizational link or joint on-site operation between the two.\n"
+                             . "3. FACTUAL GROUNDING & PHYSICAL/TEMPORAL INTEGRITY:\n"
+                             . "   - When primary records mention prominent leaders in contemporaneous rosters, DO NOT misinterpret mere document co-occurrence as physical participation in localized domestic street protests.\n"
+                             . "   - Note historical realities strictly: Son Byong-hi was imprisoned immediately after March 1; figures like Ahn Chang-ho and Syngman Rhee were active abroad in exile.\n"
+                             . "4. CONTEXT SEPARATION:\n"
+                             . "   - Analyze each entity's distinct theater of operations, historical trajectory, and ideology in dedicated, independent sections.\n"
+                             . "5. NO AI/SYSTEM JARGON:\n"
+                             . "   - Absolutely never mention 'Zero-Correlation', 'hallucination', 'knowledge graph', 'nodes', 'database', 'prompt', or internal alphanumeric IDs (e.g., n8774...). Use refined academic vocabulary.\n"
+                             . "6. KINSHIP / SOLIDARITY CONTEXT:\n"
+                             . "   - If the query concerns family lineages or comrades (e.g., Yu Gwan-sun's family members), detail their documented shared struggle and sacrifices using provided records.\n\n"
+                             . "■ [Structural Outline]\n"
+                             . "# [Master Academic Title]\n"
+                             . "## [Academic Subtitle]\n"
+                             . "1. Introduction: Comparative Historical Framing & Archival Verification of Historical Divergence\n"
+                             . "2. Trajectory of Primary Leadership / Regional Movement: Theaters of Operation and Strategy\n"
+                             . "3. Localized Grassroots Uprising / Specific Development: The Battlefield of Demonstration\n"
+                             . "4. Critical Cross-Examination of Primary Archives, Judicial Rulings, and Press Dispatches\n"
+                             . "5. Synthesis & Historical Significance in Modern Korean Independence History\n\n"
+                             . "[Archival Evidence Envelopes]\n{$context_str}";
+            } else {
+                $sys_prompt = "당신은 한국 근현대사 및 독립운동사 전문 수석 역사 도슨트이자 정통 역사학술 연구자입니다. "
+                            . "제공된 1차 사료와 문헌 기록을 바탕으로 실제 학술 출판 및 다큐멘터리 방송에 즉시 사용할 수 있는 완성도 높은 해설 원고를 작성하십시오. "
+                            . "철저한 사료 비판(史料批判)과 사실 검증에 입각하여 서술하며, 역사적 상관관계가 없는 인물과 사건을 억지로 결합하거나 사실을 왜곡하지 마십시오. "
+                            . "원고 본문에 'Zero-Correlation', '지식 그래프', '노드', '데이터베이스', '프롬프트', '환각', '시스템', 영문 해시 식별자(예: n8774... 등)와 같은 인공지능·전산 메타 용어를 절대로 노출하지 마십시오. "
+                            . "모든 판단과 분석은 정통 역사학 연구 어휘(예: '사료 비판을 통한 실증', '당대 1차 사료군 및 공문서 판결문 분석')로 품격 있게 서술하십시오.";
+                
+                $fact_table_section = $fact_table ? "■ [1단계: 사료 비판 기반 정밀 사건-장소-인물 교차 검증표 (In-Context Knowledge Table)]\n{$fact_table}\n\n" : "";
+
+                $user_prompt = "제공된 사료와 1단계 사료 비판 검증표를 바탕으로 '{$term}'에 관한 심층 역사 해설문을 학술 다큐멘터리 원고 양식으로 작성하십시오.\n\n"
+                             . $fact_table_section
+                             . "■ [핵심 원칙: 사료 비판 및 정통 역사학술 원고 작성 지침]\n"
+                             . "1. 사료 격벽 준수 및 교차 귀속(Cross-attribution) 절대 금지:\n"
+                             . "   - 제공된 사료는 <SOURCE_EVIDENCE id=\"...\" entity=\"...\" region=\"...\" event=\"...\"> 형태의 독립된 격벽 블록으로 구분되어 있습니다.\n"
+                             . "   - 각 <SOURCE_EVIDENCE> 태그 및 1단계 검증표에 기록된 인물, 행동, 일자는 오직 해당 개체·지역(region)·사건(event) 서술에만 유효합니다.\n"
+                             . "   - 특정 지역의 인물(예: 평양의 강규찬)을 다른 지역의 시위(예: 함흥 우시장 시위, 종로 보신각)로 교차 결합하거나 왜곡하는 행위를 엄격히 금지합니다.\n"
+                             . "2. 총괄 비교사적 대주제 확립 (기획 구성의 당위성 부여):\n"
+                             . "   - 검색어가 상이한 시공간적 무대와 성격을 지닌 복수 개체인 경우(예: '이동휘와 아우내 장터'), 단순히 두 단어를 나열하는 어색한 제목을 피하고, 1919년 독립운동의 총체성을 조망하는 거시적 비교사 대주제와 부제를 반드시 정립하십시오.\n"
+                             . "     [예시]:\n"
+                             . "     # 3·1운동의 다층적 지형: 국외 지도부의 무장투쟁 노선과 국내 기층 민중의 자발적 봉기 비교\n"
+                             . "     ## — 이동휘의 북방 항일 투쟁과 천안 아우내 장터 만세시위를 중심으로 —\n"
+                             . "   - 서론에서 왜 이 두 축을 함께 조명하는지 역사학적 당위성(독립운동의 외연과 다층성 조명)을 명확히 제시하되, 사료 비판을 통해 두 대상 간에 직접적인 현장 결합이나 조직적 지휘선이 존재하지 않았음을 서두에서 엄밀히 규명하십시오.\n"
+                             . "3. 시공간적 실재성 검증 및 물리적 현장 참여 왜곡 방지 (사료 왜곡 차단):\n"
+                             . "   - 당대 공문서, 외신 전보, 판결문, 사료 목록 등에 여러 독립운동 지도자(손병희, 안창호, 이승만, 이동휘 등)의 명단이나 동향 정보가 함께 기재되어 있다고 해서, 이를 특정 지역의 국지적 현장 시위(예: 경성 전차 투석, 지방 장터 시위 등)에 직접 참여하거나 현장을 지휘한 것으로 오인하여 서술하지 마십시오.\n"
+                             . "   - 손병희는 3·1 독립선언 직후 체포되어 옥중에 수감되어 있었고, 안창호와 이승만 등은 해외 망명 및 체류 상태였으므로 물리적으로 현장 참여가 불가능했습니다. 사료상의 '단순 명단 기재·보고서 상의 동시 언급'과 '물리적 현장 참여'를 사료 비판을 통해 엄격히 분별하십시오.\n"
+                             . "4. 독립된 활동 무대와 역사적 맥락의 엄격한 분리 서술:\n"
+                             . "   - 직접적 연관이 없는 두 대상의 경우, 각 대상의 고유한 활동 무대(예: 이동휘의 함경도·북간도·연해주·상해 임시정부 무장투쟁 노선 vs 천안 아우내 장터 기층 민중의 자발적 만세봉기)를 독립된 장(章)으로 완결성 있게 심층 서술하십시오.\n"
+                             . "5. 전산/AI 메타 용어 완전 배제 및 학술 어휘 준수:\n"
+                             . "   - 본문 내에 'Zero-Correlation', '환각', '지식 그래프', '노드', '데이터베이스', '프롬프트', '시스템', '[Event,사건] n8774...' 등 전산·AI 용어를 일절 쓰지 마십시오. 대신 '사료 비판(史料批判)', '당대 1차 사료군(일제 감시 보고, 외신 전보, 판결문, 신문 기사)', '사료적 실증' 등의 학술 용어를 구사하십시오.\n"
+                             . "6. 가계(가족) 및 동지 연대 서술:\n"
+                             . "   - 검색 대상이 특정 인물 일가의 독립운동이나 혈연·조직적 동지 관계인 경우(예: 유관순 일가의 옥고와 순국 등), 제공된 사료에 입각하여 그 숭고한 항일 연대와 희생을 깊이 있게 조명하십시오.\n\n"
+                             . "■ [서술 구조 가이드라인]\n"
+                             . "# [총괄 학술 대주제]\n"
+                             . "## [학술 부제]\n"
+                             . "1. 서론: 3·1운동의 다층적 지형과 비교사적 문제 제기 (두 축의 설정 및 사료 비판을 통한 연관성 규명)\n"
+                             . "2. 국외 항일 무장투쟁 지도부 / 지역 중심 궤적: 활동 무대와 노선 (심층 분석)\n"
+                             . "3. 국내 기층 민중의 자발적 항쟁 / 국지적 시위 전개: 현장 전개와 민중의 저항 (심층 분석)\n"
+                             . "4. 당대 1차 사료군 및 관찬·보도 기록의 비판적 검토 (외신 전보, 판결문, 보고서 정밀 교차 검증 및 단순 연계 왜곡 시정)\n"
+                             . "5. 종합 결론: 한국독립운동사에서 두 궤적이 지니는 역사적 위상과 교훈\n\n"
+                             . "[사료 원문 블록]\n{$context_str}";
+            }
+
+            $is_stream = isset($_GET['stream']) || isset($_POST['stream']);
+            if ($is_stream) {
+                // 세션 락 해제 (스트리밍 중 다른 AJAX 요청 블로킹 방지)
+                if (session_status() === PHP_SESSION_ACTIVE) {
+                    session_write_close();
+                }
+
+                header('Content-Type: text/event-stream; charset=utf-8');
+                header('Cache-Control: no-cache, no-transform');
+                header('X-Accel-Buffering: no');
+                header('Connection: keep-alive');
+                while (ob_get_level()) ob_end_clean();
+
+                stream_gemini([
+                    ["role" => "system", "content" => $sys_prompt],
+                    ["role" => "user", "content" => $user_prompt]
+                ], function($chunk) {
+                    echo "data: " . json_encode(["chunk" => $chunk], JSON_UNESCAPED_UNICODE) . "\n\n";
+                    if (ob_get_level()) ob_flush();
+                    flush();
+                }, 8192, 0.1, 0.85);
+
+                echo "data: [DONE]\n\n";
+                if (ob_get_level()) ob_flush();
+                flush();
+                exit;
+            }
+
+            // Fallback: 기존 동기식 JSON 응답
+            $res = call_gemini([
+                ["role" => "system", "content" => $sys_prompt],
+                ["role" => "user", "content" => $user_prompt]
+            ], false, 8192, 0.1, 0.85);
 
             echo json_encode(["text" => $res], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
             exit;
@@ -761,94 +950,67 @@ if (isset($_GET['ajax'])) {
 
                     // 2. table/rowid로 못 찾았고 후보 키워드들이 있는 경우 차례로 조회
                     if (!$response_data["found"] && !empty($candidates)) {
-                        // (1) raw_event_info (사건정보: "아이디", "사건명")
-                        foreach ($candidates as $cand) {
-                            $stmt = $pdo->prepare("SELECT * FROM raw_event_info WHERE \"아이디\" = ? OR \"사건명\" = ? LIMIT 1");
-                            $stmt->execute([$cand, $cand]);
+                        // Phase 2a: 선언적 배열 기반 일괄 정확매칭 (기존 7단계 순차 폭포 → 단일 루프)
+                        // 주의: 컬럼명은 각 테이블의 실제 DB 스키마와 정확히 일치해야 함
+                        $exact_search_tables = [
+                            ['table' => 'raw_event_info', 'cols' => ['아이디', '사건명']],
+                            ['table' => 'raw_event_place_link', 'cols' => ['demons_id', 'demons_title', 'place_id', 'place_name']],
+                            ['table' => 'raw_detail_place', 'cols' => ['세부장소아이디', '명칭', '이칭']],
+                            ['table' => 'raw_bibliography', 'cols' => ['문서아이디', '제목']],
+                            ['table' => 'raw_oppression_org_police', 'cols' => ['기구ID', '기구명']],
+                            ['table' => 'raw_oppression_org_gendarme', 'cols' => ['기구id', '기구명']],   // 헌병: 소문자 id
+                            ['table' => 'raw_oppression_org_military', 'cols' => ['기구ID', '기구명칭']], // 군대: '기구명칭'
+                        ];
+
+                        // candidates 전체를 IN 절로 한번에 바인딩 (테이블당 1회 쿼리)
+                        $in_placeholders = implode(',', array_fill(0, count($candidates), '?'));
+                        foreach ($exact_search_tables as $def) {
+                            if ($response_data["found"]) break;
+                            $tbl = $def['table'];
+                            if (!preg_match('/^[a-zA-Z0-9_]+$/', $tbl)) continue;
+                            $where_parts = array_map(fn($c) => "\"{$c}\" IN ({$in_placeholders})", $def['cols']);
+                            $sql = "SELECT * FROM \"{$tbl}\" WHERE " . implode(' OR ', $where_parts) . " LIMIT 1";
+                            $params = [];
+                            for ($ci = 0; $ci < count($def['cols']); $ci++) {
+                                foreach ($candidates as $cand) $params[] = $cand;
+                            }
+                            $stmt = $pdo->prepare($sql);
+                            $stmt->execute($params);
                             if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-                                $fill_from_row("raw_event_info", $row);
-                                break;
+                                $fill_from_row($tbl, $row);
                             }
                         }
-                    }
 
-                    if (!$response_data["found"] && !empty($candidates)) {
-                        // (2) raw_event_place_link (연결정보: demons_id, demons_title, place_id, place_name)
-                        foreach ($candidates as $cand) {
-                            $stmt = $pdo->prepare("SELECT * FROM raw_event_place_link WHERE demons_id = ? OR demons_title = ? OR place_id = ? OR place_name = ? LIMIT 1");
-                            $stmt->execute([$cand, $cand, $cand, $cand]);
-                            if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-                                $fill_from_row("raw_event_place_link", $row);
-                                break;
-                            }
-                        }
-                    }
-
-                    if (!$response_data["found"] && !empty($candidates)) {
-                        // (3) raw_detail_place (세부장소: "세부장소아이디", "명칭", "이칭")
-                        foreach ($candidates as $cand) {
-                            $stmt = $pdo->prepare("SELECT * FROM raw_detail_place WHERE \"세부장소아이디\" = ? OR \"명칭\" = ? OR \"이칭\" = ? LIMIT 1");
-                            $stmt->execute([$cand, $cand, $cand]);
-                            if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-                                $fill_from_row("raw_detail_place", $row);
-                                break;
-                            }
-                        }
-                    }
-
-                    if (!$response_data["found"] && !empty($candidates)) {
-                        // (4) raw_bibliography (서지정보: "문서아이디", "제목")
-                        foreach ($candidates as $cand) {
-                            $stmt = $pdo->prepare("SELECT * FROM raw_bibliography WHERE \"문서아이디\" = ? OR \"제목\" = ? LIMIT 1");
-                            $stmt->execute([$cand, $cand]);
-                            if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-                                $fill_from_row("raw_bibliography", $row);
-                                break;
-                            }
-                        }
-                    }
-
-                    if (!$response_data["found"] && !empty($candidates)) {
-                        // (5) 탄압기구 테이블 (경찰, 헌병, 군대)
-                        foreach (['raw_oppression_org_police', 'raw_oppression_org_gendarme', 'raw_oppression_org_military'] as $org_tab) {
+                        // Phase 2b: LIKE 기반 유사매칭 (기존 6,7단계)
+                        if (!$response_data["found"]) {
                             foreach ($candidates as $cand) {
-                                $stmt = $pdo->prepare("SELECT * FROM \"{$org_tab}\" WHERE \"기구ID\" = ? OR \"기구명\" = ? LIMIT 1");
-                                $stmt->execute([$cand, $cand]);
-                                if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-                                    $fill_from_row($org_tab, $row);
-                                    break 2;
+                                if (mb_strlen($cand) >= 2) {
+                                    $stmt = $pdo->prepare("SELECT * FROM raw_event_info WHERE \"관련인물\" LIKE ? LIMIT 1");
+                                    $stmt->execute(['%' . $cand . '%']);
+                                    if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                                        $fill_from_row("raw_event_info", $row);
+                                        break;
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    if (!$response_data["found"] && !empty($candidates)) {
-                        // (6) 인물명 등으로 사건정보 "관련인물" 부분 매칭
-                        foreach ($candidates as $cand) {
-                            if (mb_strlen($cand) >= 2) {
-                                $stmt = $pdo->prepare("SELECT * FROM raw_event_info WHERE \"관련인물\" LIKE ? LIMIT 1");
-                                $stmt->execute(['%' . $cand . '%']);
-                                if ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-                                    $fill_from_row("raw_event_info", $row);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    if (!$response_data["found"] && !empty($candidates)) {
-                        // (7) tei_cidoc_mappings 매핑 확인
-                        foreach ($candidates as $cand) {
-                            if (mb_strlen($cand) >= 2) {
-                                $stmt = $pdo->prepare("SELECT * FROM tei_cidoc_mappings WHERE mapping_label LIKE ? LIMIT 1");
-                                $stmt->execute(['%' . $cand . '%']);
-                                if ($m_row = $stmt->fetch(PDO::FETCH_ASSOC)) {
-                                    if (!empty($m_row['table_name']) && !empty($m_row['rowid'])) {
-                                        $stmt2 = $pdo->prepare("SELECT * FROM \"{$m_row['table_name']}\" WHERE rowid = ? LIMIT 1");
-                                        $stmt2->execute([(int)$m_row['rowid']]);
-                                        if ($row = $stmt2->fetch(PDO::FETCH_ASSOC)) {
-                                            $fill_from_row($m_row['table_name'], $row);
-                                            break;
+                        if (!$response_data["found"]) {
+                            foreach ($candidates as $cand) {
+                                if (mb_strlen($cand) >= 2) {
+                                    $stmt = $pdo->prepare("SELECT * FROM tei_cidoc_mappings WHERE mapping_label LIKE ? LIMIT 1");
+                                    $stmt->execute(['%' . $cand . '%']);
+                                    if ($m_row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+                                        if (!empty($m_row['table_name']) && !empty($m_row['rowid'])) {
+                                            $mapped_tbl = $m_row['table_name'];
+                                            if (preg_match('/^[a-zA-Z0-9_]+$/', $mapped_tbl)) {
+                                                $stmt2 = $pdo->prepare("SELECT * FROM \"{$mapped_tbl}\" WHERE rowid = ? LIMIT 1");
+                                                $stmt2->execute([(int)$m_row['rowid']]);
+                                                if ($row = $stmt2->fetch(PDO::FETCH_ASSOC)) {
+                                                    $fill_from_row($mapped_tbl, $row);
+                                                    break;
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -886,12 +1048,20 @@ if (isset($_GET['ajax'])) {
 
 // Infrastructure Functions
 function get_neo4j() {
-    return ClientBuilder::create()
+    static $client = null;
+    if ($client !== null) return $client;
+    $client = ClientBuilder::create()
         ->withDriver('default', get_cfg('NEO4J_URI', 'bolt://127.0.0.1:7687'), Authenticate::basic(get_cfg('NEO4J_USER', 'neo4j'), get_cfg('NEO4J_PASSWORD')))
         ->build();
+    return $client;
 }
 
 function get_pg() {
+    static $pdo = null;
+    static $tried = false;
+    if ($pdo !== null) return $pdo;
+    if ($tried) return null;
+    $tried = true;
     try {
         $host = get_cfg('PG_HOST', '127.0.0.1');
         $port = get_cfg('PG_PORT', 5432);
@@ -901,13 +1071,14 @@ function get_pg() {
         
         if (empty($pass)) return null;
         $dsn = "pgsql:host={$host};port={$port};dbname={$dbname}";
-        return new PDO($dsn, $user, $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        $pdo = new PDO($dsn, $user, $pass, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        return $pdo;
     } catch (Exception $e) {
         return null;
     }
 }
 
-function call_gemini($msgs, $is_json = false, $max_tokens = null) {
+function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature = null, $top_p = null) {
     $api_key = get_cfg('GEMINI_API_KEY');
     if (!$api_key) {
         $api_key = get_cfg('API_KEY');
@@ -934,10 +1105,16 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null) {
         }
     }
 
+    $default_temp = (float)get_cfg('GEMINI_TEMPERATURE', '0.1');
+    $default_topp = (float)get_cfg('GEMINI_TOP_P', '0.85');
+    $temp_val = is_numeric($temperature) ? (float)$temperature : $default_temp;
+    $top_p_val = is_numeric($top_p) ? (float)$top_p : $default_topp;
+
     $payload = [
         "contents" => $contents,
         "generationConfig" => [
-            "temperature" => 0.0,
+            "temperature" => $temp_val,
+            "topP" => $top_p_val,
             "maxOutputTokens" => $max_tokens ? (int)max(1, min(8192, $max_tokens)) : 4096,
         ]
     ];
@@ -998,6 +1175,100 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null) {
         return $is_json ? '{"explanation":"Empty response"}' : "AI 응답 본문이 비어 있습니다.";
     }
     return $content;
+}
+
+function stream_gemini($msgs, callable $on_chunk, $max_tokens = 8192, $temperature = null, $top_p = null) {
+    $api_key = get_cfg('GEMINI_API_KEY');
+    if (!$api_key) $api_key = get_cfg('API_KEY');
+    if (!$api_key) {
+        $on_chunk(docent_t("API Key가 설정되지 않았습니다.", "API key is not configured."));
+        return;
+    }
+
+    $model = trim(get_cfg('GEMINI_MODEL', 'gemini-3.5-flash-lite'));
+    if (!preg_match('/^[A-Za-z0-9._-]+$/', $model)) {
+        $on_chunk("AI 모델 설정이 올바르지 않습니다.");
+        return;
+    }
+
+    $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:streamGenerateContent?alt=sse";
+
+    $system_prompt = "";
+    $contents = [];
+    foreach ($msgs as $m) {
+        if ($m['role'] === 'system') {
+            $system_prompt = $m['content'];
+        } else {
+            $role = ($m['role'] === 'assistant') ? 'model' : 'user';
+            $contents[] = [
+                "role" => $role,
+                "parts" => [["text" => $m['content']]]
+            ];
+        }
+    }
+
+    $default_temp = (float)get_cfg('GEMINI_TEMPERATURE', '0.1');
+    $default_topp = (float)get_cfg('GEMINI_TOP_P', '0.85');
+    $temp_val = is_numeric($temperature) ? (float)$temperature : $default_temp;
+    $top_p_val = is_numeric($top_p) ? (float)$top_p : $default_topp;
+
+    $payload = [
+        "contents" => $contents,
+        "generationConfig" => [
+            "temperature" => $temp_val,
+            "topP" => $top_p_val,
+            "maxOutputTokens" => (int)max(1, min(8192, $max_tokens)),
+        ]
+    ];
+
+    if ($system_prompt !== "") {
+        $payload["system_instruction"] = [
+            "parts" => [["text" => $system_prompt]]
+        ];
+    }
+
+    $buffer = '';
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE),
+        CURLOPT_HTTPHEADER => ["Content-Type: application/json", "x-goog-api-key: {$api_key}"],
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_TIMEOUT => 90,
+        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_SSL_VERIFYHOST => 2,
+        CURLOPT_WRITEFUNCTION => function($ch, $data) use (&$buffer, $on_chunk) {
+            $buffer .= $data;
+            while (preg_match('/^(.*?)(?:\r?\n\r?\n)/s', $buffer, $matches)) {
+                $block = $matches[1];
+                $matched_len = strlen($matches[0]);
+                $buffer = substr($buffer, $matched_len);
+
+                $lines = preg_split('/\r?\n/', $block);
+                foreach ($lines as $line) {
+                    $line = trim($line);
+                    if (str_starts_with($line, 'data: ')) {
+                        $json_str = substr($line, 6);
+                        $parsed = json_decode($json_str, true);
+                        if (isset($parsed['candidates'][0]['content']['parts'])) {
+                            foreach ($parsed['candidates'][0]['content']['parts'] as $part) {
+                                if (isset($part['text']) && $part['text'] !== '') {
+                                    $on_chunk($part['text']);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return strlen($data);
+        }
+    ]);
+
+    curl_exec($ch);
+    $curl_errno = curl_errno($ch);
+    if ($curl_errno !== 0) {
+        $on_chunk("\n\n[연결 오류: " . curl_error($ch) . "]");
+    }
 }
 
 
@@ -1225,67 +1496,133 @@ function normalize_whitespace_text($text) {
     return trim($text ?? '');
 }
 
-function build_budgeted_evidence_context($evidences, $use_english, $max_items, $min_chars, $max_chars, $total_char_budget) {
+function build_budgeted_evidence_context($evidences, $use_english, $max_items, $min_chars, $max_chars, $total_char_budget, $term = '', $focus = '') {
     $lines = [];
     $used_chars = 0;
-    foreach ((array)$evidences as $e) {
+    foreach ((array)$evidences as $idx => $e) {
         if (count($lines) >= $max_items) break;
-        if (($total_char_budget - $used_chars) < ($min_chars + 80)) break;
+        if (($total_char_budget - $used_chars) < ($min_chars + 120)) break;
 
         $doc = mb_substr(normalize_whitespace_text($e['doc'] ?? ''), 0, 120);
+        $doc = preg_replace('/\[[A-Za-z0-9_,]+\]\s*(n[a-f0-9]{8,}|[a-z]_\d+)/u', '[관련 사료 기록]', $doc);
+        $doc = str_replace(
+            ['[시소러스]', '[Thesaurus]', '[문건]', '[사료]', '[Event,사건]', '[Person,인물]'],
+            ['[역사 용어 사전]', '[Historical Dictionary]', '[1차 사료]', '[1차 사료]', '[사건 기록]', '[인물 기록]'],
+            $doc
+        );
+        $doc = preg_replace('/\b(n[a-f0-9]{10,}|[a-z]_\d{4,})\b/u', '', $doc);
+        $doc = trim(preg_replace('/\s+/u', ' ', $doc));
+
+        $concept = trim((string)($e['concept'] ?? ''));
+        $entity_attr = htmlspecialchars($concept ?: $doc, ENT_QUOTES, 'UTF-8');
+        $id_attr = 'g_' . ($idx + 1);
+
         $text = normalize_whitespace_text($e['text'] ?? '');
+        $text = preg_replace('/\b(n[a-f0-9]{10,}|[a-z]_\d{4,})\b/u', '', $text);
         if ($text === '') continue;
 
-        $remaining = $total_char_budget - $used_chars;
-        $body_cap = max($min_chars, min($max_chars, $remaining - 80));
-        $body = mb_substr($text, 0, $body_cap);
-        $line = $use_english
-            ? "- Document: {$doc}\n  Evidence: {$body}\n"
-            : "- 문서: {$doc}\n  근거: {$body}\n";
-
-        $line_len = mb_strlen($line);
-        if ($line_len > $remaining) {
-            $trimmed_cap = max(120, $remaining - 80);
-            $body = mb_substr($text, 0, $trimmed_cap);
-            $line = $use_english
-                ? "- Document: {$doc}\n  Evidence: {$body}\n"
-                : "- 문서: {$doc}\n  근거: {$body}\n";
-            $line_len = mb_strlen($line);
-            if ($line_len > $remaining) break;
+        // 지명(region) 및 사건(event) 추출
+        $region = '';
+        if (preg_match('/(평안[남북]도|함경[남북]도|충청[남북]도|전라[남북]도|경상[남북]도|강원도|경기도|황해도|평양|함흥|천안|병천|단천|간도|연해주|상해|진천|청주|용산|종로|보신각|대구|부산|통영|의주|해주|원산)[^\s,]*/u', $text . ' ' . $doc, $rm)) {
+            $region = $rm[0];
         }
 
-        $lines[] = $line;
+        $event = '';
+        if (preg_match('/([가-힣\w]+(?:시위|만세|선언식|의거|봉기|집회|행진|사건|파견|회합))/u', $doc . ' ' . $text, $em)) {
+            $event = $em[0];
+        }
+
+        // 초점 기반 필터링 (장소적 시위 확산 중심 질의인 경우 외교/청원 문서는 1줄 요약)
+        $is_spatial_query = preg_match('/(장소|지역|확산|전개|시위|만세)/u', $term . ' ' . $focus);
+        $is_diplomatic = preg_match('/(파리강화회의|외교청원|청원서\s*서명|강화회의\s*파견)/u', $text . ' ' . $doc);
+
+        if ($is_spatial_query && $is_diplomatic) {
+            $body = "[외교 및 기타 활동 약력 기록: {$event} 관련 명단 수록 (장소적 시위 확산과 직접 무관)]";
+        } else {
+            $remaining = $total_char_budget - $used_chars;
+            $body_cap = max($min_chars, min($max_chars, $remaining - 120));
+            $body = mb_substr($text, 0, $body_cap);
+        }
+
+        $envelope = "<SOURCE_EVIDENCE id=\"{$id_attr}\" entity=\"{$entity_attr}\"" . ($region ? " region=\"{$region}\"" : "") . ($event ? " event=\"{$event}\"" : "") . ">\n"
+                  . "  <!-- 이 사료의 내용은 오직 [{$entity_attr}" . ($region ? " / {$region}" : "") . ($event ? " / {$event}" : "") . "] 서술에만 유효하며 타 지역/사건과 결합 금지 -->\n"
+                  . "  [문서] {$doc}\n"
+                  . "  [내용] {$body}\n"
+                  . "</SOURCE_EVIDENCE>";
+
+        $line_len = mb_strlen($envelope);
+        if ($line_len > ($total_char_budget - $used_chars)) break;
+
+        $lines[] = $envelope;
         $used_chars += $line_len;
     }
-    return implode('', $lines);
+    return implode("\n\n", $lines);
 }
 
-function build_budgeted_pg_context($pg_texts, $use_english, $max_items, $min_chars, $max_chars, $total_char_budget) {
+function build_budgeted_pg_context($pg_texts, $use_english, $max_items, $min_chars, $max_chars, $total_char_budget, $term = '', $focus = '') {
     $lines = [];
     $used_chars = 0;
-    foreach ((array)$pg_texts as $t) {
+    foreach ((array)$pg_texts as $idx => $t) {
         if (count($lines) >= $max_items) break;
-        if (($total_char_budget - $used_chars) < ($min_chars + 20)) break;
+        if (($total_char_budget - $used_chars) < ($min_chars + 120)) break;
 
         $text = normalize_whitespace_text($t);
         if ($text === '') continue;
 
-        $remaining = $total_char_budget - $used_chars;
-        $body_cap = max($min_chars, min($max_chars, $remaining - 20));
-        $line = "- " . mb_substr($text, 0, $body_cap);
-        $line_len = mb_strlen($line);
-        if ($line_len > $remaining) {
-            $line = "- " . mb_substr($text, 0, max(120, $remaining - 5));
-            $line_len = mb_strlen($line);
-            if ($line_len > $remaining) break;
+        // node=..., rowid=... 추출
+        $node_id = '';
+        if (preg_match('/node=([^\s]+)/u', $text, $nm)) {
+            $node_id = trim($nm[1]);
         }
-        $lines[] = $line;
+        $rowid = '';
+        if (preg_match('/rowid=([^\s]+)/u', $text, $rm)) {
+            $rowid = trim($rm[1]);
+        }
+        $id_attr = $rowid ? "pg_{$rowid}" : "pg_" . ($idx + 1);
+        $entity_attr = htmlspecialchars($node_id ?: "기록_{$idx}", ENT_QUOTES, 'UTF-8');
+
+        // 지명(region) 및 사건(event) 추출
+        $region = '';
+        if (preg_match('/(지역|주소|본적|발생지):\s*([^;]+)/u', $text, $reg_m)) {
+            $region = trim($reg_m[2]);
+        } elseif (preg_match('/(평안[남북]도|함경[남북]도|충청[남북]도|전라[남북]도|경상[남북]도|강원도|경기도|황해도|평양|함흥|천안|병천|단천|간도|연해주|상해|진천|청주|용산|종로|보신각|대구|부산|통영|의주|해주|원산)[^\s,;]*/u', $text, $rm2)) {
+            $region = $rm2[0];
+        }
+
+        $event = '';
+        if (preg_match('/(사건명|제목):\s*([^;]+)/u', $text, $ev_m)) {
+            $event = trim($ev_m[2]);
+        } elseif (preg_match('/([가-힣\w]+(?:시위|만세|선언식|의거|봉기|집회|행진|사건|파견))/u', $text, $em2)) {
+            $event = $em2[0];
+        }
+
+        // 초점 기반 필터링
+        $is_spatial_query = preg_match('/(장소|지역|확산|전개|시위|만세)/u', $term . ' ' . $focus);
+        $is_diplomatic = preg_match('/(파리강화회의|외교청원|청원서\s*서명|강화회의\s*파견)/u', $text);
+
+        if ($is_spatial_query && $is_diplomatic) {
+            $body = "[외교 및 기타 활동 약력 기록: {$event} 관련 명단 수록 (장소적 시위 확산과 직접 무관)]";
+        } else {
+            $remaining = $total_char_budget - $used_chars;
+            $body_cap = max($min_chars, min($max_chars, $remaining - 120));
+            $body = mb_substr($text, 0, $body_cap);
+        }
+
+        $envelope = "<SOURCE_EVIDENCE id=\"{$id_attr}\" entity=\"{$entity_attr}\"" . ($region ? " region=\"{$region}\"" : "") . ($event ? " event=\"{$event}\"" : "") . ">\n"
+                  . "  <!-- 이 사료의 내용은 오직 [{$entity_attr}" . ($region ? " / {$region}" : "") . ($event ? " / {$event}" : "") . "] 서술에만 유효하며 타 지역/사건과 결합 금지 -->\n"
+                  . "  {$body}\n"
+                  . "</SOURCE_EVIDENCE>";
+
+        $line_len = mb_strlen($envelope);
+        if ($line_len > ($total_char_budget - $used_chars)) break;
+
+        $lines[] = $envelope;
         $used_chars += $line_len;
     }
 
     if (empty($lines)) return '';
-    $header = $use_english ? "[PG Evidence]\n" : "[PG 근거]\n";
-    return $header . implode("\n", $lines);
+    $header = $use_english ? "[Primary Archival Sources (PostgreSQL)]\n" : "[1차 사료 원문 (PostgreSQL)]\n";
+    return $header . implode("\n\n", $lines);
 }
 
 function add_node_to_map(&$map, $node, $labels_iterable) {
@@ -1416,37 +1753,62 @@ function get_pg_tables_metadata($pdo) {
         }
     }
 
-    $stmt = $pdo->query("SELECT table_schema, table_name FROM information_schema.columns WHERE column_name = 'tei' AND table_schema NOT IN ('pg_catalog', 'information_schema') GROUP BY table_schema, table_name");
-    $tables = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    $meta = [];
+    // 단일 쿼리로 tei 컬럼이 있는 모든 테이블의 전체 컬럼 정보를 한번에 수집 (N×2+1 → 1)
+    $stmt = $pdo->query("
+        SELECT c.table_schema, c.table_name, c.column_name, c.data_type, c.ordinal_position
+        FROM information_schema.columns c
+        INNER JOIN (
+            SELECT DISTINCT table_schema, table_name
+            FROM information_schema.columns
+            WHERE column_name = 'tei' AND table_schema NOT IN ('pg_catalog', 'information_schema')
+        ) t USING (table_schema, table_name)
+        WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema')
+        ORDER BY c.table_schema, c.table_name, c.ordinal_position ASC
+    ");
+    $all_cols = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-    foreach ($tables as $t) {
-        $schema = (string)($t['table_schema'] ?? '');
-        $table = (string)($t['table_name'] ?? '');
+    // PHP 측에서 테이블별로 id_col(첫 컬럼)과 text_cols를 동시 구성
+    $tables_raw = [];
+    foreach ($all_cols as $row) {
+        $schema = (string)($row['table_schema'] ?? '');
+        $table = (string)($row['table_name'] ?? '');
+        $col_name = (string)($row['column_name'] ?? '');
+        $data_type = (string)($row['data_type'] ?? '');
+        $ordinal = (int)($row['ordinal_position'] ?? 0);
+
         if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $schema) || !preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $table)) {
             continue;
         }
+        $key = "{$schema}.{$table}";
+        if (!isset($tables_raw[$key])) {
+            $tables_raw[$key] = ['schema' => $schema, 'table' => $table, 'first_col' => null, 'text_cols' => []];
+        }
+        // 첫 컬럼 추적 (ordinal_position이 가장 작은 것)
+        if ($tables_raw[$key]['first_col'] === null) {
+            $tables_raw[$key]['first_col'] = $col_name;
+        }
+        // 텍스트 타입 컬럼 수집
+        if (in_array($data_type, ['character varying', 'text', 'character'], true)) {
+            if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $col_name)) {
+                $tables_raw[$key]['text_cols'][] = $col_name;
+            }
+        }
+    }
 
-        $s1 = $pdo->prepare("SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position ASC LIMIT 1");
-        $s1->execute([$schema, $table]);
-        $id_col = (string)($s1->fetchColumn() ?: 'rowid');
+    $meta = [];
+    foreach ($tables_raw as $entry) {
+        $id_col = $entry['first_col'] ?? 'rowid';
         if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $id_col)) {
             $id_col = 'rowid';
         }
-
-        $s2 = $pdo->prepare("SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ? AND data_type IN ('character varying','text','character') ORDER BY ordinal_position ASC");
-        $s2->execute([$schema, $table]);
-        $text_cols = array_values(array_filter(array_map(function ($col) {
-            $col = (string)$col;
-            return preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $col) ? $col : null;
-        }, $s2->fetchAll(PDO::FETCH_COLUMN))));
-
+        $text_cols = $entry['text_cols'];
+        // 우선 컬럼을 앞으로 정렬
         foreach (['명칭', '사건명', '제목'] as $p) {
             if (($idx = array_search($p, $text_cols)) !== false) {
                 array_splice($text_cols, $idx, 1); array_unshift($text_cols, $p);
             }
         }
-        $meta[] = ['schema' => $schema, 'table' => $table, 'id_col' => $id_col, 'text_cols' => array_slice($text_cols, 0, 6)];
+        $meta[] = ['schema' => $entry['schema'], 'table' => $entry['table'], 'id_col' => $id_col, 'text_cols' => array_slice($text_cols, 0, 6)];
     }
 
     $cache_payload = json_encode(['cached_at' => time(), 'meta' => $meta], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
@@ -1505,19 +1867,22 @@ function fetch_pg_rows_for_names($pdo, $names, $tables_meta) {
         }
 
         $params = [];
+        // ID 정확매칭: names 개수만큼 IN 절 바인딩
         $in_placeholders = implode(',', array_fill(0, count($names), '?'));
         $id_match = "\"{$id_col}\"::text IN ({$in_placeholders})";
         foreach ($names as $name) {
             $params[] = $name;
         }
 
+        // ILIKE 매칭: 패턴 배열을 한번만 생성, 각 컬럼에 재사용 (파라미터 폭발 방지)
+        $like_patterns = array_map(fn($n) => "%{$n}%", $names);
+        $like_placeholders = implode(',', array_fill(0, count($like_patterns), '?'));
+
         $text_clauses = [];
         foreach ($search_cols as $c) {
             if ($c === $id_col) continue;
-            foreach ($names as $name) {
-                $text_clauses[] = "\"{$c}\"::text ILIKE ?";
-                $params[] = "%{$name}%";
-            }
+            $text_clauses[] = "\"{$c}\"::text ILIKE ANY(ARRAY[{$like_placeholders}])";
+            foreach ($like_patterns as $lp) $params[] = $lp;
         }
         $text_where = empty($text_clauses) ? '' : " OR (" . implode(" OR ", $text_clauses) . ")";
         $q = "SELECT * FROM {$fq} WHERE ({$id_match}{$text_where}) LIMIT 25";
@@ -1579,6 +1944,8 @@ function fetch_pg_rows_for_names($pdo, $names, $tables_meta) {
         /* ✨ 새로 추가된 노드 정보 패널 스타일 */
         #node-info-panel { border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.08); border: none; overflow: hidden; }
         #node-info-panel .card-header { border-bottom: 2px solid #dee2e6; background-color: #f8f9fa; }
+        @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+        .animate-blink { animation: blink 0.8s infinite; display: inline-block; font-weight: bold; margin-left: 2px; }
     </style>
 </head>
 <body>
@@ -1839,18 +2206,73 @@ async function generateExplanation() {
         pg_count: pgPrefetchTexts.length,
         explanation_lang: lang
     });
-    document.getElementById('explanation-content').innerHTML = '<div class="text-center p-4"><div class="spinner-border text-primary" role="status"></div><br><small class="text-muted mt-2 d-inline-block">해설 생성중...</small></div>';
+
+    const expContent = document.getElementById('explanation-content');
+    expContent.innerHTML = '<div class="text-muted small py-3"><span class="spinner-border spinner-border-sm text-primary me-2"></span> 1단계: 사료별 사건·장소·인물 교차 격벽 검증 및 학술 해설 작성 준비 중...</div>';
     
     try {
-        const res = await api('explain', {
-            term,
-            lang,
-            evidences: JSON.stringify(lastEvidences),
-            pg_texts: JSON.stringify(pgPrefetchTexts)
+        const csrfToken = '<?= htmlspecialchars($_SESSION['docent_csrf'], ENT_QUOTES, 'UTF-8') ?>';
+        const currentFocus = document.getElementById('focus-val') ? document.getElementById('focus-val').innerText : '';
+        const fd = new FormData();
+        fd.append('term', term);
+        fd.append('focus', currentFocus);
+        fd.append('lang', lang);
+        fd.append('evidences', JSON.stringify(lastEvidences));
+        fd.append('pg_texts', JSON.stringify(pgPrefetchTexts));
+        fd.append('csrf_token', csrfToken);
+        fd.append('stream', '1');
+
+        const response = await fetch('?ajax=explain&stream=1', {
+            method: 'POST',
+            body: fd,
+            credentials: 'same-origin',
+            headers: { 'X-CSRF-Token': csrfToken }
         });
-        document.getElementById('explanation-content').innerHTML = marked.parse(res.text);
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status} 오류`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let fullText = '';
+        let buffer = '';
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop(); // 미완성 행 보존
+
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (trimmed === 'data: [DONE]') {
+                    break;
+                }
+                if (trimmed.startsWith('data: ')) {
+                    try {
+                        const parsed = JSON.parse(trimmed.substring(6));
+                        if (parsed.chunk) {
+                            fullText += parsed.chunk;
+                            expContent.innerHTML = marked.parse(fullText) + '<span class="text-primary animate-blink">▌</span>';
+                        }
+                    } catch (e) {}
+                }
+            }
+        }
+
+        // 스트리밍 완료 후 최종 렌더링 (커서 제거)
+        expContent.innerHTML = marked.parse(fullText);
+
     } catch (e) {
-        document.getElementById('explanation-content').innerHTML = `<span class='text-danger'>해설 생성 중 오류: ${e.message}</span>`;
+        console.error(e);
+        expContent.innerHTML = `<div class="alert alert-danger mb-0 text-start">` +
+            `<div class="fw-bold mb-1"><i class="bi bi-exclamation-octagon-fill me-1"></i> 해설 생성 실패</div>` +
+            `<div class="small font-monospace text-break mb-1">${escapeHtml(e.message)}</div>` +
+            `<small class="text-muted">서버 오류 상세 정보를 확인하고 설정을 점검해 주세요.</small>` +
+            `</div>`;
     }
 }
 

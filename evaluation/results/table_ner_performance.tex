@@ -1,0 +1,17 @@
+\begin{table*}[htbp]
+\centering
+\caption{Quantitative Performance Comparison for Historical NER and Relation Extraction (\%)}
+\label{tab:ner_performance}
+\begin{tabular}{l|ccc|ccc|ccc}
+\hline
+\textbf{Task / Target} & \multicolumn{3}{c|}{\textbf{Baseline 1 (Rule-only)}} & \multicolumn{3}{c|}{\textbf{Baseline 2 (LLM-only)}} & \multicolumn{3}{c}{\textbf{Proposed (Hybrid Engine)}} \\
+\cline{2-10}
+ & \textbf{P} & \textbf{R} & \textbf{F1} & \textbf{P} & \textbf{R} & \textbf{F1} & \textbf{P} & \textbf{R} & \textbf{F1} \\
+\hline
+Person (인명) & 26.29 & 69.37 & 38.13 & 25.36 & 52.98 & 34.30 & \textbf{25.29} & \textbf{70.52} & \textbf{37.23} \\
+Place (지명) & 53.66 & 62.16 & 57.60 & 60.85 & 61.04 & 60.94 & \textbf{58.81} & \textbf{78.80} & \textbf{67.35} \\
+Overall Entities (전체 개체) & 34.04 & 65.96 & 44.90 & 36.06 & 56.80 & 44.11 & \textbf{35.40} & \textbf{74.44} & \textbf{47.98} \\
+Relation Extraction (관계 추출) & 31.65 & 72.23 & 44.01 & 35.12 & 68.27 & 46.38 & \textbf{30.45} & \textbf{72.88} & \textbf{42.96} \\
+\hline
+\end{tabular}
+\end{table*}
