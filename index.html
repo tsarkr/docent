@@ -36,7 +36,8 @@
     </iframe>
     <script>
         const frame = document.getElementById('docent-frame');
-        frame.src = 'https://11e.kr/index.html';
+        const search = window.location.search || '';
+        frame.src = 'https://11e.kr/index.html' + search;
     </script>
 </body>
 

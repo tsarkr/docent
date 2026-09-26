@@ -541,6 +541,12 @@
     let csrfFetchingPromise = null;
 
     async function ensureCsrf(forceRefresh = false) {
+        if (!csrfToken && !forceRefresh) {
+            try {
+                const cached = sessionStorage.getItem('docent_csrf');
+                if (cached) csrfToken = cached;
+            } catch (_) {}
+        }
         if (csrfToken && !forceRefresh) return csrfToken;
         if (csrfFetchingPromise && !forceRefresh) return csrfFetchingPromise;
 
@@ -551,6 +557,7 @@
                     const data = await res.json();
                     if (data && data.csrf_token) {
                         csrfToken = data.csrf_token;
+                        try { sessionStorage.setItem('docent_csrf', csrfToken); } catch (_) {}
                         return csrfToken;
                     }
                 }
@@ -559,10 +566,11 @@
             try {
                 const res = await fetch(API_BASE, { credentials: 'same-origin' });
                 const html = await res.text();
-                const m = html.match(/(?:csrfToken|docent_csrf)\s*=\s*['"]([a-f0-9]{64})['"]/i)
-                       || html.match(/['"]([a-f0-9]{64})['"]/);
+                const m = html.match(/(?:csrfToken|docent_csrf|__PRELOADED_CSRF__)\s*[:=]\s*['"]([^'"]+)['"]/i)
+                       || html.match(/['"]([a-f0-9_\-\.]{32,})['"]/);
                 if (m) {
                     csrfToken = m[1];
+                    try { sessionStorage.setItem('docent_csrf', csrfToken); } catch (_) {}
                     return csrfToken;
                 }
             } catch (e) {
@@ -651,6 +659,8 @@
 
             if (isCsrfError && !isRetry) {
                 logSystem(`🔄 보안 토큰 재발급 후 재시도 (${action})`);
+                try { sessionStorage.removeItem('docent_csrf'); } catch (_) {}
+                csrfToken = '';
                 await ensureCsrf(true);
                 return api(action, data, true);
             }
@@ -833,6 +843,8 @@
                 headers: csrfToken?{'X-CSRF-Token':csrfToken}:{}
             });
             if(res.status === 403) {
+                try { sessionStorage.removeItem('docent_csrf'); } catch (_) {}
+                csrfToken = '';
                 await ensureCsrf(true);
                 if(csrfToken) {
                     fd.set('csrf_token', csrfToken);

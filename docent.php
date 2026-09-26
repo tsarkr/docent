@@ -22,10 +22,53 @@ if (session_status() === PHP_SESSION_NONE) {
         'secure' => $is_https,
         'samesite' => $is_https ? 'None' : 'Lax'
     ]);
-    session_start();
+    @session_start();
 }
+
+function docent_get_csrf_secret() {
+    static $secret = null;
+    if ($secret !== null) {
+        return $secret;
+    }
+
+    $env_secret = get_cfg('DOCENT_CSRF_SECRET', get_cfg('APP_SECRET', ''));
+    if ($env_secret !== '') {
+        $secret = $env_secret;
+        return $secret;
+    }
+
+    $secret_file = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'docent_csrf_secret.key';
+    if (file_exists($secret_file) && is_readable($secret_file)) {
+        $stored = trim((string)@file_get_contents($secret_file));
+        if (strlen($stored) >= 32) {
+            $secret = $stored;
+            return $secret;
+        }
+    }
+
+    $candidate = bin2hex(random_bytes(32));
+    if (@file_put_contents($secret_file, $candidate) !== false) {
+        $secret = $candidate;
+        return $secret;
+    }
+
+    // Deterministic fallback based on server configuration/environment
+    $fallback_seed = 'docent_salt_2026|' . get_cfg('PG_PASSWORD', '') . '|' . get_cfg('NEO4J_PASSWORD', '') . '|' . __FILE__;
+    $secret = hash('sha256', $fallback_seed);
+    return $secret;
+}
+
+function docent_generate_csrf_token() {
+    $secret = docent_get_csrf_secret();
+    $timestamp = time();
+    $nonce = bin2hex(random_bytes(16));
+    $payload = $timestamp . '.' . $nonce;
+    $hmac = hash_hmac('sha256', $payload, $secret);
+    return $payload . '.' . $hmac;
+}
+
 if (empty($_SESSION['docent_csrf'])) {
-    $_SESSION['docent_csrf'] = bin2hex(random_bytes(32));
+    $_SESSION['docent_csrf'] = docent_generate_csrf_token();
 }
 header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
 header('Pragma: no-cache');
@@ -152,13 +195,24 @@ function docent_valid_identifier($value, $default = '') {
 
 function docent_check_same_origin() {
     $origin = trim((string)($_SERVER['HTTP_ORIGIN'] ?? ''));
-    if ($origin === '') return true;
 
-    $allowed_origins = array_filter(array_map('trim', explode(',', get_cfg('DOCENT_ALLOWED_ORIGINS', 'https://gyungmin.tsar.kr'))));
-    foreach ($allowed_origins as $allowed_origin) {
-        if (strcasecmp($origin, rtrim($allowed_origin, '/')) === 0) {
-            return true;
+    $default_allowed = 'https://gyungmin.tsar.kr,http://gyungmin.tsar.kr,https://11e.kr,http://11e.kr';
+    $cfg_origins = get_cfg('DOCENT_ALLOWED_ORIGINS', $default_allowed);
+    $allowed_origins = array_filter(array_map('trim', explode(',', $cfg_origins)));
+    $allowed_origins = array_values(array_unique(array_merge($allowed_origins, explode(',', $default_allowed))));
+
+    if ($origin !== '') {
+        foreach ($allowed_origins as $allowed_origin) {
+            if (strcasecmp($origin, rtrim($allowed_origin, '/')) === 0) {
+                header("Access-Control-Allow-Origin: {$origin}");
+                header('Access-Control-Allow-Credentials: true');
+                header('Access-Control-Allow-Headers: Content-Type, X-CSRF-Token, X-Requested-With');
+                header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+                return true;
+            }
         }
+    } else {
+        return true;
     }
 
     $origin_parts = parse_url($origin);
@@ -219,14 +273,49 @@ function docent_check_same_origin() {
         return false;
     }
 
+    header("Access-Control-Allow-Origin: {$origin}");
+    header('Access-Control-Allow-Credentials: true');
+    header('Access-Control-Allow-Headers: Content-Type, X-CSRF-Token, X-Requested-With');
+    header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
     return true;
 }
 
 function docent_check_csrf() {
     $request_token = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? ($_POST['csrf_token'] ?? '');
-    return is_string($request_token)
-        && isset($_SESSION['docent_csrf'])
-        && hash_equals((string)$_SESSION['docent_csrf'], $request_token);
+    if (!is_string($request_token)) {
+        return false;
+    }
+    $request_token = trim($request_token);
+    if ($request_token === '') {
+        return false;
+    }
+
+    // 1. Stateless HMAC token validation (works across mobile cross-site iframes without cookies)
+    $parts = explode('.', $request_token);
+    if (count($parts) === 3) {
+        list($ts, $nonce, $hmac) = $parts;
+        if (is_numeric($ts) && ctype_xdigit($nonce) && ctype_xdigit($hmac)) {
+            $timestamp = (int)$ts;
+            $now = time();
+            // Valid for 24 hours (86400s) with 5 minutes clock drift tolerance
+            if ($timestamp >= ($now - 86400) && $timestamp <= ($now + 300)) {
+                $secret = docent_get_csrf_secret();
+                $expected_hmac = hash_hmac('sha256', $ts . '.' . $nonce, $secret);
+                if (hash_equals($expected_hmac, $hmac)) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // 2. Session-based token fallback (for backward compatibility)
+    if (isset($_SESSION['docent_csrf']) && is_string($_SESSION['docent_csrf']) && $_SESSION['docent_csrf'] !== '') {
+        if (hash_equals((string)$_SESSION['docent_csrf'], $request_token)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 function docent_rate_limit($action) {
@@ -332,6 +421,14 @@ function normalize_focus($focus, $is_english = false) {
     return $is_english ? 'Person' : '인물';
 }
 
+// Handle CORS preflight
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
+    docent_check_same_origin();
+    header('Access-Control-Max-Age: 86400');
+    http_response_code(204);
+    exit;
+}
+
 // 1.5 CSRF Token Endpoint (Lightweight for headless frontends like docent.html)
 if (isset($_GET['csrf']) || (isset($_GET['ajax']) && $_GET['ajax'] === 'csrf')) {
     header('Content-Type: application/json; charset=utf-8');
@@ -342,7 +439,9 @@ if (isset($_GET['csrf']) || (isset($_GET['ajax']) && $_GET['ajax'] === 'csrf')) 
         echo json_encode(['error' => '접속 출처가 올바르지 않습니다.'], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
         exit;
     }
-    echo json_encode(['csrf_token' => $_SESSION['docent_csrf']], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+    $token = docent_generate_csrf_token();
+    $_SESSION['docent_csrf'] = $token;
+    echo json_encode(['csrf_token' => $token], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
     exit;
 }
 
@@ -2222,7 +2321,9 @@ function fetch_pg_rows_for_names($pdo, $names, $tables_meta) {
 
 // 4. Render frontend (docent.html with active session CSRF token)
 if (!isset($_GET['ajax']) && !isset($_GET['csrf'])) {
-    $csrf_token = htmlspecialchars($_SESSION['docent_csrf'] ?? '', ENT_QUOTES, 'UTF-8');
+    $token = !empty($_SESSION['docent_csrf']) ? $_SESSION['docent_csrf'] : docent_generate_csrf_token();
+    $_SESSION['docent_csrf'] = $token;
+    $csrf_token = htmlspecialchars($token, ENT_QUOTES, 'UTF-8');
     $html_file = __DIR__ . '/docent.html';
     if (file_exists($html_file)) {
         $html = file_get_contents($html_file);
