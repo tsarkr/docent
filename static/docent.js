@@ -684,7 +684,22 @@
             /* 1. Analyze (백엔드 Gemini 분석 — search_strategy 힌트 전달) */
             const s1 = addStep('💡','다국어 질의 의도 분석 및 DB 키워드 매핑 중...');
             if ($reasoningTitle) $reasoningTitle.textContent='AI가 질의를 분석하고 있습니다...';
-            const analysis = await api('analyze',{term, search_strategy: intentResult.intent});
+            let analysis;
+            try {
+                analysis = await api('analyze',{term, search_strategy: intentResult.intent});
+            } catch (analyzeErr) {
+                logSystem(`⚠️ analyze 실패 (${analyzeErr.message}) → 클라이언트 Intent Router로 즉시 복구`);
+                analysis = {
+                    intent_type: intentResult.intent,
+                    search_keywords: (intentResult.keywords && intentResult.keywords.length) ? intentResult.keywords : [term],
+                    analyzed_intent_ko: term,
+                    response_language: detectInputLanguage(term) || 'ko',
+                    intent: intentResult.intent,
+                    keywords: (intentResult.keywords && intentResult.keywords.length) ? intentResult.keywords : [term],
+                    focus: '종합',
+                    explanation: term
+                };
+            }
             analysisResult = analysis;
             analysisResult._clientIntent = intentResult;
             

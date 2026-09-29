@@ -39,18 +39,34 @@ function handle_action_analyze() {
                    . "  \"response_language\": \"ko\"\n"
                    . "}";
 
+    $search_strategy = docent_sanitize_text($_POST['search_strategy'] ?? '', 50, false);
+
+    // analyze는 경량 분류이므로 짧은 타임아웃(10초)으로 실행하여 게이트웨이 504 타임아웃 차단
     $res = call_gemini([
         ["role" => "system", "content" => $system_prompt],
         ["role" => "user", "content" => (string)$term]
-    ], true, null, 0.0, 0.8);
+    ], true, 500, 0.0, 0.8, 10);
     
-    $parsed = json_decode($res, true);
+    $parsed = json_decode((string)$res, true);
 
-    $new_intent = $parsed['intent_type'] ?? 'ENTITY_SEARCH';
-    $new_keywords = $parsed['search_keywords'] ?? [$term];
-    $new_focus = normalize_focus($parsed['focus'] ?? $initial_focus, false);
-    $new_intent_ko = $parsed['analyzed_intent_ko'] ?? '검색어 기반 분석 수행';
-    $new_resp_lang = $parsed['response_language'] ?? (docent_is_english() ? 'en' : 'ko');
+    // Fallback: Gemini 호출 실패 또는 타임아웃 시 클라이언트 힌트 및 로컬 분석으로 즉시 정상 응답 복구
+    if (!is_array($parsed) || empty($parsed['search_keywords'])) {
+        $fallback_kws = [];
+        if (preg_match_all('/([가-힣a-zA-Z0-9]{2,})/u', $term, $m)) {
+            $fallback_kws = array_slice(array_unique($m[1]), 0, 5);
+        }
+        $new_intent = ($search_strategy !== '') ? $search_strategy : 'ENTITY_SEARCH';
+        $new_keywords = !empty($fallback_kws) ? $fallback_kws : [$term];
+        $new_focus = $initial_focus;
+        $new_intent_ko = $term;
+        $new_resp_lang = docent_is_english() ? 'en' : 'ko';
+    } else {
+        $new_intent = $parsed['intent_type'] ?? ($search_strategy ?: 'ENTITY_SEARCH');
+        $new_keywords = $parsed['search_keywords'] ?? [$term];
+        $new_focus = normalize_focus($parsed['focus'] ?? $initial_focus, false);
+        $new_intent_ko = $parsed['analyzed_intent_ko'] ?? '검색어 기반 분석 수행';
+        $new_resp_lang = $parsed['response_language'] ?? (docent_is_english() ? 'en' : 'ko');
+    }
 
     $output = [
         "intent_type" => $new_intent,
@@ -65,6 +81,387 @@ function handle_action_analyze() {
     
     echo json_encode($output, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
 }
+
+// ════════════════════════════════════════════════════════════
+// GraphRAG 파이프라인 (Step 1-4)
+// Vector 희석·Multi-hop 추론 실패 방지용 하이브리드 컨텍스트 주입기
+// ════════════════════════════════════════════════════════════
+
+/**
+ * [Step 1] NER 기반 라우팅: 질의에서 인물명·지명·사건명 개체를 감지하고
+ *          Graph DB 우선 탐색 여부를 결정한다.
+ *
+ * @param  string $query   사용자 원본 질의
+ * @return array  [
+ *   'entities'   => string[]  감지된 개체명 목록 (한국어 고유명사),
+ *   'route_graph'=> bool      Graph 우선 탐색 여부,
+ * ]
+ */
+function graphrag_detect_entities(string $query): array {
+    $query = trim($query);
+    if ($query === '') return ['entities' => [], 'route_graph' => false];
+
+    // ── 1-A. 규칙 기반 빠른 감지 (LLM 호출 없이) ──
+    // 한국인 인명 패턴: 2~4자 한글 (성씨 목록 앞에 붙은 경우)
+    static $person_suffixes = ['열사', '의사', '선생', '목사', '장군', '대장', '선생님'];
+    static $known_persons   = [
+        '유관순', '손병희', '이동휘', '한용운', '김구', '안창호', '이승만', '신채호',
+        '박은식', '이회영', '윤봉길', '이봉창', '나석주', '안중근', '조소앙',
+        '여운형', '조만식', '이상재', '김규식', '서재필', '이동녕', '이시영',
+        '조인원', '김구응', '유중권', '유중무', '이소제', '홍일선',
+    ];
+    static $place_keywords  = [
+        '아우내', '병천', '제암리', '화성', '사강리', '송산', '수촌리', '천안',
+        '서울', '경성', '평양', '의주', '선천', '간도', '연해주', '상해',
+    ];
+
+    $detected = [];
+
+    // 알려진 인물명 직접 매칭
+    foreach ($known_persons as $p) {
+        if (mb_strpos($query, $p) !== false) {
+            $detected[] = $p;
+        }
+    }
+
+    // 접미어 패턴으로 미지 인물명 추출 (예: "홍길동 열사")
+    foreach ($person_suffixes as $sfx) {
+        if (preg_match('/([가-힣]{2,4})\s*' . preg_quote($sfx, '/') . '/u', $query, $m)) {
+            $candidate = trim($m[1]);
+            if ($candidate !== '' && !in_array($candidate, $detected, true)) {
+                $detected[] = $candidate;
+            }
+        }
+    }
+
+    // 지명 매칭
+    foreach ($place_keywords as $pl) {
+        if (mb_strpos($query, $pl) !== false && !in_array($pl, $detected, true)) {
+            $detected[] = $pl;
+        }
+    }
+
+    $route_graph = !empty($detected);
+
+    // ── 1-B. LLM 보조 NER (규칙 기반 미감지 시 경량 추출) ──
+    if (!$route_graph) {
+        try {
+            $ner_prompt_sys = "당신은 한국 근현대사 텍스트에서 고유명사(인물명·지명·사건명)를 추출하는 NER 시스템입니다.\n"
+                            . "입력 문장에서 핵심 고유명사만 JSON 배열로 반환하십시오.\n"
+                            . "규칙: 조사/어미 제거, 역사적 맥락 고유명사만, 최대 5개, 마크다운 없음.\n"
+                            . "출력 예: [\"유관순\", \"아우내\", \"수원\"]";
+            $ner_raw = call_gemini([
+                ['role' => 'system', 'content' => $ner_prompt_sys],
+                ['role' => 'user',   'content' => $query],
+            ], true, 256, 0.0, 0.8, 15);
+
+            $ner_parsed = json_decode((string)$ner_raw, true);
+            if (is_array($ner_parsed)) {
+                foreach ($ner_parsed as $item) {
+                    $item = trim((string)$item);
+                    if (mb_strlen($item) >= 2 && !in_array($item, $detected, true)) {
+                        $detected[] = $item;
+                    }
+                }
+                $route_graph = !empty($detected);
+            }
+        } catch (\Throwable $nerErr) {
+            error_log('GraphRAG NER failed: ' . $nerErr->getMessage());
+        }
+    }
+
+    return [
+        'entities'    => array_values(array_unique($detected)),
+        'route_graph' => $route_graph,
+    ];
+}
+
+/**
+ * [Step 2] Neo4j Multi-hop (3-hop) Cypher 실행
+ *
+ * 감지된 개체명($entity_name)을 시작점으로 삼아
+ * Person → common_Event → Person2 → target_Event 경로를 탐색하고
+ * 원시 레코드 배열을 반환한다.
+ *
+ * @param  object $client       Neo4j 클라이언트 (get_neo4j())
+ * @param  string $entity_name  탐색 시작 인물/개체명
+ * @return array  레코드 배열 (각 행: ['연관인물'=>.., '사건이름'=>.., '발생일자'=>..])
+ */
+function graphrag_run_multihop(object $client, string $entity_name): array {
+    $entity_name = trim($entity_name);
+    if ($entity_name === '') return [];
+
+    // ── 3-hop Person → Event → Person → Event 탐색 ──
+    $cypher_person = "
+        MATCH (p1:Person)-[:P14_carried_out_by]-(common_e:Event)-[:P14_carried_out_by]-(p2:Person)
+        WHERE (p1.명칭 = \$name OR p1.name = \$name) AND p1 <> p2
+        MATCH (p2)-[:P14_carried_out_by]-(target_e:Event)
+        WHERE target_e <> common_e
+        RETURN
+            COALESCE(p2.명칭, p2.name)                                AS 연관인물,
+            COALESCE(target_e.사건명, target_e.제목, target_e.name)   AS 사건이름,
+            target_e.날짜                                              AS 발생일자,
+            COALESCE(common_e.사건명, common_e.제목, common_e.name)   AS 공통사건,
+            COALESCE(p1.명칭, p1.name)                                AS 기준인물
+        ORDER BY target_e.날짜 ASC
+        LIMIT 20
+    ";
+
+    // ── 직접 참여 사건 보완 (1-hop: 인물 → 사건) ──
+    $cypher_direct = "
+        MATCH (p:Person)-[:P14_carried_out_by]-(e:Event)
+        WHERE (p.명칭 = \$name OR p.name = \$name)
+        OPTIONAL MATCH (e)-[:P7_took_place_at|ACTIVATED_AT]-(loc:Place)
+        RETURN
+            COALESCE(p.명칭, p.name)                              AS 연관인물,
+            COALESCE(e.사건명, e.제목, e.명칭, e.name)            AS 사건이름,
+            e.날짜                                                AS 발생일자,
+            '' AS 공통사건,
+            COALESCE(p.명칭, p.name)                              AS 기준인물
+        ORDER BY e.날짜 ASC
+        LIMIT 15
+    ";
+
+    // ── 지명 기반 사건 탐색 (장소 개체인 경우) ──
+    $cypher_place = "
+        MATCH (e:Event)
+        WHERE e.사건명 CONTAINS \$name OR e.제목 CONTAINS \$name OR e.명칭 CONTAINS \$name
+        OPTIONAL MATCH (e)-[:P14_carried_out_by]-(p:Person)
+        RETURN
+            COALESCE(p.명칭, p.name, '(인물 미상)')               AS 연관인물,
+            COALESCE(e.사건명, e.제목, e.명칭, e.name)            AS 사건이름,
+            e.날짜                                                AS 발생일자,
+            '' AS 공통사건,
+            \$name                                                AS 기준인물
+        ORDER BY e.날짜 ASC
+        LIMIT 15
+    ";
+
+    // ── 단체/기관/기준개체 풀텍스트 인덱스 기반 다중 홉 탐색 (Anchor 1개 선별 → Person → Event) ──
+    $escaped_entity = docent_escape_lucene($entity_name);
+    $cypher_anchor = "
+        CALL db.index.fulltext.queryNodes('namesIndex', \$lucene_name) YIELD node AS anchor, score
+        ORDER BY score DESC
+        LIMIT 1
+        MATCH (anchor)-[*1..3]-(p:Person)-[:P14_carried_out_by]-(e:Event)
+        RETURN
+            COALESCE(p.명칭, p.name, '(인물 미상)')               AS 연관인물,
+            COALESCE(e.사건명, e.제목, e.명칭, e.name)            AS 사건이름,
+            e.날짜                                                AS 발생일자,
+            COALESCE(anchor.명칭, anchor.name, \$name)            AS 공통사건,
+            \$name                                                AS 기준인물
+        ORDER BY e.날짜 ASC
+        LIMIT 20
+    ";
+
+    $results = [];
+    $seen    = [];
+
+    $queries = [$cypher_person, $cypher_direct, $cypher_place, $cypher_anchor];
+    foreach ($queries as $cypher) {
+        try {
+            $params = [
+                'name' => $entity_name,
+                'lucene_name' => $escaped_entity !== '' ? $escaped_entity : $entity_name
+            ];
+            $res = $client->run($cypher, $params);
+        } catch (\Throwable $e) {
+            error_log("GraphRAG multi-hop query failed for [{$entity_name}]: " . $e->getMessage());
+            continue;
+        }
+
+        foreach ($res as $record) {
+            $row = [
+                '연관인물' => trim((string)($record->get('연관인물') ?? '')),
+                '사건이름' => trim((string)($record->get('사건이름') ?? '')),
+                '발생일자' => trim((string)($record->get('발생일자') ?? '')),
+                '공통사건' => trim((string)($record->get('공통사건') ?? '')),
+                '기준인물' => trim((string)($record->get('기준인물') ?? '')),
+            ];
+
+            // 의미 없는 행 스킵
+            if ($row['사건이름'] === '' && $row['연관인물'] === '') continue;
+            // DB 내부 ID 형태 노이즈 필터
+            if (preg_match('/^[a-z0-9_]{10,}$/i', $row['사건이름'])) continue;
+
+            $dedup_key = sha1($row['연관인물'] . '|' . $row['사건이름']);
+            if (isset($seen[$dedup_key])) continue;
+            $seen[$dedup_key] = true;
+
+            $results[] = $row;
+            if (count($results) >= 25) break 2;
+        }
+    }
+
+    // 최종 반환 시 발생일자(날짜) 오름차순 정렬 (ORDER BY 발생일자 ASC)
+    usort($results, function($a, $b) {
+        $da = trim((string)($a['발생일자'] ?? ''));
+        $db = trim((string)($b['발생일자'] ?? ''));
+        if ($da === $db) return 0;
+        if ($da === '') return 1;
+        if ($db === '') return -1;
+        return strcmp($da, $db);
+    });
+
+    return $results;
+}
+
+/**
+ * [Step 3] GraphRAG 결과 직렬화 (SOURCE_EVIDENCE XML 포맷)
+ *
+ * Multi-hop 쿼리 결과를 LLM이 사료처럼 소비할 수 있는
+ * <SOURCE_EVIDENCE> XML 블록으로 직렬화한다.
+ *
+ * @param  array  $multihop_rows  graphrag_run_multihop() 결과
+ * @param  string $entity_name    탐색 기준 개체명
+ * @param  string $lang           출력 언어 (ko|en|ja|zh)
+ * @return string 직렬화된 SOURCE_EVIDENCE 블록 문자열 (없으면 '')
+ */
+function graphrag_serialize_results(array $multihop_rows, string $entity_name, string $lang): string {
+    if (empty($multihop_rows)) return '';
+
+    $label_map = [
+        'ko' => ['header' => '[지식그래프 다중 홉 탐색 결과]',   'prefix' => '그래프 탐색 결과'],
+        'en' => ['header' => '[Knowledge Graph Multi-hop Results]', 'prefix' => 'Graph traversal result'],
+        'ja' => ['header' => '[知識グラフ多重ホップ探索結果]',    'prefix' => 'グラフ探索結果'],
+        'zh' => ['header' => '[知识图谱多跳探索结果]',            'prefix' => '图谱探索结果'],
+    ];
+    $labels = $label_map[$lang] ?? $label_map['ko'];
+
+    $lines = [];
+    foreach ($multihop_rows as $i => $row) {
+        $person  = $row['연관인물'] ?: '(인물 미상)';
+        $event   = $row['사건이름'] ?: '(사건명 미상)';
+        $date    = $row['발생일자'] ?: '';
+        $common  = $row['공통사건'] ?: '';
+        $anchor  = $row['기준인물'] ?: $entity_name;
+
+        // 자연어 서술 생성 (언어별)
+        switch ($lang) {
+            case 'en':
+                $body = "{$labels['prefix']}: '{$anchor}' is connected to '{$person}'"
+                      . ($common ? " via the shared event [{$common}]" : '')
+                      . ". '{$person}' is recorded as a participant in [{$event}]"
+                      . ($date ? " ({$date})" : '') . ".";
+                break;
+            case 'ja':
+                $body = "{$labels['prefix']}: '{$anchor}'は"
+                      . ($common ? "共通事件[{$common}]を通じて" : '')
+                      . "'{$person}'と関連する。'{$person}'は[{$event}]"
+                      . ($date ? "（{$date}）" : '') . "に参加した記録がある。";
+                break;
+            case 'zh':
+                $body = "{$labels['prefix']}: '{$anchor}'"
+                      . ($common ? "通过共同事件[{$common}]" : '')
+                      . "与'{$person}'存在关联。'{$person}'被记录为[{$event}]"
+                      . ($date ? "（{$date}）" : '') . "的参与者。";
+                break;
+            default: // ko
+                $body = "{$labels['prefix']}: '{$anchor}'은(는)"
+                      . ($common ? " 공통 사건 [{$common}]을 매개로" : '')
+                      . " '{$person}'과(와) 연결됩니다."
+                      . " '{$person}'은(는) [{$event}]"
+                      . ($date ? " ({$date})" : '') . "에 참여한 기록이 있습니다.";
+        }
+
+        $id_attr     = 'graphrag_' . ($i + 1);
+        $entity_attr = htmlspecialchars($anchor, ENT_QUOTES, 'UTF-8');
+        $event_attr  = htmlspecialchars($event,  ENT_QUOTES, 'UTF-8');
+
+        $lines[] = "<SOURCE_EVIDENCE id=\"{$id_attr}\" entity=\"{$entity_attr}\" event=\"{$event_attr}\" source=\"graphrag_multihop\">\n"
+                 . "  <!-- [GraphRAG] {$anchor} 다중 홉 탐색 — DB 확인 완료 사실만 포함 -->\n"
+                 . "  {$body}\n"
+                 . "</SOURCE_EVIDENCE>";
+    }
+
+    if (empty($lines)) return '';
+
+    return "{$labels['header']}\n" . implode("\n\n", $lines);
+}
+
+/**
+ * [Step 4 진입점] GraphRAG 하이브리드 컨텍스트 빌더
+ *
+ * 1. NER 감지 → 2. Multi-hop Neo4j 탐색 → 3. 직렬화 →
+ * 4. GraphRAG 블록을 기존 Vector 컨텍스트 앞에 강제 주입해
+ *    최종 하이브리드 페이로드 문자열을 반환한다.
+ *
+ * @param  string $query          사용자 원본 질의 (term)
+ * @param  string $vector_context 기존 evidence + pg 컨텍스트 문자열
+ * @param  string $lang           출력 언어 (ko|en|ja|zh)
+ * @return array [
+ *   'context'       => string  최종 하이브리드 컨텍스트,
+ *   'graphrag_used' => bool    GraphRAG 주입 여부,
+ *   'entities'      => array   감지된 개체명 목록,
+ * ]
+ */
+function graphrag_build_hybrid_context(string $query, string $vector_context, string $lang): array {
+    // Step 1: NER 라우팅
+    $ner = graphrag_detect_entities($query);
+    if (!$ner['route_graph'] || empty($ner['entities'])) {
+        return ['context' => $vector_context, 'graphrag_used' => false, 'entities' => []];
+    }
+
+    // Neo4j 클라이언트
+    $client = null;
+    try {
+        $client = get_neo4j();
+    } catch (\Throwable $dbErr) {
+        error_log('GraphRAG: Neo4j connection failed — ' . $dbErr->getMessage());
+        return ['context' => $vector_context, 'graphrag_used' => false, 'entities' => $ner['entities']];
+    }
+
+    // Step 2: 개체별 Multi-hop 탐색 (최대 3개 개체 탐색, 결과 합산)
+    $all_rows  = [];
+    $max_ents  = 3;
+    foreach (array_slice($ner['entities'], 0, $max_ents) as $entity) {
+        $rows = graphrag_run_multihop($client, $entity);
+        $all_rows = array_merge($all_rows, $rows);
+        if (count($all_rows) >= 25) break;
+    }
+
+    // 중복 제거 (개체 다중 탐색으로 발생 가능)
+    $dedup = [];
+    $unique_rows = [];
+    foreach ($all_rows as $r) {
+        $key = sha1($r['연관인물'] . '|' . $r['사건이름']);
+        if (!isset($dedup[$key])) {
+            $dedup[$key] = true;
+            $unique_rows[] = $r;
+        }
+    }
+
+    // 최종 반환 시 전체 결과를 발생일자 오름차순(ORDER BY)으로 정렬하여 AI API에 주입
+    usort($unique_rows, function($a, $b) {
+        $da = trim((string)($a['발생일자'] ?? ''));
+        $db = trim((string)($b['발생일자'] ?? ''));
+        if ($da === $db) return 0;
+        if ($da === '') return 1;
+        if ($db === '') return -1;
+        return strcmp($da, $db);
+    });
+
+    // Step 3: 직렬화
+    // 기준 개체명은 첫 번째 감지 개체를 사용
+    $primary_entity = $ner['entities'][0];
+    $graphrag_block = graphrag_serialize_results($unique_rows, $primary_entity, $lang);
+
+    // Step 4: 컨텍스트 주입 (GraphRAG 블록을 Vector 컨텍스트 앞에 강제 삽입)
+    if ($graphrag_block === '') {
+        return ['context' => $vector_context, 'graphrag_used' => false, 'entities' => $ner['entities']];
+    }
+
+    $sep     = ($vector_context !== '') ? "\n\n" : '';
+    $hybrid  = $graphrag_block . $sep . $vector_context;
+
+    return [
+        'context'       => $hybrid,
+        'graphrag_used' => true,
+        'entities'      => $ner['entities'],
+    ];
+}
+
+// ════════════════════════════════════════════════════════════
 
 /**
  * Text-to-Cypher: 사용자 자연어 질의를 Neo4j Cypher 쿼리로 변환
@@ -86,6 +483,9 @@ function generate_text_to_cypher(string $query): string {
         $cypher = preg_replace('/^```(?:cypher)?\s*|\s*```$/i', '', trim($raw));
         $cypher = trim($cypher);
 
+        // 비한정 가변 홉([*]) 그래프 탐색 과부하 방지 (최대 3-hop 안전 한정)
+        $cypher = preg_replace('/-\[\*\]-/i', '-[*1..3]-', $cypher);
+
         // 보안 가드레일: 읽기 전용 쿼리 확인
         if (!preg_match('/^\s*(MATCH|OPTIONAL\s+MATCH|WITH|CALL)\b/i', $cypher)) {
             error_log('Text-to-Cypher rejected non-read-only query: ' . substr($cypher, 0, 100));
@@ -96,6 +496,25 @@ function generate_text_to_cypher(string $query): string {
         if (preg_match('/\b(DELETE|DETACH|CREATE|MERGE|SET|REMOVE|DROP|LOAD\s+CSV)\b/i', $cypher)) {
             error_log('Text-to-Cypher rejected unsafe mutation query: ' . substr($cypher, 0, 100));
             return '';
+        }
+
+        // ORDER BY 보장: 최종 반환 시 시간순 정렬 보장
+        if (!preg_match('/\bORDER\s+BY\b/i', $cypher)) {
+            $order_target = '';
+            if (preg_match('/\b발생일자\b/u', $cypher)) {
+                $order_target = '발생일자 ASC';
+            } elseif (preg_match('/\be\.날짜\b/u', $cypher)) {
+                $order_target = 'e.날짜 ASC';
+            } elseif (preg_match('/\btarget_e\.날짜\b/u', $cypher)) {
+                $order_target = 'target_e.날짜 ASC';
+            }
+            if ($order_target !== '') {
+                if (preg_match('/\bLIMIT\s+(\d+)\b/i', $cypher, $lm)) {
+                    $cypher = preg_replace('/\bLIMIT\s+\d+\b/i', "ORDER BY {$order_target} LIMIT {$lm[1]}", $cypher);
+                } else {
+                    $cypher .= " ORDER BY {$order_target}";
+                }
+            }
         }
 
         // LIMIT 30 보장
@@ -171,13 +590,19 @@ function execute_dynamic_cypher($client, string $cypher, array &$nodes, array &$
             if ($v_str === '') continue;
 
             $k_lower = mb_strtolower((string)$k);
-            if (in_array($k_lower, ['연관인물', '인물명', '인물', 'person', 'actor'], true)) {
+            $k_clean = preg_replace('/^[a-z0-9_]+\./i', '', $k_lower);
+
+            if (in_array($k_lower, ['연관인물', '인물명', '인물', 'person', 'actor', 'p.명칭', 'p.name', 'anchor.명칭'], true) ||
+                ($k_clean === '명칭' && !str_starts_with($k_lower, 'e.') && !str_starts_with($k_lower, 'loc.') && !str_starts_with($k_lower, 'place.')) ||
+                $k_lower === 'p.명칭') {
                 $person_name = $v_str;
-            } elseif (in_array($k_lower, ['사건이름', '사건명', '사건', 'event', 'title'], true)) {
+            } elseif (in_array($k_lower, ['사건이름', '사건명', '사건', 'event', 'title', 'e.사건명', 'e.title', 'e.명칭', 'e.name'], true) ||
+                $k_clean === '사건명' || $k_clean === '사건이름') {
                 $event_name = $v_str;
-            } elseif (in_array($k_lower, ['발생지역', '관련장소', '장소', '지역', 'place', 'loc', 'location'], true)) {
+            } elseif (in_array($k_lower, ['발생지역', '관련장소', '장소', '지역', 'place', 'loc', 'location', 'loc.명칭', 'loc.name'], true)) {
                 $place_name = $v_str;
-            } elseif (in_array($k_lower, ['발생일자', '발생일', '일자', '날짜', 'date'], true)) {
+            } elseif (in_array($k_lower, ['발생일자', '발생일', '일자', '날짜', 'date', 'e.날짜', 'target_e.날짜'], true) ||
+                $k_clean === '날짜' || $k_clean === '일자' || $k_clean === '발생일자') {
                 $date_str = $v_str;
             } elseif (in_array($k_lower, ['인물설명', '사건설명', '설명', 'description', 'desc'], true)) {
                 $desc_str = $v_str;
@@ -755,6 +1180,18 @@ function handle_action_explain() {
     $evidence_context = build_budgeted_evidence_context($evidences, $explain_lang, 20, 250, 600, 5000, $term, $focus);
     $pg_context = build_budgeted_pg_context($pg_texts, $explain_lang, 25, 180, 450, 6000, $term, $focus);
     $context_str = trim($evidence_context . ($evidence_context && $pg_context ? "\n\n" : "") . $pg_context);
+
+    // ── [GraphRAG Step 4] NER 감지 → Multi-hop 탐색 → 하이브리드 컨텍스트 주입 ──
+    // Vector 희석 방지: DB 확인 사실을 컨텍스트 최상단에 강제 삽입
+    $graphrag_result = graphrag_build_hybrid_context($term, $context_str, $explain_lang);
+    $context_str     = $graphrag_result['context'];
+    $graphrag_used   = $graphrag_result['graphrag_used'];
+
+    if ($is_stream && $graphrag_used) {
+        // 클라이언트에 GraphRAG 주입 여부 알림 (SSE 메타 코멘트)
+        echo ": graphrag-injected entities=" . implode(',', $graphrag_result['entities']) . "\n\n";
+        flush();
+    }
 
     // ── [환각 방지 게이트] GDB·RDB 사료가 전혀 없으면 도슨트 생성 차단 ──
     if ($context_str === '') {

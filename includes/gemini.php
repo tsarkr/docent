@@ -37,8 +37,18 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
     $payload = _build_gemini_payload($msgs, $is_json, $max_tokens, $temperature, $top_p);
     $post_json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
 
+    $start_time = microtime(true);
+    $total_timeout = max(5, (int)$timeout);
     $last_error_message = '';
+
     foreach ($candidate_models as $model) {
+        $elapsed = microtime(true) - $start_time;
+        $remaining = $total_timeout - $elapsed;
+        if ($remaining <= 2.0) {
+            error_log("call_gemini: overall timeout reached ({$total_timeout}s), skipping remaining models");
+            break;
+        }
+
         $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent";
         $ch = curl_init($url);
         curl_setopt_array($ch, [
@@ -46,8 +56,8 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
             CURLOPT_POST => true,
             CURLOPT_POSTFIELDS => $post_json,
             CURLOPT_HTTPHEADER => ["Content-Type: application/json", "x-goog-api-key: {$api_key}"],
-            CURLOPT_CONNECTTIMEOUT => 10,
-            CURLOPT_TIMEOUT => max(10, (int)$timeout),
+            CURLOPT_CONNECTTIMEOUT => max(3, min(6, (int)$remaining)),
+            CURLOPT_TIMEOUT => (int)ceil($remaining),
             CURLOPT_SSL_VERIFYPEER => true,
             CURLOPT_SSL_VERIFYHOST => 2,
         ]);
@@ -65,7 +75,9 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
             $last_error_message = $provider_message !== '' ? "Gemini 오류 ({$model}): {$provider_message}" : "AI 요청 실패 ({$model}, HTTP {$http_code}, cURL {$curl_errno})";
             error_log(sprintf('Gemini model %s failed: HTTP %d, cURL %d — trying next candidate', $model, $http_code, $curl_errno));
             if ($http_code === 429 || $http_code === 503) {
-                usleep(1200000); // 1.2초 백오프 후 다음 모델 시도
+                if (($total_timeout - (microtime(true) - $start_time)) > 3.0) {
+                    usleep(600000); // 0.6초 백오프 후 다음 모델 시도
+                }
             }
             continue;
         }
