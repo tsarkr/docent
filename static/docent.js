@@ -686,9 +686,11 @@
             if ($reasoningTitle) $reasoningTitle.textContent='AI가 질의를 분석하고 있습니다...';
             let analysis;
             try {
-                analysis = await api('analyze',{term, search_strategy: intentResult.intent});
+                const analyzeCall = api('analyze',{term, search_strategy: intentResult.intent});
+                const analyzeTimeout = new Promise((_, reject) => setTimeout(() => reject(new Error('응답 지연(4초 초과)')), 4000));
+                analysis = await Promise.race([analyzeCall, analyzeTimeout]);
             } catch (analyzeErr) {
-                logSystem(`⚠️ analyze 실패 (${analyzeErr.message}) → 클라이언트 Intent Router로 즉시 복구`);
+                logSystem(`⚠️ analyze 건너뜀 (${analyzeErr.message}) → 클라이언트 Intent Router로 즉시 복구`);
                 analysis = {
                     intent_type: intentResult.intent,
                     search_keywords: (intentResult.keywords && intentResult.keywords.length) ? intentResult.keywords : [term],
