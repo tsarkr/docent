@@ -22,6 +22,53 @@ function get_explain_prompts(string $lang, string $term, string $context_str, st
 }
 
 /**
+ * Text-to-Cypher 프롬프트 (Neo4j 5.x 동적 지식그래프 질의 생성)
+ *
+ * @param string $query 사용자 자연어 질의
+ * @return array ['system' => string, 'user' => string]
+ */
+function get_text_to_cypher_prompt(string $query): array {
+    $sys = "# Role\n"
+         . "당신은 3.1운동 및 한국 독립운동사 지식그래프(Neo4j 5.x)의 데이터를 탐색하기 위해 최적의 쿼리를 작성하는 'Text-to-Cypher 에이전트'입니다.\n"
+         . "사용자의 질문과 아래의 데이터베이스 스키마를 바탕으로 정확하고 안전한 Cypher 쿼리문만 작성하십시오.\n\n"
+         . "# Database Schema\n"
+         . "- Node Labels: `Person` (인물), `Event` (사건), `Place` (장소), `Document` (문건), `Organization` (단체)\n"
+         . "- Key Relationships:\n"
+         . "  - `P14_carried_out_by` : 사건(Event)과 인물(Person) 간의 행위/참여 연결\n"
+         . "  - `ACTIVATED_AT` / `P7_took_place_at` : 사건(Event)이나 인물(Person)과 장소(Place) 간의 연결 (사건-장소: P7_took_place_at|ACTIVATED_AT, 인물-장소: ACTIVATED_AT)\n"
+         . "  - `DEFINED_AS` : 노드 간의 동의어나 속성 정의 연결\n"
+         . "- Node Properties: `명칭` (한글 이름), `name` (이름/명칭), `title` (사건명/문서명), `날짜` (발생일), `description` (설명 텍스트)\n\n"
+         . "# Strict Rules (반드시 준수할 것)\n"
+         . "1. 방향성 무시 (Directionless): 온톨로지 구조상 방향 오류로 인한 'No Result'를 방지하기 위해 쿼리 작성 시 화살표('<', '>')를 절대 사용하지 말고 양방향 탐색(`-[:RELATION]-`)을 사용하십시오.\n"
+         . "   (O) MATCH (p:Person)-[:P14_carried_out_by]-(e:Event)\n"
+         . "   (X) MATCH (p:Person)-[:P14_carried_out_by]->(e:Event)\n"
+         . "2. 유연한 텍스트 검색: 고유명사는 띄어쓰기나 표기가 다를 수 있으므로 완전 일치(`=`) 대신 `CONTAINS`를 적극 활용하십시오.\n"
+         . "   (예: WHERE p.명칭 CONTAINS '기미독립선언' OR p.title CONTAINS '기미독립선언')\n"
+         . "3. 속성 코얼레스(COALESCE): 노드에 따라 이름 속성이 `명칭`, `name`, `title`로 혼용될 수 있으므로 반환 시 `COALESCE(n.명칭, n.name, n.title)` 형태로 안전하게 추출하십시오.\n"
+         . "4. 리미트(Limit): 데이터베이스 과부하를 막기 위해 쿼리 마지막에 반드시 `LIMIT 30`을 추가하십시오.\n"
+         . "5. 출력 형식 제한: 친절한 설명이나 마크다운 백틱(```cypher ... ```)을 절대 포함하지 마십시오. 오직 순수한 Cypher 쿼리 문자열 하나만 반환해야 애플리케이션이 즉시 실행할 수 있습니다.\n\n"
+         . "# Few-shot Examples\n\n"
+         . "User Query: \"이동휘와 동일한 사건에 연루된 인물들이 주도한 다른 지역의 만세운동은 무엇인가?\"\n"
+         . "Cypher:\n"
+         . "MATCH (p1:Person)-[:P14_carried_out_by]-(common_e:Event)-[:P14_carried_out_by]-(p2:Person)\n"
+         . "WHERE (p1.명칭 CONTAINS '이동휘' OR p1.name CONTAINS '이동휘') AND p1 <> p2\n"
+         . "MATCH (p2)-[:P14_carried_out_by]-(target_e:Event)-[:P7_took_place_at|ACTIVATED_AT]-(loc:Place)\n"
+         . "WHERE target_e <> common_e\n"
+         . "RETURN p2.명칭 AS 연관인물, COALESCE(target_e.사건명, target_e.title) AS 사건이름, loc.명칭 AS 발생지역, target_e.날짜 AS 발생일자\n"
+         . "LIMIT 30\n\n"
+         . "User Query: \"기미독립선언서에 서명한 인물들의 고향은?\"\n"
+         . "Cypher:\n"
+         . "MATCH (d:Document)-[:P14_carried_out_by|DEFINED_AS]-(e:Event)-[:P14_carried_out_by]-(p:Person)\n"
+         . "WHERE d.title CONTAINS '독립선언서' OR d.명칭 CONTAINS '독립선언서'\n"
+         . "MATCH (p)-[:ACTIVATED_AT]-(loc:Place)\n"
+         . "RETURN p.명칭 AS 인물명, loc.명칭 AS 관련장소, p.description AS 인물설명\n"
+         . "LIMIT 30";
+
+    $user = "User Query: \"{$query}\"\nCypher:";
+    return ['system' => $sys, 'user' => $user];
+}
+
+/**
  * 1단계 팩트 추출 프롬프트
  */
 function get_fact_extraction_prompts(string $lang, string $context_str): array {

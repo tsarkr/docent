@@ -67,14 +67,256 @@ function handle_action_analyze() {
 }
 
 /**
+ * Text-to-Cypher: 사용자 자연어 질의를 Neo4j Cypher 쿼리로 변환
+ */
+function generate_text_to_cypher(string $query): string {
+    $query = trim($query);
+    if ($query === '' || mb_strlen($query) < 2) return '';
+
+    try {
+        $prompt = get_text_to_cypher_prompt($query);
+        $raw = call_gemini([
+            ['role' => 'system', 'content' => $prompt['system']],
+            ['role' => 'user', 'content' => $prompt['user']]
+        ], false, 4096, 0.0, 0.8, 20);
+
+        if (!is_string($raw) || trim($raw) === '') return '';
+
+        // 마크다운 백틱 및 공백 제거
+        $cypher = preg_replace('/^```(?:cypher)?\s*|\s*```$/i', '', trim($raw));
+        $cypher = trim($cypher);
+
+        // 보안 가드레일: 읽기 전용 쿼리 확인
+        if (!preg_match('/^\s*(MATCH|OPTIONAL\s+MATCH|WITH|CALL)\b/i', $cypher)) {
+            error_log('Text-to-Cypher rejected non-read-only query: ' . substr($cypher, 0, 100));
+            return '';
+        }
+
+        // 파괴적 키워드 차단
+        if (preg_match('/\b(DELETE|DETACH|CREATE|MERGE|SET|REMOVE|DROP|LOAD\s+CSV)\b/i', $cypher)) {
+            error_log('Text-to-Cypher rejected unsafe mutation query: ' . substr($cypher, 0, 100));
+            return '';
+        }
+
+        // LIMIT 30 보장
+        if (!preg_match('/\bLIMIT\s+\d+\b/i', $cypher)) {
+            $cypher .= ' LIMIT 30';
+        }
+
+        return $cypher;
+    } catch (\Throwable $e) {
+        error_log('Text-to-Cypher generation failed: ' . $e->getMessage());
+        return '';
+    }
+}
+
+/**
+ * Text-to-Cypher 동적 쿼리 실행 및 결과 추출
+ */
+function execute_dynamic_cypher($client, string $cypher, array &$nodes, array &$edges, array &$evidences, array &$prefetch_names, array &$found_candidates): int {
+    if (empty($cypher)) return 0;
+
+    try {
+        $res = $client->run($cypher);
+    } catch (\Throwable $e) {
+        error_log('Neo4j dynamic cypher execution error: ' . $e->getMessage() . ' for query: ' . $cypher);
+        return 0;
+    }
+
+    $count = 0;
+    foreach ($res as $record) {
+        $count++;
+        $record_data = [];
+
+        // Record 컬럼 순회
+        foreach ($record as $key => $val) {
+            $record_data[$key] = $val;
+
+            // 만약 Node 객체라면
+            if (is_object($val) && method_exists($val, 'getProperties')) {
+                $labels = method_exists($val, 'getLabels') ? $val->getLabels() : [];
+                $nid = add_node_to_map($nodes, $val, $labels);
+                if ($nid) {
+                    $raw_id = $nodes[$nid]['raw_id'] ?? $nid;
+                    $found_candidates[(string)$raw_id] = 6.0;
+                    $prefetch_names[] = (string)$raw_id;
+                }
+            }
+            // 만약 Relationship 객체라면
+            elseif (is_object($val) && method_exists($val, 'getType')) {
+                $start = method_exists($val, 'getStartNodeElementId') ? $val->getStartNodeElementId() : null;
+                $end = method_exists($val, 'getEndNodeElementId') ? $val->getEndNodeElementId() : null;
+                $rel_type = $val->getType();
+                if ($start && $end) {
+                    $edges[] = [
+                        "from" => 'n' . substr(sha1((string)$start), 0, 12),
+                        "to" => 'n' . substr(sha1((string)$end), 0, 12),
+                        "type" => $rel_type,
+                        "label" => _get_rel_label($rel_type)
+                    ];
+                }
+            }
+        }
+
+        // Few-shot 예시처럼 Scalar Alias 컬럼들로 반환된 경우 추출
+        $person_name = '';
+        $event_name = '';
+        $place_name = '';
+        $date_str = '';
+        $desc_str = '';
+
+        foreach ($record_data as $k => $v) {
+            if (!is_scalar($v) || $v === null) continue;
+            $v_str = trim((string)$v);
+            if ($v_str === '') continue;
+
+            $k_lower = mb_strtolower((string)$k);
+            if (in_array($k_lower, ['연관인물', '인물명', '인물', 'person', 'actor'], true)) {
+                $person_name = $v_str;
+            } elseif (in_array($k_lower, ['사건이름', '사건명', '사건', 'event', 'title'], true)) {
+                $event_name = $v_str;
+            } elseif (in_array($k_lower, ['발생지역', '관련장소', '장소', '지역', 'place', 'loc', 'location'], true)) {
+                $place_name = $v_str;
+            } elseif (in_array($k_lower, ['발생일자', '발생일', '일자', '날짜', 'date'], true)) {
+                $date_str = $v_str;
+            } elseif (in_array($k_lower, ['인물설명', '사건설명', '설명', 'description', 'desc'], true)) {
+                $desc_str = $v_str;
+            }
+        }
+
+        $p_nid = null; $e_nid = null; $l_nid = null;
+
+        if ($person_name !== '') {
+            $p_nid = 'n' . substr(sha1($person_name), 0, 12);
+            if (!isset($nodes[$p_nid])) {
+                $nodes[$p_nid] = [
+                    "id" => $p_nid,
+                    "label" => "👤\n" . mb_substr($person_name, 0, 20),
+                    "raw_id" => $person_name,
+                    "labels" => ['Person', '인물'],
+                    "type" => '인물',
+                    "props" => ['명칭' => $person_name, 'name' => $person_name, 'description' => $desc_str],
+                    "aliases" => [],
+                    "color" => ["background" => "#2563EB", "border" => "#2563EB", "highlight" => ["background" => "#2563EB", "border" => "#333"]],
+                    "shape" => "box",
+                    "font" => ["color" => "#fff", "size" => 14, "multi" => true],
+                    "borderWidth" => 2, "shadow" => true
+                ];
+            }
+            $found_candidates[$person_name] = 6.0;
+            $prefetch_names[] = $person_name;
+        }
+
+        if ($event_name !== '') {
+            $e_nid = 'n' . substr(sha1($event_name), 0, 12);
+            if (!isset($nodes[$e_nid])) {
+                $nodes[$e_nid] = [
+                    "id" => $e_nid,
+                    "label" => "🔥\n" . mb_substr($event_name, 0, 20),
+                    "raw_id" => $event_name,
+                    "labels" => ['Event', '사건'],
+                    "type" => '사건',
+                    "props" => ['사건명' => $event_name, 'title' => $event_name, '날짜' => $date_str],
+                    "aliases" => [],
+                    "color" => ["background" => "#DC2626", "border" => "#DC2626", "highlight" => ["background" => "#DC2626", "border" => "#333"]],
+                    "shape" => "box",
+                    "font" => ["color" => "#fff", "size" => 14, "multi" => true],
+                    "borderWidth" => 2, "shadow" => true
+                ];
+            }
+            $found_candidates[$event_name] = 6.0;
+            $prefetch_names[] = $event_name;
+        }
+
+        if ($place_name !== '') {
+            $l_nid = 'n' . substr(sha1($place_name), 0, 12);
+            if (!isset($nodes[$l_nid])) {
+                $nodes[$l_nid] = [
+                    "id" => $l_nid,
+                    "label" => "📍\n" . mb_substr($place_name, 0, 20),
+                    "raw_id" => $place_name,
+                    "labels" => ['Place', '장소'],
+                    "type" => '장소',
+                    "props" => ['명칭' => $place_name, 'name' => $place_name],
+                    "aliases" => [],
+                    "color" => ["background" => "#16A34A", "border" => "#16A34A", "highlight" => ["background" => "#16A34A", "border" => "#333"]],
+                    "shape" => "box",
+                    "font" => ["color" => "#fff", "size" => 14, "multi" => true],
+                    "borderWidth" => 2, "shadow" => true
+                ];
+            }
+            $found_candidates[$place_name] = 5.0;
+            $prefetch_names[] = $place_name;
+        }
+
+        // 엣지 생성
+        if ($p_nid && $e_nid) {
+            $edges[] = ["from" => $p_nid, "to" => $e_nid, "type" => "P14_carried_out_by", "label" => docent_t("수행/참여", "Performed/Participated")];
+        }
+        if ($e_nid && $l_nid) {
+            $edges[] = ["from" => $e_nid, "to" => $l_nid, "type" => "P7_took_place_at", "label" => docent_t("발생 장소", "Location")];
+        }
+        if ($p_nid && $l_nid && !$e_nid) {
+            $edges[] = ["from" => $p_nid, "to" => $l_nid, "type" => "ACTIVATED_AT", "label" => docent_t("활동지", "Activity place")];
+        }
+
+        // 지식그래프 다중 홉 탐색 증거(Evidence) 기록 생성
+        $fact_parts = [];
+        if ($person_name) $fact_parts[] = "인물: {$person_name}";
+        if ($event_name) $fact_parts[] = "사건: {$event_name}";
+        if ($place_name) $fact_parts[] = "지역/장소: {$place_name}";
+        if ($date_str) $fact_parts[] = "일자: {$date_str}";
+        if ($desc_str) $fact_parts[] = "내용: {$desc_str}";
+
+        if (!empty($fact_parts)) {
+            $fact_title = $event_name ?: ($person_name ?: '지식그래프 탐색 결과');
+            $fact_summary = implode(" | ", $fact_parts);
+            add_fact_evidence($evidences, 'dynamic_cypher', [
+                $person_name ?: $fact_title,
+                $event_name ?: '',
+                $place_name ?: '',
+                $date_str ?: ''
+            ], [
+                "doc" => "[지식그래프 동적 탐색] {$fact_title}",
+                "quote" => $fact_summary,
+                "concept" => (string)($person_name ?: $event_name ?: '지식그래프'),
+                "text" => "3.1운동 지식그래프 온톨로지 연계 결과:\n" . implode("\n", $fact_parts)
+            ], 60);
+        }
+    }
+
+    return $count;
+}
+
+/**
  * [Action 2] Neo4j 지식망 및 증거 탐색
  */
 function handle_action_graph() {
     $term = docent_sanitize_text($_POST['term'] ?? '', 180, false);
+    $intent_ko = docent_sanitize_text($_POST['intent_ko'] ?? '', 200, false);
     $keywords = docent_decode_json_array('keywords', 20, 180);
     if (empty($keywords)) $keywords = [$term];
     $keywords = array_values(array_filter(array_map(fn($kw) => docent_sanitize_text($kw, 180, false), $keywords)));
     if (empty($keywords)) $keywords = [$term];
+    
+    $client = get_neo4j();
+    $nodes = [];
+    $edges = [];
+    $evidences = [];
+    $found_candidates = [];
+    $prefetch_names = [];
+
+    // ── 1. Text-to-Cypher 동적 쿼리 생성 및 실행 ──
+    $cypher_query_target = ($intent_ko !== '') ? $intent_ko : $term;
+    $generated_cypher = '';
+    $cypher_count = 0;
+
+    if ($cypher_query_target !== '') {
+        $generated_cypher = generate_text_to_cypher($cypher_query_target);
+        if ($generated_cypher !== '') {
+            $cypher_count = execute_dynamic_cypher($client, $generated_cypher, $nodes, $edges, $evidences, $prefetch_names, $found_candidates);
+        }
+    }
     
     static $graph_stopwords = [
         '시위', '만세', '만세시위', '만세운동', '독립만세', '독립운동', '운동',
@@ -128,12 +370,7 @@ function handle_action_graph() {
         $expanded_keywords = [$term];
     }
 
-    $client = get_neo4j();
-    $nodes = [];
-    $edges = [];
-    $evidences = [];
-    $found_candidates = [];
-
+    // ── 2. 동적 쿼리 결과가 적을 경우 Fulltext 인덱스 검색 보완/Fallback ──
     $search_query = "
         CALL db.index.fulltext.queryNodes('namesIndex', \$term) YIELD node, score
         WHERE score >= 2.0
@@ -150,94 +387,96 @@ function handle_action_graph() {
         LIMIT 15
     ";
 
-    foreach ($expanded_keywords as $kw) {
-        if (empty($kw)) continue;
-        $escaped_kw = docent_escape_lucene($kw);
-        if ($escaped_kw === '') continue;
-        try {
-            $res1 = $client->run($search_query, ['term' => $escaped_kw]);
-        } catch (\Throwable $fulltextError) {
-            $res1 = $client->run($fallback_search_query, ['term' => $kw]);
-        }
-        
-        foreach ($res1 as $record) {
-            $node = $record->get('n');
-            $labels_iterable = $record->get('labels');
-            
-            $nid = add_node_to_map($nodes, $node, $labels_iterable);
-            if (!$nid) continue;
-            $props = $nodes[$nid]['props'] ?? [];
-            $labels = $nodes[$nid]['labels'] ?? [];
-            $node_id = $nodes[$nid]['raw_id'] ?? 'unknown';
-            $rec_score = 1.0;
+    // 동적 쿼리에서 이미 풍부한 결과를 얻었더라도 키워드 노드들을 함께 보완 검색
+    if ($cypher_count < 5) {
+        foreach ($expanded_keywords as $kw) {
+            if (empty($kw)) continue;
+            $escaped_kw = docent_escape_lucene($kw);
+            if ($escaped_kw === '') continue;
             try {
-                if (isset($record['score'])) {
-                    $rec_score = (float)$record['score'];
-                } elseif (method_exists($record, 'get')) {
-                    $rec_score = (float)$record->get('score');
+                $res1 = $client->run($search_query, ['term' => $escaped_kw]);
+            } catch (\Throwable $fulltextError) {
+                $res1 = $client->run($fallback_search_query, ['term' => $kw]);
+            }
+            
+            foreach ($res1 as $record) {
+                $node = $record->get('n');
+                $labels_iterable = $record->get('labels');
+                
+                $nid = add_node_to_map($nodes, $node, $labels_iterable);
+                if (!$nid) continue;
+                $props = $nodes[$nid]['props'] ?? [];
+                $labels = $nodes[$nid]['labels'] ?? [];
+                $node_id = $nodes[$nid]['raw_id'] ?? 'unknown';
+                $rec_score = 1.0;
+                try {
+                    if (isset($record['score'])) {
+                        $rec_score = (float)$record['score'];
+                    } elseif (method_exists($record, 'get')) {
+                        $rec_score = (float)$record->get('score');
+                    }
+                } catch (\Throwable $scErr) {}
+                $found_candidates[(string)$node_id] = max($found_candidates[(string)$node_id] ?? 0.0, $rec_score);
+
+                if (in_array('Thesaurus', $labels)) {
+                    add_fact_evidence($evidences, 'node', [
+                        (string)$node_id,
+                        (string)($props['description'] ?? $props['설명'] ?? ''),
+                        (string)($props['category'] ?? '')
+                    ], [
+                        "doc" => "[시소러스] " . (string)($props['name'] ?? $node_id),
+                        "quote" => mb_substr((string)($props['description'] ?? $props['설명'] ?? ''), 0, 500),
+                        "concept" => (string)($props['name'] ?? $node_id),
+                        "text" => "분류: " . (string)($props['category'] ?? '') . "\n설명: " . mb_substr((string)($props['description'] ?? $props['설명'] ?? ''), 0, 1000)
+                    ], 40);
+                } elseif (in_array('인물', $labels) || in_array('Person', $labels)) {
+                    $p_name = (string)($props['명칭'] ?? $props['name'] ?? $node_id);
+                    $p_reading = (string)($props['한글독음'] ?? '');
+                    $p_desc = (string)($props['설명'] ?? $props['description'] ?? '');
+                    $title_str = ($p_reading && $p_name !== $p_reading) ? "{$p_name} ({$p_reading})" : $p_name;
+                    $text_lines = ["인물: {$title_str}"];
+                    if ($p_desc) $text_lines[] = "설명: {$p_desc}";
+                    if (!empty($props['본적'])) $text_lines[] = "본적: " . $props['본적'];
+                    if (!empty($props['주소'])) $text_lines[] = "주소: " . $props['주소'];
+                    if (!empty($props['신분'])) $text_lines[] = "신분: " . $props['신분'];
+
+                    add_fact_evidence($evidences, 'node', [
+                        (string)$node_id,
+                        $p_name,
+                        implode(' / ', $text_lines)
+                    ], [
+                        "doc" => "[인물] " . $title_str,
+                        "quote" => mb_substr($p_desc ?: $title_str, 0, 500),
+                        "concept" => (string)$node_id,
+                        "text" => implode("\n", $text_lines)
+                    ], 45);
+                } elseif (in_array('문건', $labels) || in_array('사료', $labels)) {
+                    add_fact_evidence($evidences, 'node', [
+                        (string)$node_id,
+                        (string)($props['제목'] ?? $props['사건명'] ?? ''),
+                        (string)($props['설명'] ?? '')
+                    ], [
+                        "doc" => (string)($props['제목'] ?? '제목 미상'),
+                        "quote" => mb_substr((string)($props['설명'] ?? ''), 0, 500),
+                        "concept" => (string)$node_id,
+                        "text" => mb_substr((string)($props['설명'] ?? ''), 0, 1000)
+                    ], 30);
+                } elseif (in_array('사건', $labels)) {
+                    add_fact_evidence($evidences, 'node', [
+                        (string)$node_id,
+                        (string)($props['제목'] ?? $props['사건명'] ?? ''),
+                        (string)($props['날짜'] ?? ''),
+                        (string)($props['설명'] ?? '')
+                    ], [
+                        "doc" => (string)($props['사건명'] ?? '사건명 미상'),
+                        "quote" => (string)($props['날짜'] ?? ''),
+                        "concept" => (string)$node_id,
+                        "text" => "날짜: " . ($props['날짜'] ?? '') . "\n설명: " . mb_substr((string)($props['설명'] ?? ''), 0, 1000)
+                    ], 30);
                 }
-            } catch (\Throwable $scErr) {}
-            $found_candidates[(string)$node_id] = max($found_candidates[(string)$node_id] ?? 0.0, $rec_score);
-
-            if (in_array('Thesaurus', $labels)) {
-                add_fact_evidence($evidences, 'node', [
-                    (string)$node_id,
-                    (string)($props['description'] ?? $props['설명'] ?? ''),
-                    (string)($props['category'] ?? '')
-                ], [
-                    "doc" => "[시소러스] " . (string)($props['name'] ?? $node_id),
-                    "quote" => mb_substr((string)($props['description'] ?? $props['설명'] ?? ''), 0, 500),
-                    "concept" => (string)($props['name'] ?? $node_id),
-                    "text" => "분류: " . (string)($props['category'] ?? '') . "\n설명: " . mb_substr((string)($props['description'] ?? $props['설명'] ?? ''), 0, 1000)
-                ], 40);
-            } elseif (in_array('인물', $labels) || in_array('Person', $labels)) {
-                $p_name = (string)($props['명칭'] ?? $props['name'] ?? $node_id);
-                $p_reading = (string)($props['한글독음'] ?? '');
-                $p_desc = (string)($props['설명'] ?? $props['description'] ?? '');
-                $title_str = ($p_reading && $p_name !== $p_reading) ? "{$p_name} ({$p_reading})" : $p_name;
-                $text_lines = ["인물: {$title_str}"];
-                if ($p_desc) $text_lines[] = "설명: {$p_desc}";
-                if (!empty($props['본적'])) $text_lines[] = "본적: " . $props['본적'];
-                if (!empty($props['주소'])) $text_lines[] = "주소: " . $props['주소'];
-                if (!empty($props['신분'])) $text_lines[] = "신분: " . $props['신분'];
-
-                add_fact_evidence($evidences, 'node', [
-                    (string)$node_id,
-                    $p_name,
-                    implode(' / ', $text_lines)
-                ], [
-                    "doc" => "[인물] " . $title_str,
-                    "quote" => mb_substr($p_desc ?: $title_str, 0, 500),
-                    "concept" => (string)$node_id,
-                    "text" => implode("\n", $text_lines)
-                ], 45);
-            } elseif (in_array('문건', $labels) || in_array('사료', $labels)) {
-                add_fact_evidence($evidences, 'node', [
-                    (string)$node_id,
-                    (string)($props['제목'] ?? $props['사건명'] ?? ''),
-                    (string)($props['설명'] ?? '')
-                ], [
-                    "doc" => (string)($props['제목'] ?? '제목 미상'),
-                    "quote" => mb_substr((string)($props['설명'] ?? ''), 0, 500),
-                    "concept" => (string)$node_id,
-                    "text" => mb_substr((string)($props['설명'] ?? ''), 0, 1000)
-                ], 30);
-            } elseif (in_array('사건', $labels)) {
-                add_fact_evidence($evidences, 'node', [
-                    (string)$node_id,
-                    (string)($props['제목'] ?? $props['사건명'] ?? ''),
-                    (string)($props['날짜'] ?? ''),
-                    (string)($props['설명'] ?? '')
-                ], [
-                    "doc" => (string)($props['사건명'] ?? '사건명 미상'),
-                    "quote" => (string)($props['날짜'] ?? ''),
-                    "concept" => (string)$node_id,
-                    "text" => "날짜: " . ($props['날짜'] ?? '') . "\n설명: " . mb_substr((string)($props['설명'] ?? ''), 0, 1000)
-                ], 30);
             }
         }
     }
-
     $found_ids = [];
     if (!empty($found_candidates)) {
         $top_score = max($found_candidates);
@@ -385,7 +624,10 @@ function handle_action_graph() {
             ];
         }, array_values($unique_edges)),
         "evidences" => array_values($evidences),
-        "prefetch_names" => $prefetch_names
+        "prefetch_names" => $prefetch_names,
+        "generated_cypher" => $generated_cypher,
+        "cypher_executed" => ($cypher_count > 0),
+        "cypher_record_count" => $cypher_count
     ], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
 }
 

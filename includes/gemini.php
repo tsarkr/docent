@@ -4,10 +4,10 @@
  */
 
 function get_gemini_candidate_models() {
-    $configured = trim((string)get_cfg('GEMINI_MODEL', 'gemini-3-flash-preview'));
+    $configured = trim((string)get_cfg('GEMINI_MODEL', 'gemini-3.5-flash'));
     $candidates = [
-        $configured, 'gemini-3-flash-preview', 'gemini-3.6-flash',
-        'gemini-3.1-flash-lite-preview', 'gemini-3.5-flash-lite',
+        $configured, 'gemini-3.5-flash', 'gemini-3.5-flash-lite',
+        'gemini-3.8-flash', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite',
     ];
     $clean = [];
     foreach ($candidates as $cand) {

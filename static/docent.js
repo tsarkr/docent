@@ -704,9 +704,25 @@
             const s2 = addStep('🔍',`지식그래프에서 "${kws}" 탐색 중...`);
             if ($reasoningTitle) $reasoningTitle.textContent='지식그래프 사료 탐색 중...';
             const keywords = analysis.keywords||analysis.search_keywords||[term];
-            const gd = await api('graph',{term, keywords:JSON.stringify(keywords)});
+            const gd = await api('graph',{
+                term, 
+                keywords: JSON.stringify(keywords),
+                intent_ko: analysis.analyzed_intent_ko || ''
+            });
             lastEvidences=gd.evidences||[]; currentNodes=gd.nodes||[]; currentEdges=gd.edges||[];
-            doneStep(s2,'✅',`그래프 탐색 완료 — 노드 ${currentNodes.length}개, 관계 ${currentEdges.length}개, 사료 ${lastEvidences.length}건`);
+
+            if (gd.generated_cypher) {
+                const cypherBadge = gd.cypher_executed 
+                    ? `[Text-to-Cypher] 동적 쿼리 생성 및 실행 성공 (${gd.cypher_record_count || 0}건 반환)`
+                    : `[Text-to-Cypher] 동적 쿼리 생성 완료`;
+                addStep('🕸️', `${cypherBadge} — ${gd.generated_cypher}`, 'done');
+                logSystem(`[Text-to-Cypher] ${gd.generated_cypher} (매칭 ${gd.cypher_record_count || 0}건)`);
+            }
+
+            const graphDoneMsg = (gd.cypher_executed && gd.cypher_record_count > 0)
+                ? `동적 Cypher 탐색 완료 (${gd.cypher_record_count}건 매칭) — 노드 ${currentNodes.length}개, 관계 ${currentEdges.length}개, 사료 ${lastEvidences.length}건`
+                : `그래프 탐색 완료 — 노드 ${currentNodes.length}개, 관계 ${currentEdges.length}개, 사료 ${lastEvidences.length}건`;
+            doneStep(s2,'✅', graphDoneMsg);
             logSystem(`노드 ${currentNodes.length}, 엣지 ${currentEdges.length}, 사료 ${lastEvidences.length}`);
 
             if (currentNodes.length>0) { 
