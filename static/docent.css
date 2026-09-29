@@ -1,0 +1,100 @@
+/* static/docent.css — 3.1 운동 역사 도슨트 스타일시트 */
+
+::-webkit-scrollbar {
+    width: 6px;
+}
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+::-webkit-scrollbar-thumb {
+    background: #d1d5db;
+    border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: #9ca3af;
+}
+
+/* ━━━ Markdown Typography ━━━ */
+.docent-prose h1 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin-top: 1.5rem;
+    margin-bottom: 0.75rem;
+    color: #1a1a1f;
+    border-bottom: 2px solid #C8102E20;
+    padding-bottom: 0.5rem;
+}
+.docent-prose h2 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    margin-top: 1.25rem;
+    margin-bottom: 0.5rem;
+    color: #2c2c33;
+}
+.docent-prose h3 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-top: 1rem;
+    margin-bottom: 0.5rem;
+    color: #484855;
+}
+.docent-prose p {
+    margin-bottom: 0.875rem;
+}
+.docent-prose ul, .docent-prose ol {
+    padding-left: 1.25rem;
+    margin-bottom: 0.875rem;
+}
+.docent-prose li {
+    margin-bottom: 0.25rem;
+}
+.docent-prose strong {
+    color: #1a1a1f;
+}
+.docent-prose blockquote {
+    border-left: 3px solid #C8102E;
+    padding-left: 1rem;
+    margin: 1rem 0;
+    color: #585868;
+    font-style: italic;
+}
+.docent-prose table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.875rem;
+}
+.docent-prose th, .docent-prose td {
+    border: 1px solid #e5e7eb;
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+}
+.docent-prose th {
+    background: #f9fafb;
+    font-weight: 600;
+}
+
+/* ━━━ Interactive Components & Animations ━━━ */
+.typing-cursor {
+    animation: blink 0.8s infinite;
+    display: inline-block;
+    font-weight: bold;
+    margin-left: 2px;
+    color: #C8102E;
+}
+.suggestion-chip {
+    transition: all 0.2s ease;
+}
+.suggestion-chip:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+}
+.reasoning-step {
+    transition: all 0.3s ease;
+}
+.source-badge {
+    transition: all 0.2s ease;
+}
+.source-badge:hover {
+    transform: scale(1.05);
+}
