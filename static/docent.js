@@ -149,6 +149,10 @@
 
     /* ── 패턴 사전 ── */
     const GRAPH_PATTERNS = [
+        /(?:만세운동|만세시위|독립만세|만세|시위|사건|의거|거사)/,
+        /(?:인쇄|배포|전파|전달|작성|서명)/,
+        /(?:주도|관여|가담|참여|참가)/,
+        /[가-힣]{2,6}의\s+[가-힣]{2,6}/, // '유관순의 아우내', '손병희의 독립선언' 등 관계 표현
         /(?:와|과)\s*(?:함께|같이|교류|연대|협력)/,
         /(?:연결|연관|관련|관계|연루|관계된|연관된)\s*(?:된|되는|사람|인물|단체)/,
         /(?:제자|스승|동지|동료|부하|상관|후배|선배)\s*(?:들|의|가|은|는)/,
@@ -230,17 +234,18 @@
 
     const KNOWN_ENTITIES = [
         '손병희','이종일','최린','최남선','한용운','이승훈','유관순','김구',
-        '이동휘','안창호','이광수','박은식','김마리아','이희영','유중권',
+        '이동휘','안창호','이광수','박은식','김마리아','이희영','유중권','유중무','이소제',
+        '조인원','김구응','홍일선',
         '박인호','오세창','권동진','이종훈','홍기조','나용환','이갑성',
         '길선주','양전백','이필주','김병조','백용성','정춘수','김창준',
         '신석구','오화영','임예환','홍병기','박희도','나인협','한규설',
         '이완용','하세가와','사이토','우가키',
-        '보성사','태화관','탑골공원','서대문형무소','아우내장터','천안',
-        '수원','제암리','사강리','평양','대구','광주','원산','의주',
+        '보성사','태화관','탑골공원','서대문형무소','아우내','아우내 장터','아우내장터','병천','천안',
+        '수원','제암리','사강리','화성','갈전면','평양','대구','광주','원산','의주',
         '파고다공원','독립문','경성','종로',
         '천도교','신한청년당','의열단','대한민국임시정부','기독교','불교',
         '조선총독부','헌병경찰',
-        '독립선언서','2·8독립선언','기미독립선언서'
+        '독립선언서','독립선언','만세운동','만세시위','3·1운동','3.1운동','2·8독립선언','기미독립선언서'
     ];
 
     /**
@@ -270,9 +275,17 @@
         for (const ent of KNOWN_ENTITIES) {
             if (q.includes(ent)) extractedEntities.push(ent);
         }
-        const koNameMatches = q.match(/[가-힣]{2,6}/g) || [];
 
-        if (extractedEntities.length >= 2) graphScore += 2;
+        // 조사 및 특수문자 제거 후 2~6자 고유명사 토큰 추출
+        const cleanTokens = q.split(/[\s,·\.\?!~]+/g)
+            .map(t => t.replace(/(?:의|은|는|이|가|을|를|과|와|도|에서|에게|으로|로|에|란|이란)$/u, '').trim())
+            .filter(t => t.length >= 2 && !['무엇', '어떤', '누구', '알려줘', '설명해줘', '있습니까', '있는가', '관련'].includes(t));
+
+        // 복수 개체 감지 또는 인물+사건/장소 결합 시 GRAPH 강력 가산
+        if (extractedEntities.length >= 2) graphScore += 3;
+        if (extractedEntities.length >= 1 && /(?:만세운동|시위|사건|참여|주도|관여|배경|거사|의거|인쇄|배포)/.test(q)) {
+            graphScore += 4;
+        }
 
         for (const rv of RELATION_VERBS_KO) {
             if (q.includes(rv)) { graphScore += 2; break; }
@@ -285,11 +298,11 @@
         if (hasAttributeWord && extractedEntities.length <= 1) fulltextScore += 2;
 
         const qLen = q.replace(/\s/g, '').length;
-        if (qLen <= 12) fulltextScore += 1;
+        if (qLen <= 6 && extractedEntities.length <= 1) fulltextScore += 2;
         else if (qLen >= 30) vectorScore += 1;
 
         if (/[가-힣]+(?:와|과|하고)\s*[가-힣]+/.test(q) && extractedEntities.length >= 1) {
-            graphScore += 1;
+            graphScore += 2;
         }
 
         if (vectorScore > 0 && fulltextScore > 0) {
@@ -299,9 +312,7 @@
             }
         }
 
-        const keywords = extractedEntities.length > 0
-            ? [...new Set(extractedEntities)]
-            : koNameMatches.filter(m => m.length >= 2).slice(0, 5);
+        const keywords = [...new Set([...extractedEntities, ...cleanTokens])].slice(0, 5);
 
         let intent, reason;
         if (graphScore > vectorScore && graphScore > fulltextScore) {
@@ -315,7 +326,7 @@
             reason = buildReason('FULLTEXT', q, extractedEntities);
         }
 
-        return { intent, keywords, reason };
+        return { intent, keywords: keywords.length > 0 ? keywords : [q], reason };
     }
 
     function buildReason(intent, q, entities) {
@@ -681,52 +692,46 @@
             addStep(strategyMeta.icon, `[Intent Router] 검색 전략 분류: ${strategyMeta.label.toUpperCase()} — ${intentResult.reason}`, 'done');
             logSystem(`[Router] intent=${intentResult.intent}, keywords=[${intentResult.keywords.join(',')}], reason=${intentResult.reason}`);
 
-            /* 1. Analyze (백엔드 Gemini 분석 — search_strategy 힌트 전달) */
-            const s1 = addStep('💡','다국어 질의 의도 분석 및 DB 키워드 매핑 중...');
-            if ($reasoningTitle) $reasoningTitle.textContent='AI가 질의를 분석하고 있습니다...';
-            let analysis;
-            try {
-                const analyzeCall = api('analyze',{term, search_strategy: intentResult.intent});
-                const analyzeTimeout = new Promise((_, reject) => setTimeout(() => reject(new Error('응답 지연(4초 초과)')), 4000));
-                analysis = await Promise.race([analyzeCall, analyzeTimeout]);
-            } catch (analyzeErr) {
-                logSystem(`⚠️ analyze 건너뜀 (${analyzeErr.message}) → 클라이언트 Intent Router로 즉시 복구`);
-                analysis = {
-                    intent_type: intentResult.intent,
-                    search_keywords: (intentResult.keywords && intentResult.keywords.length) ? intentResult.keywords : [term],
-                    analyzed_intent_ko: term,
-                    response_language: detectInputLanguage(term) || 'ko',
-                    intent: intentResult.intent,
-                    keywords: (intentResult.keywords && intentResult.keywords.length) ? intentResult.keywords : [term],
-                    focus: '종합',
-                    explanation: term
-                };
-            }
-            analysisResult = analysis;
-            analysisResult._clientIntent = intentResult;
-            
-            const detectedLang = analysis.response_language || detectInputLanguage(term) || 'ko';
+            const kws = (intentResult.keywords && intentResult.keywords.length > 0) ? intentResult.keywords : [term];
+            const detectedLang = detectInputLanguage(term) || 'ko';
             const langLabels = { ko: '🇰🇷 한국어 (Korean)', en: '🇺🇸 English (영문)', ja: '🇯🇵 日本語 (Japanese)', zh: '🇨🇳 中文 (Chinese)' };
             const detectedName = langLabels[detectedLang] || `🌐 ${detectedLang.toUpperCase()}`;
-            
-            doneStep(s1, '✅', `의도 분석 완료 — ${analysis.analyzed_intent_ko||analysis.explanation||'완료'}`);
-            addStep(strategyMeta.icon, `[검색 전략] ${strategyMeta.label} (${intentResult.intent}) → 키워드: ${intentResult.keywords.join(', ')||term}`, 'done');
-            addStep('🌐', `[다국어 감지] 질의 언어 감지: ${detectedName} → 한국어 지식그래프 교차 탐색 후 ${detectedName}로 해설 작성`, 'done');
+            addStep('🌐', `[다국어 감지] 질의 언어 감지: ${detectedName} → 한국어 지식그래프 교차 탐색`, 'done');
             updateExplainLangBadge(detectedLang);
 
-            const kws = (analysis.search_keywords||analysis.keywords||[term]).join(', ');
-            logSystem(`의도: ${analysis.intent_type||analysis.intent}, 전략: ${intentResult.intent}, KW: ${kws}, 감지언어: ${detectedLang}`);
-
-            /* 2. Graph */
-            const s2 = addStep('🔍',`지식그래프에서 "${kws}" 탐색 중...`);
+            /* 1. Graph (Neo4j 지식그래프 질의를 지연 없이 즉시 발송!) */
+            const s2 = addStep('🔍',`지식그래프에서 "${kws.join(', ')}" 탐색 중...`);
             if ($reasoningTitle) $reasoningTitle.textContent='지식그래프 사료 탐색 중...';
-            const keywords = analysis.keywords||analysis.search_keywords||[term];
+            logSystem(`의도: ${intentResult.intent}, KW: ${kws.join(', ')}, 감지언어: ${detectedLang}`);
+
+            // 백엔드 AI Analyze는 병렬(Background)로 실행하여 Neo4j 질의를 블로킹하지 않음
+            const analyzePromise = api('analyze',{term, search_strategy: intentResult.intent}).catch(err => {
+                logSystem(`⚠️ analyze 비동기 알림: ${err.message}`);
+                return null;
+            });
+
+            // Neo4j 직접 질의를 즉시 실행
             const gd = await api('graph',{
                 term, 
-                keywords: JSON.stringify(keywords),
-                intent_ko: analysis.analyzed_intent_ko || ''
+                keywords: JSON.stringify(kws),
+                intent_ko: term,
+                search_strategy: intentResult.intent
             });
             lastEvidences=gd.evidences||[]; currentNodes=gd.nodes||[]; currentEdges=gd.edges||[];
+
+            // analyze 응답이 있으면 병합, 없으면 router 결과 활용
+            const analysis = (await analyzePromise) || {
+                intent_type: intentResult.intent,
+                search_keywords: kws,
+                analyzed_intent_ko: term,
+                response_language: detectedLang,
+                intent: intentResult.intent,
+                keywords: kws,
+                focus: '종합',
+                explanation: term
+            };
+            analysisResult = analysis;
+            analysisResult._clientIntent = intentResult;
 
             if (gd.generated_cypher) {
                 const cypherBadge = gd.cypher_executed 
