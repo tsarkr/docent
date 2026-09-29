@@ -152,7 +152,7 @@
         /(?:만세운동|만세시위|독립만세|만세|시위|사건|의거|거사)/,
         /(?:인쇄|배포|전파|전달|작성|서명)/,
         /(?:주도|관여|가담|참여|참가)/,
-        /[가-힣]{2,6}의\s+[가-힣]{2,6}/, // '유관순의 아우내', '손병희의 독립선언' 등 관계 표현
+        /[가-힣]{2,6}의\s+(?:아우내|태화관|탑골공원|보성사|서대문형무소|독립선언|만세시위|만세운동|동지|제자|스승|가족|관계)/, // 관계 표현
         /(?:와|과)\s*(?:함께|같이|교류|연대|협력)/,
         /(?:연결|연관|관련|관계|연루|관계된|연관된)\s*(?:된|되는|사람|인물|단체)/,
         /(?:제자|스승|동지|동료|부하|상관|후배|선배)\s*(?:들|의|가|은|는)/,
@@ -206,7 +206,7 @@
         /(?:누구|누가|누군)\s*(?:야|인가|입니까|예요|이에요)/,
         /(?:뭐야|뭔가|무엇인가|무엇이|무엇입니까)/,
         /(?:어디|어느\s*곳|어디에|위치)\s*(?:야|인가|에\s*있|입니까)/,
-        /(?:직업|직함|본적|주소|신분|나이|생년|출생|고향|별명|이칭|호)\s*(?:이|가|은|는)?\s*(?:뭐|무엇|어떻|알려)/,
+        /(?:직업|직함|본적|주소|신분|나이|생년|출생|고향|별명|이칭|호)\s*(?:이|가|은|는)?\s*(?:뭐|무엇|어떻|알려|\?|$)/,
         /(?:언제)\s*(?:태어|출생|사망|순국|체포|석방)/,
         /(?:^[가-힣]{2,6})\s*(?:이\s*누구|이\s*뭐|은\s*어디|는\s*어디|에\s*대해)/,
         /(?:^who\s+(?:is|was))\s+/i,
@@ -257,6 +257,48 @@
         }
 
         const q = text.trim();
+        const extractedEntities = [];
+        for (const ent of KNOWN_ENTITIES) {
+            if (q.includes(ent)) extractedEntities.push(ent);
+        }
+
+        // 조사 및 특수문자 제거 후 2~6자 고유명사 토큰 추출
+        const cleanTokens = q.split(/[\s,·\.\?!~]+/g)
+            .map(t => t.replace(/(?:의|은|는|이|가|을|를|과|와|도|에서|에게|으로|로|에|란|이란)$/u, '').trim())
+            .filter(t => t.length >= 2 && !['무엇', '어떤', '누구', '알려줘', '설명해줘', '있습니까', '있는가', '관련'].includes(t));
+
+        const keywords = [...new Set([...extractedEntities, ...cleanTokens])].slice(0, 5);
+
+        // ── [특수 규칙] 인물·사건의 이동(A에서 B로) 및 인과/전개 관계 감지 시 무조건 GRAPH 우선 분류 ──
+        // 질문 끝에 '설명해 줘'나 '서술해 줘'가 있더라도, 내용상 인물·사건의 이동이나 인과관계를 묻는다면 무조건 GRAPH로 강제 우선 분류
+        const hasTransitionOrCausality = (
+            // 1. A에서 B로 이동/경로/전파/확산
+            /(?:에서|부터)\s+.*(?:로|으로|까지|을\s*거쳐|를\s*거쳐|향해)/.test(q) ||
+            /(?:이동|전파|확산|파급|피신|망명|진출|경유|거쳐|거점으로|파견|밀파|귀향|상경|하향|탈출|내려가|올라가|떠나)/.test(q) ||
+            /(?:다른|타)\s*(?:지역|도시|지방|학교|단체|조직)/.test(q) ||
+            /(?:경로|루트|행적|이동\s*과정|전달\s*과정|전파\s*과정|확산\s*과정)/.test(q) ||
+
+            // 2. 인과관계 및 사건 연쇄 (A 이후 B, 계기로 이어짐 등)
+            /(?:인과|인과관계|인과성|연쇄|도화선|발단|계기|영향을\s*받아|이어져|이어진|이어지는|계승|발전|발생\s*과정)/.test(q) ||
+            /(?:이후|직후|그\s*뒤|그\s*후|후에)\s+.*(?:만세|시위|운동|사건|체포|결성|수립|조직|주도|참여|발발|전개|일어|퍼져)/.test(q) ||
+            /(?:관여|인쇄|배포|주도|참여|가담|지휘|서명|체포|순국|투옥).*(?:이후|그\s*뒤|그\s*후|다른|거점|만세|시위|사건|지역|계기)/.test(q) ||
+            /(?:로|으로)\s*(?:인해|말미암아|이어진|연결된|확대된|촉발된)/.test(q) ||
+            /(?:전개|촉발|파급|확산)\s*(?:과정|경위|전말)/.test(q) ||
+
+            // 3. 복수 개체 간 관계 또는 특정 인물+사건 참여/전개
+            (extractedEntities.length >= 2) ||
+            (extractedEntities.length >= 1 && /(?:만세운동|만세시위|독립만세|시위|의거|거사)/.test(q) && /(?:주도|참여|관여|가담|이끈|이끌었|체포|순국|과정|전개|경위)/.test(q))
+        );
+
+        // 이동/인과관계 질의는 질문 끝의 '설명해 줘' / '서술해 줘' 유무와 무관하게 무조건 GRAPH 우선 분류
+        if (hasTransitionOrCausality) {
+            return {
+                intent: 'GRAPH',
+                keywords: keywords.length > 0 ? keywords : [q],
+                reason: buildReason('GRAPH', q, extractedEntities, true)
+            };
+        }
+
         let graphScore = 0;
         let vectorScore = 0;
         let fulltextScore = 0;
@@ -271,21 +313,8 @@
             if (pat.test(q)) { fulltextScore += 3; break; }
         }
 
-        const extractedEntities = [];
-        for (const ent of KNOWN_ENTITIES) {
-            if (q.includes(ent)) extractedEntities.push(ent);
-        }
-
-        // 조사 및 특수문자 제거 후 2~6자 고유명사 토큰 추출
-        const cleanTokens = q.split(/[\s,·\.\?!~]+/g)
-            .map(t => t.replace(/(?:의|은|는|이|가|을|를|과|와|도|에서|에게|으로|로|에|란|이란)$/u, '').trim())
-            .filter(t => t.length >= 2 && !['무엇', '어떤', '누구', '알려줘', '설명해줘', '있습니까', '있는가', '관련'].includes(t));
-
-        // 복수 개체 감지 또는 인물+사건/장소 결합 시 GRAPH 강력 가산
+        // 복수 개체 감지 시 GRAPH 가산
         if (extractedEntities.length >= 2) graphScore += 3;
-        if (extractedEntities.length >= 1 && /(?:만세운동|시위|사건|참여|주도|관여|배경|거사|의거|인쇄|배포)/.test(q)) {
-            graphScore += 4;
-        }
 
         for (const rv of RELATION_VERBS_KO) {
             if (q.includes(rv)) { graphScore += 2; break; }
@@ -305,34 +334,35 @@
             graphScore += 2;
         }
 
-        if (vectorScore > 0 && fulltextScore > 0) {
+        if (vectorScore > 0) {
             const deepContextWords = ['핵심','사상','의의','의미','배경','원인','영향','특징','정신','이념','노선','본질','취지'];
             for (const dcw of deepContextWords) {
                 if (q.includes(dcw)) { vectorScore += 2; break; }
             }
         }
 
-        const keywords = [...new Set([...extractedEntities, ...cleanTokens])].slice(0, 5);
-
         let intent, reason;
         if (graphScore > vectorScore && graphScore > fulltextScore) {
             intent = 'GRAPH';
-            reason = buildReason('GRAPH', q, extractedEntities);
+            reason = buildReason('GRAPH', q, extractedEntities, false);
         } else if (vectorScore > fulltextScore) {
             intent = 'VECTOR';
-            reason = buildReason('VECTOR', q, extractedEntities);
+            reason = buildReason('VECTOR', q, extractedEntities, false);
         } else {
             intent = 'FULLTEXT';
-            reason = buildReason('FULLTEXT', q, extractedEntities);
+            reason = buildReason('FULLTEXT', q, extractedEntities, false);
         }
 
         return { intent, keywords: keywords.length > 0 ? keywords : [q], reason };
     }
 
-    function buildReason(intent, q, entities) {
+    function buildReason(intent, q, entities, isTransition = false) {
         const entStr = entities.length > 0 ? `[${entities.join(', ')}]` : '';
         switch (intent) {
             case 'GRAPH':
+                if (isTransition || /(?:에서|부터)\s+.*(?:로|으로|까지)/.test(q) || /(?:이동|전파|확산|이후|다른\s*지역)/.test(q)) {
+                    return `인물·사건의 이동 경로 및 인과관계(A에서 B로) 추적이 필요한 다중 홉 관계 탐색 질의입니다.`;
+                }
                 if (entities.length >= 2) return `복수 개체${entStr} 간의 관계 추적 또는 다중 홉 탐색이 필요한 질의입니다.`;
                 return `개체 간 연쇄적 관계 또는 연루자/인과 추적이 필요한 복합 추론 질의입니다.`;
             case 'VECTOR':
