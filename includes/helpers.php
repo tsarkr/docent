@@ -276,7 +276,7 @@ function build_budgeted_evidence_context($evidences, $lang, $max_items, $min_cha
     if (is_bool($lang)) $lang = $lang ? 'en' : 'ko';
     $lines = []; $used_chars = 0;
 
-    foreach ((array)$evidences as $idx => $e) {
+    foreach (array_values((array)$evidences) as $idx => $e) {
         if (count($lines) >= $max_items) break;
         if (($total_char_budget - $used_chars) < ($min_chars + 120)) break;
 
@@ -331,7 +331,7 @@ function build_budgeted_pg_context($pg_texts, $lang, $max_items, $min_chars, $ma
     if (is_bool($lang)) $lang = $lang ? 'en' : 'ko';
     $lines = []; $used_chars = 0;
 
-    foreach ((array)$pg_texts as $idx => $t) {
+    foreach (array_values((array)$pg_texts) as $idx => $t) {
         if (count($lines) >= $max_items) break;
         if (($total_char_budget - $used_chars) < ($min_chars + 120)) break;
 

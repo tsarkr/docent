@@ -3,11 +3,18 @@
  * includes/gemini.php — Gemini API 동기/스트리밍 호출
  */
 
+require_once __DIR__ . '/security.php';
+
 function get_gemini_candidate_models() {
-    $configured = trim((string)get_cfg('GEMINI_MODEL', 'gemini-3.5-flash'));
+    $configured = trim((string)get_cfg('GEMINI_MODEL', 'gemini-flash-lite-latest'));
     $candidates = [
-        $configured, 'gemini-3.5-flash', 'gemini-3.5-flash-lite',
-        'gemini-3.8-flash', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite',
+        $configured,
+        'gemini-flash-lite-latest',
+        'gemini-3.5-flash-lite',
+        'gemini-3.1-flash-lite',
+        'gemini-3.6-flash',
+        'gemini-flash-latest',
+        'gemini-3.5-flash',
     ];
     $clean = [];
     foreach ($candidates as $cand) {
@@ -16,13 +23,13 @@ function get_gemini_candidate_models() {
             $clean[] = $cand;
         }
     }
-    return !empty($clean) ? $clean : ['gemini-3-flash-preview'];
+    return !empty($clean) ? $clean : ['gemini-flash-lite-latest'];
 }
 
 /**
  * 동기식 Gemini API 호출 (model fallback 포함)
  */
-function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature = null, $top_p = null, $timeout = 25) {
+function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature = null, $top_p = null, $timeout = 60) {
     $api_key = get_cfg('GEMINI_API_KEY') ?: get_cfg('API_KEY');
     if (!$api_key) return $is_json ? '{"explanation":"API Key missing"}' : docent_t("API Key가 설정되지 않았습니다.", "API key is not configured.");
 
@@ -39,8 +46,8 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
             CURLOPT_POST => true,
             CURLOPT_POSTFIELDS => $post_json,
             CURLOPT_HTTPHEADER => ["Content-Type: application/json", "x-goog-api-key: {$api_key}"],
-            CURLOPT_CONNECTTIMEOUT => 6,
-            CURLOPT_TIMEOUT => max(5, (int)$timeout),
+            CURLOPT_CONNECTTIMEOUT => 10,
+            CURLOPT_TIMEOUT => max(10, (int)$timeout),
             CURLOPT_SSL_VERIFYPEER => true,
             CURLOPT_SSL_VERIFYHOST => 2,
         ]);
@@ -57,6 +64,9 @@ function call_gemini($msgs, $is_json = false, $max_tokens = null, $temperature =
             }
             $last_error_message = $provider_message !== '' ? "Gemini 오류 ({$model}): {$provider_message}" : "AI 요청 실패 ({$model}, HTTP {$http_code}, cURL {$curl_errno})";
             error_log(sprintf('Gemini model %s failed: HTTP %d, cURL %d — trying next candidate', $model, $http_code, $curl_errno));
+            if ($http_code === 429 || $http_code === 503) {
+                usleep(1200000); // 1.2초 백오프 후 다음 모델 시도
+            }
             continue;
         }
 

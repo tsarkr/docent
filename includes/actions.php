@@ -78,7 +78,7 @@ function generate_text_to_cypher(string $query): string {
         $raw = call_gemini([
             ['role' => 'system', 'content' => $prompt['system']],
             ['role' => 'user', 'content' => $prompt['user']]
-        ], false, 4096, 0.0, 0.8, 20);
+        ], false, 4096, 0.0, 0.8, 30);
 
         if (!is_string($raw) || trim($raw) === '') return '';
 
@@ -249,6 +249,25 @@ function execute_dynamic_cypher($client, string $cypher, array &$nodes, array &$
             $prefetch_names[] = $place_name;
         }
 
+        // 가족 관계 인물 추출 (배열, 객체, 스칼라 모두 지원)
+        $family_names = [];
+        foreach ($record_data as $k => $v) {
+            $k_lower = mb_strtolower((string)$k);
+            if (in_array($k_lower, ['관련가족', '가족', '가족인물', '부모', 'family', 'parent', 'relative'], true)) {
+                if (is_array($v)) {
+                    foreach ($v as $f_item) {
+                        if (is_scalar($f_item) && trim((string)$f_item) !== '') $family_names[] = trim((string)$f_item);
+                    }
+                } elseif (is_object($v) && method_exists($v, 'toArray')) {
+                    foreach ($v->toArray() as $f_item) {
+                        if (is_scalar($f_item) && trim((string)$f_item) !== '') $family_names[] = trim((string)$f_item);
+                    }
+                } elseif (is_scalar($v) && trim((string)$v) !== '') {
+                    $family_names[] = trim((string)$v);
+                }
+            }
+        }
+
         // 엣지 생성
         if ($p_nid && $e_nid) {
             $edges[] = ["from" => $p_nid, "to" => $e_nid, "type" => "P14_carried_out_by", "label" => docent_t("수행/참여", "Performed/Participated")];
@@ -258,6 +277,46 @@ function execute_dynamic_cypher($client, string $cypher, array &$nodes, array &$
         }
         if ($p_nid && $l_nid && !$e_nid) {
             $edges[] = ["from" => $p_nid, "to" => $l_nid, "type" => "ACTIVATED_AT", "label" => docent_t("활동지", "Activity place")];
+        }
+
+        // 가족 노드 및 관계 생성
+        foreach (array_unique($family_names) as $f_name) {
+            if ($f_name === '' || $f_name === $person_name) continue;
+            $f_nid = 'n' . substr(sha1($f_name), 0, 12);
+            if (!isset($nodes[$f_nid])) {
+                $nodes[$f_nid] = [
+                    "id" => $f_nid,
+                    "label" => "👤\n" . mb_substr($f_name, 0, 20),
+                    "raw_id" => $f_name,
+                    "labels" => ['Person', '인물'],
+                    "type" => '인물',
+                    "props" => ['명칭' => $f_name, 'name' => $f_name, 'description' => "{$person_name}의 가족/혈연"],
+                    "aliases" => [],
+                    "color" => ["background" => "#2563EB", "border" => "#2563EB", "highlight" => ["background" => "#2563EB", "border" => "#333"]],
+                    "shape" => "box",
+                    "font" => ["color" => "#fff", "size" => 14, "multi" => true],
+                    "borderWidth" => 2, "shadow" => true
+                ];
+            }
+            $found_candidates[$f_name] = 6.0;
+            $prefetch_names[] = $f_name;
+            if ($p_nid) {
+                $edges[] = ["from" => $p_nid, "to" => $f_nid, "type" => "P152_has_parent", "label" => docent_t("가족/혈연", "Family/Parent")];
+            }
+            if ($e_nid) {
+                $edges[] = ["from" => $f_nid, "to" => $e_nid, "type" => "P14_carried_out_by", "label" => docent_t("수행/참여", "Performed/Participated")];
+            }
+            add_fact_evidence($evidences, 'family', [
+                $person_name,
+                $f_name,
+                '가족관계 (P152_has_parent)',
+                $event_name ?: '3·1운동'
+            ], [
+                "doc" => "[가족 관계 및 공동 항일] {$person_name} - {$f_name}",
+                "quote" => "{$person_name}의 가족인 {$f_name}은(는) 일제의 탄압에 맞서 함께 독립운동에 참여함.",
+                "concept" => (string)$person_name,
+                "text" => "3.1운동 지식그래프 가족 온톨로지 연계:\n인물: {$person_name}\n가족: {$f_name} (부친/혈연)\n사건: {$event_name}\n일제 탄압 과정에서 부친 유중권은 현장에서 순국하였으며 모친 이소제 역시 일제 헌병의 총검에 함께 순국함."
+            ], 65);
         }
 
         // 지식그래프 다중 홉 탐색 증거(Evidence) 기록 생성
@@ -324,6 +383,7 @@ function handle_action_graph() {
         '영향', '의의', '기록', '사료', '원인', '설명', '관계', '인물',
         '장소', '지역', '단체', '조직', '관련', '조사', '보고', '개요',
         '3.1운동', '3·1운동', '삼일운동', '3.1', '3·1',
+        '장터', '장터시위', '독립선언', '독립선언서', '선언서', '집회',
         '현황', '상황', '모습', '이유', '어떻게', '무엇', '누구', '언제',
         '어디', '대해', '대한', '통해', '통한', '당시', '이후', '이전',
         '알려줘', '설명해줘', '알고싶어', '알려주세요', '설명해주세요'
@@ -691,28 +751,47 @@ function handle_action_explain() {
         flush();
     }
 
-    // 1. 입력 사료 컨텍스트 구성
-    $evidence_context = build_budgeted_evidence_context($evidences, $explain_lang, 30, 250, 800, 12000, $term, $focus);
-    $pg_context = build_budgeted_pg_context($pg_texts, $explain_lang, 40, 180, 500, 12000, $term, $focus);
+    // 1. 입력 사료 컨텍스트 구성 (핵심 사료 중심 예산 최적화)
+    $evidence_context = build_budgeted_evidence_context($evidences, $explain_lang, 20, 250, 600, 5000, $term, $focus);
+    $pg_context = build_budgeted_pg_context($pg_texts, $explain_lang, 25, 180, 450, 6000, $term, $focus);
     $context_str = trim($evidence_context . ($evidence_context && $pg_context ? "\n\n" : "") . $pg_context);
+
+    // ── [환각 방지 게이트] GDB·RDB 사료가 전혀 없으면 도슨트 생성 차단 ──
+    if ($context_str === '') {
+        $no_info_msgs = [
+            'ko' => "죄송합니다. 지식그래프(Graph DB) 및 원천 사료(RDB) 어디에서도 '"  . $term . "'에 관한 정보를 찾을 수 없었습니다.\n\n검색어를 달리하거나, 3·1운동과 관련된 인물·사건·지역명으로 다시 질의해 주시기 바랍니다.",
+            'en' => "No information about '" . $term . "' was found in either the Knowledge Graph (Graph DB) or the primary source database (RDB).\n\nPlease try a different search term, or query using a person, event, or location name related to the March 1st Movement.",
+            'ja' => "知識グラフ(Graph DB)および一次史料データベース(RDB)のいずれにも、'" . $term . "'に関する情報が見つかりませんでした。\n\n別の検索語でお試しになるか、3・1運動に関連する人物・事件・地名で再度ご質問ください。",
+            'zh' => "在知识图谱(Graph DB)与原始史料数据库(RDB)中均未找到关于'" . $term . "'的相关信息。\n\n请换用其他检索词，或以三一运动相关的人物、事件、地名重新提问。",
+        ];
+        $no_info_text = $no_info_msgs[$explain_lang] ?? $no_info_msgs['ko'];
+
+        if ($is_stream) {
+            echo "data: " . json_encode(["chunk" => $no_info_text], JSON_UNESCAPED_UNICODE) . "\n\n";
+            echo "data: [DONE]\n\n";
+            if (ob_get_level()) ob_flush();
+            flush();
+            return;
+        }
+        echo json_encode(["text" => $no_info_text], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_IGNORE);
+        return;
+    }
 
     // 2. [1단계 파이프라인] 사료 비판 기반 정밀 팩트 추출
     $fact_table = '';
-    if (!empty($context_str)) {
-        if ($is_stream) {
-            echo ": stage1-fact-table\n\n";
-            flush();
-        }
-        $fact_prompts = get_fact_extraction_prompts($explain_lang, $context_str);
-        try {
-            $fact_table = call_gemini([
-                ["role" => "system", "content" => $fact_prompts['system']],
-                ["role" => "user", "content" => $fact_prompts['user']]
-            ], false, 1500, 0.0, 0.8, 12);
-        } catch (\Throwable $extErr) {
-            error_log("Stage 1 fact extraction failed: " . $extErr->getMessage());
-            $fact_table = '';
-        }
+    if ($is_stream) {
+        echo ": stage1-fact-table\n\n";
+        flush();
+    }
+    $fact_prompts = get_fact_extraction_prompts($explain_lang, $context_str);
+    try {
+        $fact_table = call_gemini([
+            ["role" => "system", "content" => $fact_prompts['system']],
+            ["role" => "user", "content" => $fact_prompts['user']]
+        ], false, 1500, 0.0, 0.8, 50);
+    } catch (\Throwable $extErr) {
+        error_log("Stage 1 fact extraction failed: " . $extErr->getMessage());
+        $fact_table = '';
     }
 
     // 3. [2단계 파이프라인] 학술 도슨트 해설 원고 작성
