@@ -125,8 +125,10 @@ def run_vector_rag(query_item: dict[str, Any]) -> dict[str, Any]:
 
     context_str = "\n---\n".join(chunks)
     system_prompt = (
-        "You are an AI historical assistant. Answer the user question based on the retrieved raw document chunks. "
-        "If unsure, explain based on available text."
+        "You are a strict historical RAG assistant. Use only the retrieved document chunks. "
+        "Separate documented facts from inference, never transfer a person or event across regions, "
+        "and explicitly state '자료에서 확인되지 않음' when the question is not supported. "
+        "Every factual claim must be traceable to a retrieved chunk."
     )
     user_prompt = f"[Retrieved Document Chunks]\n{context_str}\n\n[Question]\n{query_item['query']}"
 
@@ -147,6 +149,7 @@ def run_vector_rag(query_item: dict[str, Any]) -> dict[str, Any]:
     return {
         "model": "Vector RAG",
         "answer": answer,
+        "contexts": chunks,
         "context_chars": len(context_str),
         "prompt_tokens": prompt_tokens,
         "output_tokens": output_tokens,
@@ -189,8 +192,9 @@ def run_graph_rag(query_item: dict[str, Any]) -> dict[str, Any]:
 
     context_str = "\n".join(triples)
     system_prompt = (
-        "You are a historical GraphRAG assistant. Synthesize the provided knowledge graph relationships "
-        "to answer the question. Connect the related nodes directly."
+        "You are a strict historical GraphRAG assistant. Answer only from the graph triples below. "
+        "Do not infer an event/person relationship unless the exact triple supports it; "
+        "do not merge similarly named places; explicitly state '자료에서 확인되지 않음' when unsupported."
     )
     user_prompt = f"[Knowledge Graph Relationships]\n{context_str}\n\n[Question]\n{query_item['query']}"
 
@@ -211,6 +215,7 @@ def run_graph_rag(query_item: dict[str, Any]) -> dict[str, Any]:
     return {
         "model": "Standard GraphRAG",
         "answer": answer,
+        "contexts": triples,
         "context_chars": len(context_str),
         "prompt_tokens": prompt_tokens,
         "output_tokens": output_tokens,
@@ -306,7 +311,11 @@ def run_docent_hybrid_rag(query_item: dict[str, Any]) -> dict[str, Any]:
         "3. [엄밀한 사료 비판과 환각 방지]\n"
         "제공된 사료에 나타난 지명 오기(예: 남리->제암리)나 겹치는 지명(예: 경기 장안면 vs 경남 장안면)이 있다면, 사료 비판적 관점에서 이를 명확히 구분하고 교정하여 서술하십시오. 제공된 문맥에 없는 내용은 절대 지어내지 마십시오.\n\n"
         "4. [답변의 완결성]\n"
-        "문장이 중간에 끊기지 않도록 분량을 조절하십시오. 마지막 단락(결론)은 해당 사건이나 인물이 지니는 역사적 의의를 2~3문장으로 간결하고 명확하게 요약하여 완벽하게 끝맺음하십시오."
+        "문장이 중간에 끊기지 않도록 분량을 조절하십시오. 마지막 단락(결론)은 해당 사건이나 인물이 지니는 역사적 의의를 2~3문장으로 간결하고 명확하게 요약하여 완벽하게 끝맺음하십시오.\n\n"
+        "5. [엄격 모드 출력]\n"
+        "각 핵심 주장 뒤에 근거가 된 사료 ID(raw_bib_*) 또는 그래프 사건명을 괄호로 표시하십시오. "
+        "근거가 없는 질문의 전제는 부정하거나 '자료에서 확인되지 않음'이라고 답하십시오. "
+        "검색 문맥에 없는 인물·날짜·장소·인과관계를 보완 지식으로 채우지 마십시오."
     )
     synth_user = f"[사용자 질의]: {query_item['query']}\n\n[검색된 지식그래프 및 사료 문맥]:\n■ [1단계 검증 팩트 표]\n{fact_table}\n\n■ [원문 사료 및 그래프 컨텍스트]\n{scoped_context}\n\n위 원칙과 문맥을 바탕으로 전문적인 도슨트 해설을 작성하십시오."
     time.sleep(2.0)
@@ -326,6 +335,7 @@ def run_docent_hybrid_rag(query_item: dict[str, Any]) -> dict[str, Any]:
     return {
         "model": "Docent Hybrid RAG (Proposed)",
         "answer": answer,
+        "contexts": [scoped_context] if scoped_context else [],
         "fact_table": fact_table,
         "context_chars": len(scoped_context),
         "prompt_tokens": prompt_tokens,
@@ -352,6 +362,24 @@ def evaluate_faithfulness(answer: str, gold_facts: list[str]) -> tuple[float, in
             covered += 1
     score = (covered / len(gold_facts)) * 100.0
     return round(score, 2), covered, len(gold_facts)
+
+
+def evaluate_retrieval_direct(query_item: dict[str, Any], contexts: list[str]) -> dict[str, float]:
+    """Compute entity Hit Rate@K and MRR without an LLM judge."""
+    targets = [str(value).strip().lower() for value in query_item.get("target_entities", []) if str(value).strip()]
+    normalized = [context.lower() for context in contexts]
+    if not targets:
+        return {"entity_hit_rate_at_k": 0.0, "entity_mrr": 0.0}
+    hits = sum(any(target in context for context in normalized) for target in targets)
+    first_rank = next(
+        (rank for rank, context in enumerate(normalized, 1)
+         if any(target in context for target in targets)),
+        0,
+    )
+    return {
+        "entity_hit_rate_at_k": round(hits / len(targets), 4),
+        "entity_mrr": round(1 / first_rank, 4) if first_rank else 0.0,
+    }
 
 
 def evaluate_hallucination(answer: str, negative_traps: list[str], category: str) -> tuple[float, int]:
@@ -419,6 +447,7 @@ def main() -> int:
     parser.add_argument("--single", action="store_true", help="Run single query (Q_MH_01) and display full response_text for each model")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of queries to evaluate")
     parser.add_argument("--delay", type=float, default=15.0, help="Delay in seconds between API calls to prevent 429 rate limit (default: 15.0)")
+    parser.add_argument("--ragas", action="store_true", help="Run RAGAS metrics after generating benchmark responses")
     args = parser.parse_args()
 
     benchmark_data = json.loads(DATASET_PATH.read_text(encoding="utf-8"))
@@ -446,6 +475,7 @@ def main() -> int:
     ]
 
     detailed_records = []
+    ragas_records = []
     aggregated = {m_name: {
         "faithfulness_scores": [],
         "hallucination_scores": [],
@@ -487,6 +517,16 @@ def main() -> int:
                 "output_tokens": res["output_tokens"],
                 "latency_sec": res["total_time"],
                 "answer_snippet": res["answer"].replace("\n", " ")[:120],
+                **evaluate_retrieval_direct(item, res.get("contexts", [])),
+            })
+            ragas_records.append({
+                "user_input": item["query"],
+                "response": res["answer"],
+                "retrieved_contexts": res.get("contexts", []),
+                "reference": "\n".join(item.get("ground_truth", item["gold_facts"])),
+                "model": m_name,
+                "query_id": item["id"],
+                "evaluation_type": item.get("evaluation_type", "direct"),
             })
             print(f"    ✅ 완료 (Fact Recall: {f_score}%, Hallucination: {h_score}%, Latency: {res['total_time']}s)")
             if args.delay > 0:
@@ -528,9 +568,21 @@ def main() -> int:
     csv_path = RESULTS_DIR / "rag_evaluation_results.csv"
     export_rag_latex_table(summary_by_model, tex_path)
     export_rag_csv(detailed_records, csv_path)
+    ragas_input_path = RESULTS_DIR / "ragas_dataset.json"
+    ragas_input_path.write_text(
+        json.dumps(ragas_records, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
     print(f"\n📄 LaTeX 표 생성 완료: {tex_path}")
     print(f"💾 CSV 상세 결과 저장 완료: {csv_path}")
+    print(f"🧾 RAGAS 입력 데이터 저장 완료: {ragas_input_path}")
+    if args.ragas:
+        from eval_ragas import evaluate_dataset
+
+        ragas_output_path = RESULTS_DIR / "ragas_results.json"
+        evaluate_dataset(ragas_input_path, ragas_output_path)
+        print(f"📊 RAGAS 결과 저장 완료: {ragas_output_path}")
     return 0
 
 

@@ -6,6 +6,12 @@
 
 ## 전체 흐름
 
+```
+
+통합 벤치마크 실행기에서도 `--ragas`를 사용할 수 있습니다.
+
+```bash
+.venv3.14/bin/python evaluation/run_benchmark.py --quick --ragas --delay 0
 ```text
 data/*.csv, data/*.xlsx
 	│
@@ -147,6 +153,44 @@ TEI_COMMIT_BATCH_SIZE=100 .venv3.14/bin/python run_pipeline.py --stage rdbms --s
 LLM이 불필요한 테이블을 제외하고 커밋 빈도를 줄이는 방식을 기본 최적화로 사용합니다.
 
 ## 개별 스크립트
+
+### RAGAS 평가
+
+RAG 비교 벤치마크는 응답 생성 시 질문별 검색 문맥과 기준 팩트를
+`evaluation/results/ragas_dataset.json`으로 저장합니다. RAGAS를 함께 실행하면
+faithfulness, context precision, context recall을 계산해
+`evaluation/results/ragas_results.json`으로 내보냅니다. 평가 metric은
+RAGAS 버전과 로컬 평가 모델에서 재현 가능한 세 지표로 고정합니다.
+벤치마크의 `ground_truth`는 검색 근거에서 확인 가능한 원자적 사실과
+확인 불가한 전제를 구분해 관리합니다. `evaluation_type`이 `abstention`인
+부정 검증 문항은 검색 문맥의 정답 회수율을 계산할 수 없으므로 faithfulness만
+집계하고, context precision/recall에는 포함하지 않습니다.
+
+```bash
+.venv3.14/bin/python evaluation/eval_rag_comparison.py --quick --delay 0 --ragas
+```
+
+RAGAS 평가는 기본적으로 로컬 Ollama의 `gemma4:26b`와
+`nomic-embed-text:latest`를 사용하므로 API 키 없이 재현할 수 있습니다.
+`RAGAS_PROVIDER=gemini`를 지정하면 Gemini를 사용할 수 있으며,
+`GEMINI_API_KEY`, `GEMINI_RAGAS_MODEL`, `GEMINI_EMBEDDING_MODEL`을
+설정해야 합니다.
+
+로컬 대형 Judge를 사용한 문맥 정밀도 판정은 다음 명령으로 실행합니다.
+RAGAS 내부의 구조화 출력 파서와 분리해 Ollama JSON API를 직접 사용하므로
+thinking trace가 점수를 오염시키지 않습니다. 결과는
+`evaluation/results/context_precision_judge_results.json`에 저장되며,
+RAGAS 점수와 혼동하지 않도록 `context_precision_judge`로 명시합니다.
+
+```bash
+.venv3.14/bin/python -m evaluation.eval_context_precision_judge \
+  --input evaluation/results/ragas_dataset.json \
+  --output evaluation/results/context_precision_judge_results.json \
+  --model gemma4:26b
+```
+
+또한 `rag_evaluation_results.csv`에는 LLM과 무관한
+`entity_hit_rate_at_k` 및 `entity_mrr` 직접 검색 지표가 포함됩니다.
 
 ### 원자료 적재: `upload_data.py`
 

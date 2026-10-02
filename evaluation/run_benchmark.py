@@ -44,6 +44,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="Limit number of RAG queries to evaluate")
     parser.add_argument("--delay", type=float, default=15.0, help="Delay in seconds between RAG API calls (default: 15.0)")
     parser.add_argument("--generate-dataset", action="store_true", help="Regenerate benchmark dataset before evaluation")
+    parser.add_argument("--ragas", action="store_true", help="Run RAGAS metrics after the RAG benchmark")
     args = parser.parse_args()
 
     python_bin = sys.executable
@@ -76,6 +77,8 @@ def main() -> int:
         rag_cmd.append("--quick")
     elif args.limit > 0:
         rag_cmd.extend(["--limit", str(args.limit)])
+    if args.ragas:
+        rag_cmd.append("--ragas")
 
     ok_rag = run_command(rag_cmd, "2단계: Vector RAG vs. GraphRAG vs. Docent Hybrid RAG 비교 실험 실행")
     if not ok_rag:

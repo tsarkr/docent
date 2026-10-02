@@ -1,0 +1,1210 @@
+{
+  "judge_model": "gemma4:26b",
+  "metric": "context_precision_judge",
+  "method": "direct Ollama JSON judge; not RAGAS built-in parser",
+  "metrics_by_model": {
+    "Vector RAG": {
+      "context_precision_judge": 0.0528
+    },
+    "Standard GraphRAG": {
+      "context_precision_judge": 0.1097
+    },
+    "Docent Hybrid RAG (Proposed)": {
+      "context_precision_judge": 0.3333
+    }
+  },
+  "records_by_model": {
+    "Vector RAG": [
+      {
+        "query_id": "Q_MH_01",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_MH_02",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_MH_03",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_MH_04",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ST_01",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ST_02",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "context_precision_judge": 0.25
+      },
+      {
+        "query_id": "Q_ST_03",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_KO_01",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_KO_02",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_01",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_02",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_03",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_04",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_MH_14",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_MH_15",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_MH_16",
+        "model": "Vector RAG",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_MH_17",
+        "model": "Vector RAG",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_MH_18",
+        "model": "Vector RAG",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_MH_19",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          1
+        ],
+        "context_precision_judge": 0.5
+      },
+      {
+        "query_id": "Q_ST_20",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          1
+        ],
+        "context_precision_judge": 0.5
+      },
+      {
+        "query_id": "Q_ST_21",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ST_22",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          1,
+          0
+        ],
+        "context_precision_judge": 0.3333
+      },
+      {
+        "query_id": "Q_ST_23",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ST_24",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_25",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_26",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_27",
+        "model": "Vector RAG",
+        "relevant": [],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_28",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_29",
+        "model": "Vector RAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_30",
+        "model": "Vector RAG",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      }
+    ],
+    "Standard GraphRAG": [
+      {
+        "query_id": "Q_MH_01",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          1,
+          1,
+          1,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.2667
+      },
+      {
+        "query_id": "Q_MH_02",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_MH_03",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_MH_04",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ST_01",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.5333
+      },
+      {
+        "query_id": "Q_ST_02",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ST_03",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_KO_01",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_KO_02",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_01",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_02",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_03",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_04",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_MH_14",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          1,
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1
+        ],
+        "context_precision_judge": 0.2667
+      },
+      {
+        "query_id": "Q_MH_15",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.125
+      },
+      {
+        "query_id": "Q_MH_16",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_MH_17",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_MH_18",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          1,
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.2
+      },
+      {
+        "query_id": "Q_MH_19",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          1,
+          1,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.4
+      },
+      {
+        "query_id": "Q_ST_20",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.2
+      },
+      {
+        "query_id": "Q_ST_21",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          1,
+          0
+        ],
+        "context_precision_judge": 0.5
+      },
+      {
+        "query_id": "Q_ST_22",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0667
+      },
+      {
+        "query_id": "Q_ST_23",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          1,
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.2
+      },
+      {
+        "query_id": "Q_ST_24",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_25",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_26",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          0
+        ],
+        "context_precision_judge": 0.2
+      },
+      {
+        "query_id": "Q_ZC_27",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0667
+      },
+      {
+        "query_id": "Q_ZC_28",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          1,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.2667
+      },
+      {
+        "query_id": "Q_ZC_29",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_30",
+        "model": "Standard GraphRAG",
+        "relevant": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "context_precision_judge": 0.0
+      }
+    ],
+    "Docent Hybrid RAG (Proposed)": [
+      {
+        "query_id": "Q_MH_01",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          1
+        ],
+        "context_precision_judge": 1.0
+      },
+      {
+        "query_id": "Q_MH_02",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_MH_03",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_MH_04",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ST_01",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          1
+        ],
+        "context_precision_judge": 1.0
+      },
+      {
+        "query_id": "Q_ST_02",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ST_03",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_KO_01",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_KO_02",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_01",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_02",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_03",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_04",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_MH_14",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          1
+        ],
+        "context_precision_judge": 1.0
+      },
+      {
+        "query_id": "Q_MH_15",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          1
+        ],
+        "context_precision_judge": 1.0
+      },
+      {
+        "query_id": "Q_MH_16",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          1
+        ],
+        "context_precision_judge": 1.0
+      },
+      {
+        "query_id": "Q_MH_17",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_MH_18",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_MH_19",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          1
+        ],
+        "context_precision_judge": 1.0
+      },
+      {
+        "query_id": "Q_ST_20",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ST_21",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ST_22",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ST_23",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ST_24",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_25",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          1
+        ],
+        "context_precision_judge": 1.0
+      },
+      {
+        "query_id": "Q_ZC_26",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      },
+      {
+        "query_id": "Q_ZC_27",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          1
+        ],
+        "context_precision_judge": 1.0
+      },
+      {
+        "query_id": "Q_ZC_28",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          1
+        ],
+        "context_precision_judge": 1.0
+      },
+      {
+        "query_id": "Q_ZC_29",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          1
+        ],
+        "context_precision_judge": 1.0
+      },
+      {
+        "query_id": "Q_ZC_30",
+        "model": "Docent Hybrid RAG (Proposed)",
+        "relevant": [
+          0
+        ],
+        "context_precision_judge": 0.0
+      }
+    ]
+  }
+}
