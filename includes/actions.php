@@ -464,6 +464,21 @@ function graphrag_build_hybrid_context(string $query, string $vector_context, st
 // ════════════════════════════════════════════════════════════
 
 /**
+ * Extract an explicit historical year/month bound for audit and prompt use.
+ * The current graph stores dates as event properties, so unsupported temporal
+ * predicates must not be silently inferred from relationship structure.
+ */
+function extract_temporal_constraint(string $query): ?array {
+    if (preg_match('/(?<!\d)(18|19|20)\d{2}(?:\s*년)?\s*(\d{1,2})?\s*(?:월)?/u', $query, $m)) {
+        return [
+            'year' => (int)substr($m[0], 0, 4),
+            'month' => isset($m[2]) && $m[2] !== '' ? (int)$m[2] : null,
+        ];
+    }
+    return null;
+}
+
+/**
  * Text-to-Cypher: 사용자 자연어 질의를 Neo4j Cypher 쿼리로 변환
  */
 function generate_text_to_cypher(string $query): string {
@@ -471,7 +486,17 @@ function generate_text_to_cypher(string $query): string {
     if ($query === '' || mb_strlen($query) < 2) return '';
 
     try {
-        $prompt = get_text_to_cypher_prompt($query);
+        $temporal = extract_temporal_constraint($query);
+        $prompt_query = $query;
+        if ($temporal !== null) {
+            $month_text = $temporal['month'] !== null
+                ? " {$temporal['month']}월"
+                : '';
+            $prompt_query .= "\n\n[명시적 시간 조건] {$temporal['year']}년{$month_text} 조건을 "
+                . "사건 날짜 속성(e.날짜/발생일자)에 반드시 반영하십시오. "
+                . "날짜가 없는 노드는 시간 조건을 만족한다고 추정하지 마십시오.";
+        }
+        $prompt = get_text_to_cypher_prompt($prompt_query);
         $raw = call_gemini([
             ['role' => 'system', 'content' => $prompt['system']],
             ['role' => 'user', 'content' => $prompt['user']]
@@ -522,6 +547,11 @@ function generate_text_to_cypher(string $query): string {
             $cypher .= ' LIMIT 30';
         }
 
+        error_log(sprintf(
+            "[Docent][Text-to-Cypher] generated query for '%s':\n%s",
+            $query,
+            $cypher
+        ));
         return $cypher;
     } catch (\Throwable $e) {
         error_log('Text-to-Cypher generation failed: ' . $e->getMessage());
@@ -535,6 +565,7 @@ function generate_text_to_cypher(string $query): string {
 function execute_dynamic_cypher($client, string $cypher, array &$nodes, array &$edges, array &$evidences, array &$prefetch_names, array &$found_candidates): int {
     if (empty($cypher)) return 0;
 
+    error_log("[Docent][Neo4j] executing dynamic Cypher:\n" . $cypher);
     try {
         $res = $client->run($cypher);
     } catch (\Throwable $e) {
@@ -769,6 +800,7 @@ function execute_dynamic_cypher($client, string $cypher, array &$nodes, array &$
         }
     }
 
+    error_log("[Docent][Neo4j] dynamic Cypher returned {$count} record(s)");
     return $count;
 }
 
@@ -799,6 +831,8 @@ function handle_action_graph() {
         $generated_cypher = generate_text_to_cypher($cypher_query_target);
         if ($generated_cypher !== '') {
             $cypher_count = execute_dynamic_cypher($client, $generated_cypher, $nodes, $edges, $evidences, $prefetch_names, $found_candidates);
+        } else {
+            error_log("[Docent][Text-to-Cypher] no executable query generated for: " . $cypher_query_target);
         }
     }
     
@@ -873,7 +907,10 @@ function handle_action_graph() {
     ";
 
     // 동적 쿼리에서 이미 풍부한 결과를 얻었더라도 키워드 노드들을 함께 보완 검색
-    if ($cypher_count < 5) {
+    // A high-yield but misclassified Cypher result is still possible. Always
+    // verify specific extracted entities through fulltext; use the fallback
+    // path both for empty results and as an independent router cross-check.
+    if ($cypher_count < 5 || !empty($specific_candidates)) {
         foreach ($expanded_keywords as $kw) {
             if (empty($kw)) continue;
             $escaped_kw = docent_escape_lucene($kw);
