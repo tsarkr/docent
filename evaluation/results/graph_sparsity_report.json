@@ -1,0 +1,97 @@
+{
+  "event_unit": "raw_event_info 1행 = 사건 1건 (Event.id = 사건 아이디)",
+  "event_nodes_total": 2616,
+  "event_nodes_isolated": 0,
+  "isolated_ratio": 0.0,
+  "by_origin": [
+    {
+      "origin": "event (raw_event_info 사건 1건)",
+      "nodes": 2616,
+      "isolated": 0
+    }
+  ],
+  "all_labels": [
+    {
+      "label": "Document",
+      "nodes": 43410,
+      "isolated": 1
+    },
+    {
+      "label": "Activity",
+      "nodes": 26165,
+      "isolated": 0
+    },
+    {
+      "label": "Thesaurus",
+      "nodes": 8915,
+      "isolated": 1
+    },
+    {
+      "label": "Place",
+      "nodes": 8747,
+      "isolated": 0
+    },
+    {
+      "label": "Person",
+      "nodes": 4940,
+      "isolated": 0
+    },
+    {
+      "label": "Event",
+      "nodes": 2616,
+      "isolated": 0
+    },
+    {
+      "label": "Organization",
+      "nodes": 2107,
+      "isolated": 0
+    },
+    {
+      "label": "ThesaurusCategory",
+      "nodes": 273,
+      "isolated": 0
+    },
+    {
+      "label": "Collection",
+      "nodes": 12,
+      "isolated": 0
+    }
+  ],
+  "real_events": {
+    "nodes": 2616,
+    "isolated": 0,
+    "degree_min": 2,
+    "degree_median": 9.0,
+    "degree_mean": 26.75,
+    "degree_p90": 49,
+    "degree_max": 1582,
+    "without_person": 1435,
+    "without_place": 1,
+    "relations": [
+      {
+        "type": "P9_consists_of",
+        "n": 26165
+      },
+      {
+        "type": "P70_documents",
+        "n": 19916
+      },
+      {
+        "type": "P14_carried_out_by",
+        "n": 12166
+      },
+      {
+        "type": "P7_took_place_at",
+        "n": 9800
+      },
+      {
+        "type": "관련사건",
+        "n": 1936
+      }
+    ]
+  },
+  "source": {
+    "raw_event_info_rows": 2616,
+    "raw_event_info_distinct_ids": 2616
+  }
+}

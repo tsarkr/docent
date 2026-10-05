@@ -325,7 +325,12 @@ The benchmark dataset is
 The compared systems are:
 
 - **Vector RAG**: PostgreSQL source-chunk retrieval
+- **Hybrid Vector RAG**: BM25 + dense retrieval, RRF fusion, cross-encoder
+  rerank ([evaluation/baselines.py](./evaluation/baselines.py)); retrieves from
+  the question text only
 - **Standard GraphRAG**: graph triple/context retrieval
+- **Microsoft GraphRAG** (opt-in): the reference implementation, queried through
+  its CLI
 - **Docent Hybrid RAG**: combined graph and source retrieval with strict
   evidence-grounded prompting
 
@@ -409,12 +414,102 @@ The repository also includes a separate Ollama JSON Judge:
 
 This is a supplementary metric, not a replacement for the RAGAS score.
 
+### Baselines, categories, and significance
+
+All pipelines run under the same conditions, set by these flags:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--retrieval-input` | `question` | Every pipeline retrieves with entities extracted from the question text (one shared LLM call per question). `entities` gives every pipeline the gold `target_entities` instead. |
+| `--temperature`, `--top-p` | `0.0`, `0.8` | Used for every generation call. |
+| `--context-chars` | `2400` | Retrieved-context budget shared by all pipelines (`0` restores the old per-pipeline sizes). |
+| `--retries` | `2` | Extra attempts when a generation fails (rate limits). |
+
+Docent still issues two generation calls (fact table, then synthesis), so its
+total prompt is larger than the baselines' even with the same retrieved
+context; `context_chars` and `prompt_tokens` are reported per question.
+
+Select pipelines with `--models` (default `vector,hybrid,graph,docent`). The
+hybrid baseline builds its dense index once under `vector_store/baselines/`;
+set `BASELINE_EMBED_MODEL` / `BASELINE_RERANK_MODEL` to change models.
+
+Microsoft GraphRAG needs its own index, which is a long, paid LLM job and is
+therefore not run automatically:
+
+```bash
+.venv3.14/bin/python evaluation/baselines.py export-graphrag --root ./graphrag_root --dry-run
+.venv3.14/bin/python evaluation/baselines.py export-graphrag --root ./graphrag_root
+graphrag init --root ./graphrag_root && graphrag index --root ./graphrag_root
+GRAPHRAG_ROOT=./graphrag_root .venv3.14/bin/python evaluation/eval_rag_comparison.py \
+  --models vector,hybrid,graph,msgraphrag,docent
+```
+
+Every run also writes per-category results and paired significance tests
+(sign-flip permutation test with Holm correction, bootstrap 95% CIs). Questions
+where any pipeline failed to generate an answer are excluded from the tests.
+To recompute them from an existing CSV:
+
+```bash
+.venv3.14/bin/python evaluation/analyze_rag_results.py
+```
+
+### Benchmark size and third-party questions
+
+```bash
+.venv3.14/bin/python evaluation/generate_benchmark_dataset.py --target-count 120 \
+  --third-party path/to/external_questions.json
+```
+
+Each question carries `source` (`curated`, `third_party`, `template`).
+External authors start from
+[evaluation/dataset/third_party_template.json](./evaluation/dataset/third_party_template.json).
+Template questions are filled in from `raw_event_info` and their gold facts
+must be reviewed before they are reported.
+
+### Human evaluation
+
+Extraction quality, judged by historians on a seeded random sample of records:
+
+```bash
+.venv3.14/bin/python evaluation/expert_validation.py export --n 150
+.venv3.14/bin/python evaluation/expert_validation.py score \
+  evaluation/expert_validation/annotation_A.xlsx evaluation/expert_validation/annotation_B.xlsx
+```
+
+Final answers, rated blind for factual accuracy, citation accuracy, and
+usefulness:
+
+```bash
+.venv3.14/bin/python evaluation/human_answer_eval.py export
+.venv3.14/bin/python evaluation/human_answer_eval.py score \
+  evaluation/human_eval/rating_A.xlsx evaluation/human_eval/rating_B.xlsx
+```
+
+`blinding_key.json` maps the shuffled answer labels back to models; do not
+send it to raters.
+
+### Graph sparsity
+
+An `Event` node is one `raw_event_info` row. To report how many `Event` nodes
+are isolated and where they come from (read-only; `--cleanup` lists removable
+artifact nodes and deletes them only with `--apply`):
+
+```bash
+.venv3.14/bin/python scripts/graph_sparsity_report.py --cleanup
+```
+
 ### Evaluation outputs
 
 | File | Contents |
 |---|---|
 | `evaluation/results/rag_evaluation_results.csv` | Per-query, per-model details |
 | `evaluation/results/table_rag_comparison.tex` | Paper-ready RAG comparison table |
+| `evaluation/results/rag_category_results.csv` | Per-category means with 95% CIs |
+| `evaluation/results/rag_significance.csv` | Paired significance tests between pipelines |
+| `evaluation/results/table_rag_by_category.tex` | Per-category LaTeX table |
+| `evaluation/results/expert_validation_results.json` | Expert-judged extraction precision/recall |
+| `evaluation/results/human_eval_results.json` | Human answer ratings and citation accuracy |
+| `evaluation/results/graph_sparsity_report.json` | Event-layer sparsity report |
 | `evaluation/results/ragas_dataset.json` | RAGAS input records |
 | `evaluation/results/ragas_results.json` | RAGAS metric results |
 | `evaluation/results/context_precision_judge_results.json` | Direct Judge results |

@@ -9,6 +9,11 @@ Generates a representative, academically grounded quantitative evaluation benchm
 Sources:
 - PostgreSQL raw_event_info (2,616 events) & raw_source_info
 - Neo4j Knowledge Graph topology
+
+Every item carries a ``source`` field so results can be reported separately:
+- curated      hand-written by the authors
+- third_party  written by someone outside the author team (--third-party FILE)
+- template     filled in automatically from raw_event_info by this script
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ import argparse
 import json
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +34,7 @@ from scripts.config import get_neo4j_driver, get_pg_connection
 from scripts.hanja_utils import translate_hanja_name
 
 DATASET_PATH = Path(__file__).resolve().parent / "dataset" / "multihop_benchmark_dataset.json"
+NON_NAME_TOKENS = {'목사', '장로', '전도사', '선교사', '교사', '학생', '면장', '구장', '군수', '순사', '헌병', '의사', '기자', '승려', '농민', '주민'}
 
 
 def clean_name(raw: str) -> str:
@@ -61,7 +68,8 @@ def load_events_from_pg() -> list[dict[str, Any]]:
             raw_tokens = re.split(r'[;, \t\n]+', str(persons_raw))
             for tok in raw_tokens:
                 c = clean_name(tok)
-                if len(c) in (2, 3, 4) and c not in persons:
+                # Hangul names only: drops romanised fragments ("Sun") and titles ("목사").
+                if re.fullmatch(r'[가-힣]{2,4}', c) and c not in NON_NAME_TOKENS and c not in persons:
                     persons.append(c)
 
         clean_place = re.sub(r'[\u4e00-\u9fff]+', lambda m: translate_hanja_name(m.group(0)), str(place))
@@ -79,11 +87,34 @@ def load_events_from_pg() -> list[dict[str, Any]]:
     return events
 
 
-def generate_benchmark_queries(target_count: int = 60) -> list[dict[str, Any]]:
+REQUIRED_FIELDS = ("id", "category", "query", "target_entities", "gold_facts", "negative_traps")
+LEGACY_CURATED_COUNT = 13  # datasets written before the `source` field: first 13 items are hand-written
+
+
+def load_third_party(path: Path) -> list[dict[str, Any]]:
+    """Load and validate questions written by an external author."""
+    items = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(items, list):
+        raise ValueError(f"{path}: 최상위 구조는 문항 리스트여야 합니다.")
+    for n, item in enumerate(items, 1):
+        missing = [f for f in REQUIRED_FIELDS if f not in item]
+        if missing:
+            raise ValueError(f"{path} 문항 {n}: 필수 필드 누락 {missing}")
+        author = str(item.get("author", "")).strip()
+        if not author or author == "REPLACE_ME":
+            raise ValueError(f"{path} 문항 {n} ({item['id']}): 외부 출제자를 'author'에 기입해야 합니다.")
+        if not item["gold_facts"]:
+            raise ValueError(f"{path} 문항 {n} ({item['id']}): gold_facts가 비어 있습니다.")
+        item["source"] = "third_party"
+        item.setdefault("hops", 0)
+    return items
+
+
+def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[Path] | None = None) -> list[dict[str, Any]]:
     events = load_events_from_pg()
     ev_by_id = {e["id"]: e for e in events}
 
-    # 1. Load existing curated high-quality queries first (13 queries)
+    # 1. Keep hand-written questions (authors' and third-party); template items are regenerated.
     existing = []
     if DATASET_PATH.exists():
         try:
@@ -91,10 +122,25 @@ def generate_benchmark_queries(target_count: int = 60) -> list[dict[str, Any]]:
         except Exception:
             existing = []
 
-    # Preserve the existing curated queries up to 13
-    curated = existing[:13]
-    generated = list(curated)
-    seen_queries = {item["query"] for item in generated}
+    curated = []
+    for idx, item in enumerate(existing):
+        source = item.get("source") or ("curated" if idx < LEGACY_CURATED_COUNT else "template")
+        if source != "template":
+            item["source"] = source
+            curated.append(item)
+    for path in third_party_paths or []:
+        curated.extend(load_third_party(path))
+
+    generated = []
+    seen_ids: set[str] = set()
+    seen_queries: set[str] = set()
+    for item in curated:
+        if item["id"] in seen_ids or item["query"] in seen_queries:
+            continue  # an already-merged third-party file was passed again
+        seen_ids.add(item["id"])
+        seen_queries.add(item["query"])
+        generated.append(item)
+    curated = list(generated)
 
     # Count how many of each category we need
     needed_total = target_count - len(generated)
@@ -133,6 +179,7 @@ def generate_benchmark_queries(target_count: int = 60) -> list[dict[str, Any]]:
             item = {
                 "id": q_id,
                 "category": "Multi-hop Chaining",
+                "source": "template",
                 "query": query_text,
                 "hops": 2,
                 "target_entities": list(set([ev["title"][:15], target_ev["title"][:15], ev["place"].split()[-1], target_ev["place"].split()[-1]] + ev["persons"][:2] + target_ev["persons"][:2])),
@@ -165,14 +212,18 @@ def generate_benchmark_queries(target_count: int = 60) -> list[dict[str, Any]]:
             regions[prov] = []
         regions[prov].append(ev)
 
-    for prov, p_events in regions.items():
+    # Walk provinces round-robin, pairing the k-th earliest with the k-th latest
+    # event, so the category can grow beyond one question per province.
+    max_pairs = max((len(v) // 2 for v in regions.values()), default=0)
+    st_pairs = [
+        (prov, p_events[k], p_events[-1 - k])
+        for k in range(max_pairs)
+        for prov, p_events in regions.items()
+        if len(p_events) // 2 > k
+    ]
+    for prov, e1, e2 in st_pairs:
         if st_count >= target_st:
             break
-        if len(p_events) < 2:
-            continue
-
-        e1 = p_events[0]
-        e2 = p_events[-1]
         if e1["start_date"] == e2["start_date"] or not e1["persons"] or not e2["persons"]:
             continue
 
@@ -189,6 +240,7 @@ def generate_benchmark_queries(target_count: int = 60) -> list[dict[str, Any]]:
         item = {
             "id": q_id,
             "category": "Spatial-Temporal Diffusion",
+            "source": "template",
             "query": query_text,
             "hops": 2,
             "target_entities": list(set([prov, e1["place"].split()[-1], e2["place"].split()[-1]] + e1["persons"][:2] + e2["persons"][:2])),
@@ -244,6 +296,7 @@ def generate_benchmark_queries(target_count: int = 60) -> list[dict[str, Any]]:
         item = {
             "id": q_id,
             "category": "Zero-Correlation Trap",
+            "source": "template",
             "query": query_text,
             "hops": 0,
             "target_entities": [fig_name, ev["place"].split()[-1], ev["title"][:12]] + ev["persons"][:2],
@@ -262,16 +315,29 @@ def generate_benchmark_queries(target_count: int = 60) -> list[dict[str, Any]]:
         zc_count += 1
 
     print(f"✅ 총 {len(generated)}건의 정량 평가 벤치마크 데이터셋 구축 완료!")
+    duplicate_ids = [i for i, n in Counter(item["id"] for item in generated).items() if n > 1]
+    if duplicate_ids:
+        raise ValueError(f"문항 id가 중복됩니다: {duplicate_ids}")
+    by_source = Counter(item["source"] for item in generated)
+    by_category = Counter(item["category"] for item in generated)
+    print(f"   출처별: {dict(by_source)}")
+    print(f"   범주별: {dict(by_category)}")
+    if len(generated) < target_count:
+        print(f"⚠️ 목표 {target_count}건에 미달했습니다 (템플릿을 채울 사건 조합 부족).")
+    if not by_source.get("third_party"):
+        print("⚠️ 제3자 출제 문항이 없습니다. --third-party 로 외부 출제 파일을 병합하세요.")
     return generated
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate comprehensive quantitative RAG benchmark dataset.")
-    parser.add_argument("--target-count", type=int, default=60, help="Target total benchmark dataset size (default: 60)")
+    parser.add_argument("--target-count", type=int, default=120, help="Target total benchmark dataset size (default: 120)")
     parser.add_argument("--out", type=Path, default=DATASET_PATH, help="Output dataset path")
+    parser.add_argument("--third-party", type=Path, action="append", default=[],
+                        help="JSON file of questions written by an external author (repeatable); see dataset/third_party_template.json")
     args = parser.parse_args()
 
-    dataset = generate_benchmark_queries(target_count=args.target_count)
+    dataset = generate_benchmark_queries(target_count=args.target_count, third_party_paths=args.third_party)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(dataset, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"💾 데이터셋 파일 저장 완료: {args.out} ({len(dataset)} items)")

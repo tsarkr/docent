@@ -1,17 +1,17 @@
 \begin{table*}[htbp]
 \centering
-\caption{Quantitative Comparative Evaluation: Vector RAG vs. GraphRAG vs. Proposed Docent Hybrid RAG}
+\caption{Quantitative Comparative Evaluation of RAG Pipelines}
 \label{tab:rag_comparison}
-\begin{tabular}{l|c|c|c}
+\begin{tabular}{l|c|c|c|c}
 \hline
-\textbf{Evaluation Metric} & \textbf{Vector RAG} & \textbf{Standard GraphRAG} & \textbf{Docent Hybrid RAG (Proposed)} \\
+\textbf{Evaluation Metric} & \textbf{Vector RAG} & \textbf{Hybrid Vector RAG (BM25+Dense+Rerank)} & \textbf{Standard GraphRAG} & \textbf{Docent Hybrid RAG (Proposed)} \\
 \hline
-Fact Recall / Faithfulness (\%) $\uparrow$ & 1.1\% & 1.1\% & \textbf{22.2\%} \\
-Hallucination Rate (Traps) (\%) $\downarrow$ & 0.0\% & 0.0\% & \textbf{0.0\%} \\
-Avg. Context Tokens Ingested & 550 & 345 & 1854 \\
-Avg. Output Tokens Generated & 7 & 3 & 189 \\
-Token Efficiency (Facts / 1k tokens) $\uparrow$ & 0.06 & 0.10 & \textbf{0.36} \\
-Avg. Latency (Total s) $\downarrow$ & 58.00s & 60.84s & 124.37s \\
+Fact Recall / Faithfulness (\%) $\uparrow$ & 3.3\% & 6.7\% & 8.9\% & \textbf{42.2\%} \\
+Hallucination Rate (Traps) (\%) $\downarrow$ & 0.0\% & 0.0\% & 0.0\% & 1.7\% \\
+Avg. Context Tokens Ingested & 691 & 945 & 854 & 2051 \\
+Avg. Output Tokens Generated & 24 & 56 & 27 & 348 \\
+Token Efficiency (Facts / 1k tokens) $\uparrow$ & 0.14 & 0.21 & 0.31 & \textbf{0.62} \\
+Avg. Latency (Total s) $\downarrow$ & 2.78s & 4.86s & \textbf{2.68s} & 11.34s \\
 \hline
 \end{tabular}
 \end{table*}

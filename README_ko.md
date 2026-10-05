@@ -320,10 +320,13 @@ MCP 클라이언트에는 `mcp_client_config.json`의 절대경로를 현재 환
 
 평가 데이터셋은
 [evaluation/dataset/multihop_benchmark_dataset.json](./evaluation/dataset/multihop_benchmark_dataset.json)에
-있습니다. 비교 대상은 다음 세 시스템입니다.
+있습니다. 비교 대상은 다음 시스템입니다.
 
 - **Vector RAG**: PostgreSQL 원문 chunk 기반 검색
+- **Hybrid Vector RAG**: BM25 + dense 검색, RRF 융합, cross-encoder 재순위화
+  ([evaluation/baselines.py](./evaluation/baselines.py)). 질문 텍스트만으로 검색
 - **Standard GraphRAG**: 그래프 triple/context 기반 검색
+- **Microsoft GraphRAG** (선택): 원형 구현을 CLI로 호출
 - **Docent Hybrid RAG**: 그래프·원문을 결합한 검색 및 엄격 모드 해설
 
 기본 전체 평가:
@@ -403,12 +406,100 @@ RAGAS parser와 별도로 Ollama JSON API를 직접 사용하는 Judge가 있습
   --workers 3
 ```
 
+### 베이스라인·범주별 결과·유의성 검정
+
+모든 파이프라인은 아래 옵션으로 정한 동일한 조건에서 실행됩니다.
+
+| 옵션 | 기본값 | 의미 |
+|---|---|---|
+| `--retrieval-input` | `question` | 모든 파이프라인이 질문 문장에서 추출한 개체로 검색합니다(질문당 LLM 호출 1회를 공유). `entities`는 모든 파이프라인에 정답 `target_entities`를 줍니다. |
+| `--temperature`, `--top-p` | `0.0`, `0.8` | 모든 생성 호출에 적용됩니다. |
+| `--context-chars` | `2400` | 모든 파이프라인이 공유하는 검색 문맥 문자 수 예산(`0`이면 예전의 파이프라인별 크기). |
+| `--retries` | `2` | 생성 실패(요청 제한) 시 추가 시도 횟수. |
+
+Docent는 생성 호출을 두 번(팩트 표, 종합) 하므로 검색 문맥이 같아도 전체
+프롬프트는 베이스라인보다 큽니다. 질문별 `context_chars`와 `prompt_tokens`가
+CSV에 기록됩니다.
+
+`--models`로 실행할 파이프라인을 고릅니다(기본값 `vector,hybrid,graph,docent`).
+하이브리드 베이스라인은 dense 인덱스를 `vector_store/baselines/`에 한 번만
+만듭니다. 모델은 `BASELINE_EMBED_MODEL`, `BASELINE_RERANK_MODEL`로 바꿉니다.
+
+Microsoft GraphRAG는 별도 인덱싱이 필요하며, 시간이 오래 걸리는 유료 LLM
+작업이라 자동으로 실행하지 않습니다.
+
+```bash
+.venv3.14/bin/python evaluation/baselines.py export-graphrag --root ./graphrag_root --dry-run
+.venv3.14/bin/python evaluation/baselines.py export-graphrag --root ./graphrag_root
+graphrag init --root ./graphrag_root && graphrag index --root ./graphrag_root
+GRAPHRAG_ROOT=./graphrag_root .venv3.14/bin/python evaluation/eval_rag_comparison.py \
+  --models vector,hybrid,graph,msgraphrag,docent
+```
+
+평가를 실행하면 범주별 결과와 쌍대 유의성 검정(sign-flip permutation, Holm
+보정, bootstrap 95% CI)도 함께 저장됩니다. 한 파이프라인이라도 답변 생성에
+실패한 질문은 검정에서 제외됩니다. 기존 CSV로 다시 계산하려면:
+
+```bash
+.venv3.14/bin/python evaluation/analyze_rag_results.py
+```
+
+### 벤치마크 규모와 제3자 출제
+
+```bash
+.venv3.14/bin/python evaluation/generate_benchmark_dataset.py --target-count 120 \
+  --third-party path/to/external_questions.json
+```
+
+각 문항에는 `source`(`curated`, `third_party`, `template`)가 기록됩니다. 외부
+출제자는
+[evaluation/dataset/third_party_template.json](./evaluation/dataset/third_party_template.json)을
+복사해 작성합니다. 템플릿 문항은 `raw_event_info`에서 자동으로 채워지므로,
+보고 전에 gold fact를 검수해야 합니다.
+
+### 사람 평가
+
+개체·관계 추출 품질(역사학자가 무작위 표본 사료를 판정):
+
+```bash
+.venv3.14/bin/python evaluation/expert_validation.py export --n 150
+.venv3.14/bin/python evaluation/expert_validation.py score \
+  evaluation/expert_validation/annotation_A.xlsx evaluation/expert_validation/annotation_B.xlsx
+```
+
+최종 답변(사실 정확성·인용 정확성·유용성 블라인드 채점):
+
+```bash
+.venv3.14/bin/python evaluation/human_answer_eval.py export
+.venv3.14/bin/python evaluation/human_answer_eval.py score \
+  evaluation/human_eval/rating_A.xlsx evaluation/human_eval/rating_B.xlsx
+```
+
+`blinding_key.json`은 섞인 답변 라벨과 모델의 대응표이므로 평가자에게
+전달하지 않습니다.
+
+### 그래프 희소성
+
+`Event` 노드 하나는 `raw_event_info`의 한 행입니다. 고립된 `Event` 노드의
+수와 출처를 확인하려면 아래를 실행합니다(읽기 전용. `--cleanup`은 삭제
+대상만 보여 주고, `--apply`를 함께 줄 때만 삭제합니다).
+
+```bash
+.venv3.14/bin/python scripts/graph_sparsity_report.py --cleanup
+```
+
 ### 평가 산출물
 
 | 파일 | 내용 |
 |---|---|
 | `evaluation/results/rag_evaluation_results.csv` | 질의·모델별 상세 결과 |
 | `evaluation/results/table_rag_comparison.tex` | 논문용 비교 표 |
+| `evaluation/results/rag_category_results.csv` | 범주별 평균과 95% CI |
+| `evaluation/results/rag_significance.csv` | 파이프라인 간 쌍대 유의성 검정 |
+| `evaluation/results/table_rag_by_category.tex` | 범주별 LaTeX 표 |
+| `evaluation/results/expert_validation_results.json` | 전문가 판정 기반 추출 정밀도·재현율 |
+| `evaluation/results/human_eval_results.json` | 답변 사람 평가·인용 정확성 |
+| `evaluation/results/graph_sparsity_report.json` | Event 계층 희소성 보고서 |
 | `evaluation/results/ragas_dataset.json` | RAGAS 입력 |
 | `evaluation/results/ragas_results.json` | RAGAS metric 결과 |
 | `evaluation/results/context_precision_judge_results.json` | 직접 Judge 결과 |

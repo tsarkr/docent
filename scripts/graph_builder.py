@@ -289,6 +289,8 @@ def _ensure_schema(session):
         "CREATE CONSTRAINT person_uid IF NOT EXISTS FOR (i:Person) REQUIRE i.uid IS UNIQUE",
         "CREATE CONSTRAINT place_uid IF NOT EXISTS FOR (p:Place) REQUIRE p.uid IS UNIQUE",
         "CREATE CONSTRAINT event_uid IF NOT EXISTS FOR (e:Event) REQUIRE e.uid IS UNIQUE",
+        "CREATE CONSTRAINT activity_uid IF NOT EXISTS FOR (a:Activity) REQUIRE a.uid IS UNIQUE",
+        "CREATE CONSTRAINT collection_name IF NOT EXISTS FOR (c:Collection) REQUIRE c.name IS UNIQUE",
         "CREATE INDEX place_name IF NOT EXISTS FOR (p:장소) ON (p.명칭)",
         "CREATE INDEX place_korean_name IF NOT EXISTS FOR (p:장소) ON (p.한글명칭)",
         "DROP INDEX namesIndex IF EXISTS",
@@ -369,85 +371,92 @@ def _extract_tei_values(tei_text, limit=None):
         return []
 
 
-def apply_cidoc_mappings(session, mappings):
+_CIDOC_CRM = "http://www.cidoc-crm.org/cidoc-crm/"
+_CIDOC_EX = "http://example.org/historical-event/"
+
+
+def _parse_cidoc_activities(ttl):
+    """Return the E7_Activity resources of one TTL document, typed by rdf:type.
+
+    Each item: {'uid', 'label', 'actors': [actor label, ...], 'next': uid | None}
+    """
+    from rdflib import Graph, RDF, URIRef
+    from rdflib.namespace import RDFS
+
+    graph = Graph()
+    graph.parse(data=str(ttl), format='turtle')
+
+    def uid(node):
+        return 'ex:' + str(node)[len(_CIDOC_EX):] if str(node).startswith(_CIDOC_EX) else str(node)
+
+    activities = []
+    for act in graph.subjects(RDF.type, URIRef(_CIDOC_CRM + 'E7_Activity')):
+        actors = []
+        for actor in graph.objects(act, URIRef(_CIDOC_CRM + 'P14_carried_out_by')):
+            label = graph.value(actor, RDFS.label)
+            if label is not None and str(label).strip():
+                actors.append(str(label).strip())
+        following = graph.value(act, URIRef(_CIDOC_CRM + 'P134_was_continued_by'))
+        activities.append({
+            'uid': uid(act),
+            'label': str(graph.value(act, RDFS.label) or ''),
+            'actors': actors,
+            'next': uid(following) if following is not None else None,
+        })
+    return activities
+
+
+def apply_cidoc_mappings(session, mappings, event_ids=None):
     """Apply CIDOC TTL mappings from DB into Neo4j using Korean labels.
     mappings: iterable of rows like (table_name, rowid, mapping_label, cidoc_ttl)
+    event_ids: {(table_name, rowid): 사건 id} for rows that belong to an Event.
+
+    Nodes are typed by their rdf:type, never by guessing from the id:
+    - E5_Event in the TTL is only a wrapper for one source row (ex:<table>_<rowid>),
+      not a historical event, so no node is created for it. The row is resolved
+      to the real :Event (raw_event_info row) through ``event_ids``.
+    - E7_Activity becomes an :Activity node attached to that Event (P9_consists_of).
+    - E39_Actor is merged into :Person by name.
+    Rows that do not belong to an Event (bibliography, place master, ...) are
+    skipped: they would only produce nodes disconnected from every event.
     This function is forgiving and will continue on parse errors.
     """
-    import re
-
-    id_pattern = re.compile(r'ex:([A-Za-z0-9_\-]+)')
-    label_pattern = re.compile(r'ex:([A-Za-z0-9_\-]+)[^\n]*?rdfs:label\s+"([^"]+)"')
-
-    person_nodes = {}
-    place_nodes = {}
-    event_nodes = {}
+    event_ids = event_ids or {}
+    activity_nodes = {}
+    rel_p9 = []
     rel_p14 = []
-    rel_p7 = []
+    rel_p134 = []
 
     total_rows = 0
+    skipped_no_event = 0
     for row in mappings:
         total_rows += 1
         try:
-            if isinstance(row, (list, tuple)) and len(row) >= 4:
-                ttl = row[3]
-            elif isinstance(row, dict):
+            if isinstance(row, dict):
+                table_name, rowid = row.get('table_name'), row.get('rowid')
                 ttl = row.get('cidoc_ttl') or row.get('ttl')
             else:
-                ttl = row[3]
+                table_name, rowid, ttl = row[0], row[1], row[3]
 
             if not ttl:
                 continue
-            text = str(ttl)
-
-            ids = id_pattern.findall(text)
-            if not ids:
+            event_id = event_ids.get((str(table_name), int(rowid)))
+            if not event_id:
+                skipped_no_event += 1
                 continue
 
-            labels = label_pattern.findall(text)
-            label_map = {rid: lbl for rid, lbl in labels}
-
-            uids = []
-            low = text.lower()
-            for short in ids:
-                sl = short.lower()
-                kind = '사건' # default
-                if sl.startswith('person') or ('person' in low and sl.startswith('p')):
-                    kind = '인물'
-                elif sl.startswith('place'):
-                    kind = '장소'
-                elif sl.startswith('event') or sl.startswith('item'):
-                    kind = '사건'
-                elif 'person' in low:
-                    kind = '인물'
-                elif 'place' in low:
-                    kind = '장소'
-
-                uid = f'ex:{short}'
-                uids.append((kind, uid))
-
-                lbl = label_map.get(short)
-                if kind == '인물':
-                    if uid not in person_nodes:
-                        person_nodes[uid] = lbl
-                elif kind == '장소':
-                    if uid not in place_nodes:
-                        place_nodes[uid] = lbl
-                else:
-                    if uid not in event_nodes:
-                        event_nodes[uid] = lbl
-
-            if 'P14_carried_out_by' in text:
-                ev = next((u for k, u in uids if k == '사건'), None)
-                pe = next((u for k, u in uids if k == '인물'), None)
-                if ev and pe:
-                    rel_p14.append({'ev': ev, 'pe': pe})
-
-            if 'P7_took_place_at' in text:
-                ev = next((u for k, u in uids if k == '사건'), None)
-                pl = next((u for k, u in uids if k == '장소'), None)
-                if ev and pl:
-                    rel_p7.append({'ev': ev, 'pl': pl})
+            for act in _parse_cidoc_activities(ttl):
+                activity_nodes[act['uid']] = {
+                    'uid': act['uid'],
+                    'label': act['label'],
+                    'table': str(table_name),
+                    'rowid': int(rowid),
+                }
+                rel_p9.append({'ev': event_id, 'act': act['uid']})
+                for actor in act['actors']:
+                    rel_p14.append({'act': act['uid'], 'pe': actor})
+                if act['next']:
+                    rel_p134.append({'src': act['uid'], 'dst': act['next']})
 
         except Exception as e:
             # ignore problematic rows but log
@@ -458,81 +467,231 @@ def apply_cidoc_mappings(session, mappings):
             print(f"⚠️ CIDOC 매핑 처리 중 오류 (rowid={rowid}): {e}")
             continue
 
-    # push nodes in batches
-    applied = 0
     batch = 5000
-    if person_nodes:
-        data = [{'uid': k, 'label': v} for k, v in person_nodes.items()]
-        _run_batches(session,
-                     """
-                     UNWIND $data AS row
-                     MERGE (n:Person:인물 {uid: row.uid})
-                     SET n.명칭 = coalesce(n.명칭, row.label), n.name = coalesce(n.name, row.label), n.type = '인물'
-                     """,
-                     data,
-                     batch_size=batch)
-        applied += len(data)
+    _run_batches(session,
+                 """
+                 UNWIND $data AS row
+                 MERGE (n:Activity:활동 {uid: row.uid})
+                 SET n.명칭 = row.label, n.name = row.label, n.type = '활동',
+                     n.source_table = row.table, n.source_rowid = row.rowid
+                 """,
+                 list(activity_nodes.values()),
+                 batch_size=batch)
 
-    if place_nodes:
-        data = [{'uid': k, 'label': v} for k, v in place_nodes.items()]
-        _run_batches(session,
-                     """
-                     UNWIND $data AS row
-                     MERGE (n:Place:장소 {uid: row.uid})
-                     SET n.명칭 = coalesce(n.명칭, row.label), n.name = coalesce(n.name, row.label), n.type = '장소'
-                     """,
-                     data,
-                     batch_size=batch)
-        applied += len(data)
+    # Only link to events that exist: an Activity without its Event would be an orphan.
+    _run_batches(session,
+                 """
+                 UNWIND $data AS row
+                 MATCH (e:Event {id: row.ev})
+                 MATCH (a:Activity {uid: row.act})
+                 MERGE (e)-[:P9_consists_of]->(a)
+                 """,
+                 rel_p9,
+                 batch_size=batch)
 
-    if event_nodes:
-        data = [{'uid': k, 'label': v} for k, v in event_nodes.items()]
-        _run_batches(session,
-                     """
-                     UNWIND $data AS row
-                     MERGE (n:Event:사건 {uid: row.uid})
-                     SET n.사건명 = coalesce(n.사건명, row.label), n.title = coalesce(n.title, row.label), n.type = '사건'
-                     """,
-                     data,
-                     batch_size=batch)
-        applied += len(data)
+    # Activities whose Event id is not in the graph stay unlinked; remove them
+    # before creating their actors, so no Person is left behind without a link.
+    safe_run(session, "MATCH (a:Activity) WHERE NOT (:Event)-[:P9_consists_of]->(a) DETACH DELETE a").consume()
 
-    # push relationships in batches
-    if rel_p14:
-        _run_batches(session,
-                     """
-                     UNWIND $data AS row
-                     MATCH (a:Event {uid: row.ev})
-                     MATCH (b:Person {uid: row.pe})
-                     MERGE (a)-[:P14_carried_out_by]->(b)
-                     """,
-                     rel_p14,
-                     batch_size=batch)
+    _run_batches(session,
+                 """
+                 UNWIND $data AS row
+                 MATCH (a:Activity {uid: row.act})
+                 MERGE (p:Person:인물 {명칭: row.pe})
+                 ON CREATE SET p.name = row.pe, p.type = '인물', p.한글명칭 = row.pe
+                 MERGE (a)-[:P14_carried_out_by]->(p)
+                 """,
+                 rel_p14,
+                 batch_size=batch)
 
-    if rel_p7:
-        _run_batches(session,
-                     """
-                     UNWIND $data AS row
-                     MATCH (a:Event {uid: row.ev})
-                     MATCH (b:Place {uid: row.pl})
-                     MERGE (a)-[:P7_took_place_at]->(b)
-                     """,
-                     rel_p7,
-                     batch_size=batch)
-        _run_batches(
-            session,
-            """
-            UNWIND $data AS row
-            MATCH (event:Event {uid: row.ev})-[:P7_took_place_at]->(place:Place {uid: row.pl})
-            MATCH (event)-[:P14_carried_out_by]->(person:Person)
-            MERGE (person)-[shortcut:ACTIVATED_AT]->(place)
-            SET shortcut.event = coalesce(event.title, event.사건명, event.uid)
-            """,
-            rel_p7,
-            batch_size=batch,
-        )
+    _run_batches(session,
+                 """
+                 UNWIND $data AS row
+                 MATCH (a:Activity {uid: row.src})
+                 MATCH (b:Activity {uid: row.dst})
+                 MERGE (a)-[:P134_was_continued_by]->(b)
+                 """,
+                 rel_p134,
+                 batch_size=batch)
 
-    print(f"Applied {applied} CIDOC mappings (nodes: {len(person_nodes)+len(place_nodes)+len(event_nodes)}, rels: {len(rel_p14)+len(rel_p7)}) from {total_rows} rows")
+    print(f"Applied CIDOC mappings (activities: {len(activity_nodes)}, rels: {len(rel_p9)+len(rel_p14)+len(rel_p134)}) "
+          f"from {total_rows} rows; skipped {skipped_no_event} rows without an Event")
+
+
+def load_cidoc_event_ids():
+    """Map (table_name, rowid) of event-bearing source rows to their 사건 id."""
+    event_ids = {}
+    for table_name, column in (('raw_event_info', '아이디'), ('raw_source_info', '사건아이디')):
+        df = pd.read_sql(f'SELECT rowid, "{column}" AS event_id FROM "{table_name}" WHERE "{column}" IS NOT NULL', pg_engine)
+        for rowid, event_id in df.itertuples(index=False, name=None):
+            if str(event_id).strip():
+                event_ids[(table_name, int(rowid))] = str(event_id).strip()
+    return event_ids
+
+
+def _split_multi(value):
+    return [v.strip() for v in str(value or '').split(';') if v.strip()]
+
+
+def collect_explicit_links():
+    """Read the relations that the source tables state through explicit keys.
+
+    Nothing here is inferred from text: every record joins two rows by an id or
+    code column. Returns a dict of record lists consumed by apply_explicit_links.
+    """
+    links = {}
+
+    # 사건 ↔ 세부장소 (curated link table)
+    df = pd.read_sql('SELECT demons_id, place_id FROM raw_event_place_link', pg_engine)
+    links['event_place'] = [
+        {'event_id': str(e).strip(), 'place_id': str(p).strip()}
+        for e, p in df.itertuples(index=False, name=None)
+        if e and p and str(e).strip() and str(p).strip()
+    ]
+
+    # 출처정보 → 사건, 출처정보 → 서지 문서
+    df = pd.read_sql('SELECT "출처정보아이디", "사건아이디", "문서아이디" FROM raw_source_info', pg_engine)
+    links['source_event'] = []
+    links['source_document'] = []
+    for source_id, event_id, document_id in df.itertuples(index=False, name=None):
+        source_id = str(source_id or '').strip()
+        if not source_id:
+            continue
+        if event_id and str(event_id).strip():
+            links['source_event'].append({'doc_id': f'raw_source_info:{source_id}', 'event_id': str(event_id).strip()})
+        if document_id and str(document_id).strip():
+            links['source_document'].append({
+                'doc_id': f'raw_source_info:{source_id}',
+                'bib_id': f'raw_bibliography:{str(document_id).strip()}',
+            })
+
+    # 서지 문서 → 자료군
+    df = pd.read_sql('SELECT "문서아이디", "자료군" FROM raw_bibliography', pg_engine)
+    links['document_collection'] = [
+        {'doc_id': f'raw_bibliography:{str(d).strip()}', 'collection': str(c).strip()}
+        for d, c in df.itertuples(index=False, name=None)
+        if d and c and str(d).strip() and str(c).strip()
+    ]
+
+    # 사건 ↔ 관련 사건, 사건/장소 → 행정구역
+    regions = {}
+
+    def region_refs(codes, names):
+        codes, names = _split_multi(codes), _split_multi(names)
+        for idx, code in enumerate(codes):
+            # Names are only trusted when they line up one-to-one with the codes.
+            name = names[idx] if len(names) == len(codes) else ''
+            if name or code not in regions:
+                regions[code] = regions.get(code) or name
+        return codes
+
+    df = pd.read_sql('SELECT "아이디", "관련시위_아이디", "시위_행정구역코드", "시위_행정구역명" FROM raw_event_info', pg_engine)
+    links['event_event'] = []
+    links['event_region'] = []
+    for event_id, related, codes, names in df.itertuples(index=False, name=None):
+        event_id = str(event_id or '').strip()
+        if not event_id:
+            continue
+        for other in re.split(r'[;,\s]+', str(related or '')):
+            if other and other != event_id:
+                links['event_event'].append({'src': event_id, 'dst': other})
+        for code in region_refs(codes, names):
+            links['event_region'].append({'event_id': event_id, 'region_id': code})
+
+    df = pd.read_sql('SELECT "세부장소아이디", "행정구역코드", "행정구역명" FROM raw_detail_place WHERE "세부장소아이디" IS NOT NULL', pg_engine)
+    links['place_region'] = []
+    for place_id, codes, names in df.itertuples(index=False, name=None):
+        for code in region_refs(codes, names):
+            links['place_region'].append({'place_id': str(place_id).strip(), 'region_id': code})
+
+    links['regions'] = [
+        {'id': code, 'name': name or code, 'h_name': hanja.translate(name or code, 'substitution')}
+        for code, name in regions.items()
+    ]
+    # Region hierarchy: nearest ancestor code that the data itself mentions (A05_05_019 -> A05_05 -> A05).
+    links['region_parent'] = []
+    for code in regions:
+        parent = code
+        while '_' in parent:
+            parent = parent.rsplit('_', 1)[0]
+            if parent in regions:
+                links['region_parent'].append({'child': code, 'parent': parent})
+                break
+    return links
+
+
+def apply_explicit_links(session, links):
+    """Write the key-based relations. Both ends must already exist (MATCH), except
+    regions and collections, which are created here from their codes/names."""
+    batch = 5000
+    # Regions first, so link-table rows that point at an administrative code resolve too.
+    _run_batches(session, """
+        UNWIND $data AS row
+        MERGE (r:Place:장소 {id: row.id})
+        SET r:행정구역, r.place_id = row.id, r.name = row.name, r.명칭 = row.name,
+            r.한글명칭 = row.h_name, r.type = '장소', r.유형 = '행정구역'
+        """, links['regions'], batch_size=batch)
+
+    _run_batches(session, """
+        UNWIND $data AS row
+        MATCH (e:Event {id: row.event_id})
+        MATCH (p:Place {id: row.place_id})
+        MERGE (e)-[r:P7_took_place_at]->(p)
+        ON CREATE SET r.source_tag = 'event_place_link'
+        """, links['event_place'], batch_size=batch)
+
+    _run_batches(session, """
+        UNWIND $data AS row
+        MATCH (d:Document {id: row.doc_id})
+        MATCH (e:Event {id: row.event_id})
+        MERGE (d)-[:P70_documents]->(e)
+        """, links['source_event'], batch_size=batch)
+
+    _run_batches(session, """
+        UNWIND $data AS row
+        MATCH (d:Document {id: row.doc_id})
+        MATCH (b:Document {id: row.bib_id})
+        MERGE (d)-[:P106i_forms_part_of]->(b)
+        """, links['source_document'], batch_size=batch)
+
+    _run_batches(session, """
+        UNWIND $data AS row
+        MATCH (d:Document {id: row.doc_id})
+        MERGE (c:Collection:자료군 {name: row.collection})
+        ON CREATE SET c.명칭 = row.collection, c.type = '자료군'
+        MERGE (d)-[:P106i_forms_part_of]->(c)
+        """, links['document_collection'], batch_size=batch)
+
+    _run_batches(session, """
+        UNWIND $data AS row
+        MATCH (a:Event {id: row.src})
+        MATCH (b:Event {id: row.dst})
+        MERGE (a)-[:관련사건]->(b)
+        """, links['event_event'], batch_size=batch)
+
+    _run_batches(session, """
+        UNWIND $data AS row
+        MATCH (e:Event {id: row.event_id})
+        MATCH (r:Place {id: row.region_id})
+        MERGE (e)-[rel:P7_took_place_at]->(r)
+        ON CREATE SET rel.source_tag = '행정구역코드'
+        """, links['event_region'], batch_size=batch)
+
+    _run_batches(session, """
+        UNWIND $data AS row
+        MATCH (p:Place {id: row.place_id})
+        MATCH (r:Place {id: row.region_id})
+        MERGE (p)-[:P89_falls_within]->(r)
+        """, links['place_region'], batch_size=batch)
+
+    _run_batches(session, """
+        UNWIND $data AS row
+        MATCH (c:Place {id: row.child})
+        MATCH (p:Place {id: row.parent})
+        MERGE (c)-[:P89_falls_within]->(p)
+        """, links['region_parent'], batch_size=batch)
+
+    print("  ✓ 명시적 키 기반 관계: " + ", ".join(f"{k} {len(v)}" for k, v in links.items()))
 
 
 def build_ultimate_graph():
@@ -628,27 +787,33 @@ def build_ultimate_graph():
         )
 
         print("👤 인물 및 📚 서지 데이터 통합 중... (Postgres TEI에서 로드)")
-        source_tables = ['raw_bibliography', 'raw_source_info', 'raw_event_place_link']
+        # raw_event_place_link is a 사건↔장소 link table, not a document: see collect_explicit_links.
+        # (table, id column, title column). Ids come from the key columns so that
+        # 출처정보 → 사건/문서 links can be resolved; the first TEI <p> is header boilerplate.
+        source_tables = [
+            ('raw_bibliography', '문서아이디', '제목'),
+            ('raw_source_info', '출처정보아이디', '출처정보'),
+        ]
         source_records = []
-        for source_table in source_tables:
+        for source_table, id_col, title_col in source_tables:
             _ensure_tei_status(source_table)
             try:
                 df_source = pd.read_sql(
-                    f"SELECT rowid, tei FROM {source_table} WHERE tei IS NOT NULL",
+                    f'SELECT rowid, "{id_col}" AS source_id, "{title_col}" AS title FROM {source_table} WHERE "{id_col}" IS NOT NULL',
                     pg_engine,
                 )
             except Exception as e:
-                print(f"⚠️ {source_table} TEI 로딩 실패: {e}")
+                print(f"⚠️ {source_table} 로딩 실패: {e}")
                 continue
 
             for _, row in df_source.iterrows():
-                values = _extract_tei_values(row.get('tei'), limit=3)
-                if not values:
+                source_id = str(row.get('source_id') or '').strip()
+                if not source_id:
                     continue
                 source_records.append({
-                    'id': f"{source_table}:{values[0]}",
-                    'source_id': values[0],
-                    'title': values[1] if len(values) > 1 else values[0],
+                    'id': f"{source_table}:{source_id}",
+                    'source_id': source_id,
+                    'title': _strip_xml_text(row.get('title')) or source_id,
                     'rowid': str(row.get('rowid', '')),
                     'source_table': source_table,
                 })
@@ -1043,6 +1208,13 @@ def build_ultimate_graph():
             except Exception as e:
                 print(f"⚠️ 사료 본문 문맥 관계 분석 중 오류: {e}")
 
+            # Runs after the TEI step so ACTIVATED_AT keeps meaning "person and place tagged in the same event text".
+            print("🧷 명시적 키(링크 테이블·아이디·행정구역코드) 기반 관계 생성 중...")
+            try:
+                apply_explicit_links(session, collect_explicit_links())
+            except Exception as e:
+                print(f"⚠️ 명시적 키 기반 관계 생성 실패: {e}")
+
             # CIDOC-CRM 매핑 적용: Postgres의 tei_cidoc_mappings 테이블에서 TTL 불러와 병합
             print("🔧 CIDOC 매핑 적용을 시도합니다 (Postgres 테이블: tei_cidoc_mappings)")
             try:
@@ -1053,9 +1225,10 @@ def build_ultimate_graph():
                     chunksize=10000
                 )
                 total_processed = 0
+                cidoc_event_ids = load_cidoc_event_ids()
                 for chunk in chunks:
                     mappings = list(chunk.itertuples(index=False, name=None))
-                    apply_cidoc_mappings(session, mappings)
+                    apply_cidoc_mappings(session, mappings, cidoc_event_ids)
                     total_processed += len(chunk)
                     print(f"  ✓ CIDOC 매핑 {total_processed}행 처리 중...")
             except Exception as e:

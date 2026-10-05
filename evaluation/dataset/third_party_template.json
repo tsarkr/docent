@@ -1,0 +1,12 @@
+[
+  {
+    "id": "TP_01",
+    "author": "REPLACE_ME",
+    "category": "Multi-hop Chaining",
+    "query": "외부 출제자가 작성한 질문",
+    "hops": 2,
+    "target_entities": ["질문에 등장하는 핵심 인물·장소·사건명"],
+    "gold_facts": ["사료로 확인되는 정답 사실 (문항당 1~3개, 근거 사료 ID를 함께 적으면 좋음)"],
+    "negative_traps": ["답변에 나오면 환각으로 판정할 거짓 진술 (없으면 빈 리스트)"]
+  }
+]

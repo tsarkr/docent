@@ -86,6 +86,7 @@ def read_thesaurus_csv(csv_path: Path) -> list[dict[str, str]]:
 SCHEMA_STATEMENTS = (
     "CREATE CONSTRAINT IF NOT EXISTS FOR (t:Thesaurus) REQUIRE t.term_id IS UNIQUE",
     "CREATE INDEX IF NOT EXISTS FOR (t:Thesaurus) ON (t.name)",
+    "CREATE CONSTRAINT IF NOT EXISTS FOR (c:ThesaurusCategory) REQUIRE c.path IS UNIQUE",
     "CREATE VECTOR INDEX samil_docent_vector_idx IF NOT EXISTS FOR (t:Thesaurus) ON (t.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 768, `vector.similarity_function`: 'cosine'}}",
 )
 
@@ -117,6 +118,59 @@ RETURN count(t) AS upserted
 """
 
 
+# The thesaurus is a hierarchy: term_lk holds each term's classification path
+# ("교육>근대교육기관>초등교육기관"). Loading it as broader-term links keeps
+# terms that match no Person/Place connected to the rest of the thesaurus.
+CATEGORY_QUERY = """
+UNWIND $rows AS row
+MERGE (c:ThesaurusCategory:분류 {path: row.path})
+SET c.name = row.name, c.명칭 = row.name, c.type = '시소러스분류'
+WITH c, row
+WHERE row.parent IS NOT NULL
+MERGE (parent:ThesaurusCategory:분류 {path: row.parent})
+MERGE (c)-[:P127_has_broader_term]->(parent)
+"""
+
+TERM_CATEGORY_QUERY = """
+UNWIND $rows AS row
+MATCH (t:Thesaurus {term_id: row.term_id})
+MATCH (c:ThesaurusCategory {path: row.path})
+MERGE (t)-[:P127_has_broader_term]->(c)
+"""
+
+
+def category_path(category: str) -> list[str]:
+    return [part.strip() for part in category.split(">") if part.strip()]
+
+
+def category_records(rows: list[dict[str, str]]) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Return (category nodes ordered parents-first, term -> category links)."""
+    categories: dict[str, dict[str, Any]] = {}
+    term_links = []
+    for row in rows:
+        parts = category_path(row["category"])
+        if not parts:
+            continue
+        for depth in range(1, len(parts) + 1):
+            path = ">".join(parts[:depth])
+            categories.setdefault(path, {
+                "path": path,
+                "name": parts[depth - 1],
+                "parent": ">".join(parts[:depth - 1]) or None,
+            })
+        term_links.append({"term_id": row["term_id"], "path": ">".join(parts)})
+    ordered = sorted(categories.values(), key=lambda c: c["path"].count(">"))
+    return ordered, term_links
+
+
+def load_categories(session: Any, rows: list[dict[str, str]], batch_size: int) -> None:
+    categories, term_links = category_records(rows)
+    session.run(CATEGORY_QUERY, rows=categories).consume()
+    for start in range(0, len(term_links), batch_size):
+        session.run(TERM_CATEGORY_QUERY, rows=term_links[start : start + batch_size]).consume()
+    print(f"시소러스 분류 계층: 분류 {len(categories)}개, 용어 연결 {len(term_links)}건", flush=True)
+
+
 def ensure_schema(session: Any) -> None:
     for statement in SCHEMA_STATEMENTS:
         session.run(statement).consume()
@@ -136,6 +190,7 @@ def load_batches(driver: Any, rows: list[dict[str, str]], batch_size: int) -> in
                 )
             written += upserted
             print(f"Neo4j 적재: {written}/{len(rows)}건", flush=True)
+        load_categories(session, rows, batch_size)
     return written
 
 

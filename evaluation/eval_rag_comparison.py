@@ -3,8 +3,10 @@
 
 Evaluates:
 1. Model 1: Vanilla Vector RAG (Text chunks Top-K retrieval)
-2. Model 2: Standard GraphRAG (Neo4j Graph triples traversal without scoping)
-3. Model 3: Proposed Docent Hybrid RAG (Graph + PostgreSQL Scoping Envelopes + 2-Stage In-Context Knowledge Pipeline)
+2. Model 2: Hybrid Vector RAG (BM25 + dense, RRF fusion, cross-encoder rerank)
+3. Model 3: Standard GraphRAG (Neo4j Graph triples traversal without scoping)
+4. Model 4: Microsoft GraphRAG reference implementation (opt-in, needs a built index)
+5. Model 5: Proposed Docent Hybrid RAG (Graph + PostgreSQL Scoping Envelopes + 2-Stage In-Context Knowledge Pipeline)
 
 Metrics:
 - Faithfulness / Fact Recall (%)
@@ -16,6 +18,8 @@ Metrics:
 Outputs:
 - table_rag_comparison.tex (IEEE/ACM formatted publication table)
 - rag_evaluation_results.csv (Detailed per-query breakdown)
+- rag_category_results.csv / rag_significance.csv / table_rag_by_category.tex
+  (per-category results and paired significance tests, see analyze_rag_results.py)
 """
 
 from __future__ import annotations
@@ -43,8 +47,17 @@ RESULTS_DIR = Path(__file__).resolve().parent / "results"
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def call_llm(messages: list[dict[str, str]], temperature: float = 0.1, top_p: float = 0.85, max_tokens: int = 1500) -> str:
+# Conditions shared by every pipeline, so differences in the results come from
+# the pipelines and not from their settings. All are set from the CLI in main().
+GEN_TEMPERATURE = 0.0
+GEN_TOP_P = 0.8
+CONTEXT_CHARS = 2400          # retrieved-context budget per question; 0 = each pipeline's legacy size
+RETRIEVAL_INPUT = "question"  # "question": entities extracted from the question / "entities": gold target_entities
+
+
+def call_llm(messages: list[dict[str, str]], max_tokens: int = 1500) -> str:
     """Call Google Gemini API using configured key."""
+    temperature, top_p = GEN_TEMPERATURE, GEN_TOP_P
     secrets = load_secrets()
     api_key = setting("GEMINI_API_KEY", "", secrets)
     model = setting("GEMINI_MODEL", "gemini-flash-lite-latest", secrets)
@@ -91,7 +104,49 @@ def call_llm(messages: list[dict[str, str]], temperature: float = 0.1, top_p: fl
                 raise RuntimeError(f"Gemini API 요청 실패: {e}")
             time.sleep(5)
 
-    return ""
+    raise RuntimeError("Gemini API 재시도 한도 초과 (429/503)")
+
+
+def pack_context(items: list[str], separator: str) -> list[str]:
+    """Keep ranked context items until the shared character budget is used up."""
+    if CONTEXT_CHARS <= 0:
+        return items
+    packed: list[str] = []
+    used = 0
+    for item in items:
+        room = CONTEXT_CHARS - used
+        if room <= 0:
+            break
+        packed.append(item[:room])
+        used += len(packed[-1]) + len(separator)
+    return packed
+
+
+_ENTITY_CACHE: dict[str, list[str]] = {}
+
+
+def question_entities(query: str) -> list[str]:
+    """Extract search entities from the question text (one LLM call per question, shared by all pipelines)."""
+    if query not in _ENTITY_CACHE:
+        raw = call_llm([
+            {"role": "system", "content": (
+                "질문에서 검색에 사용할 고유명(인물, 지명, 기관·단체, 사건·문서명)을 질문에 적힌 표기 그대로 추출하십시오. "
+                "질문에 없는 이름을 추가하지 말고, 최대 8개를 JSON 문자열 배열로만 출력하십시오."
+            )},
+            {"role": "user", "content": query},
+        ], max_tokens=300)
+        match = re.search(r"\[.*\]", raw, flags=re.DOTALL)
+        if not match:
+            raise RuntimeError(f"질의 개체 추출 결과를 해석할 수 없습니다: {raw[:80]}")
+        _ENTITY_CACHE[query] = [str(e).strip() for e in json.loads(match.group(0)) if str(e).strip()]
+    return _ENTITY_CACHE[query]
+
+
+def retrieval_entities(query_item: dict[str, Any]) -> list[str]:
+    """Entities every pipeline may use for retrieval under the current input condition."""
+    if RETRIEVAL_INPUT == "entities":
+        return list(query_item["target_entities"])
+    return question_entities(query_item["query"])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -120,10 +175,29 @@ def retrieve_vector_chunks(query: str, target_entities: list[str], top_k: int = 
 
 def run_vector_rag(query_item: dict[str, Any]) -> dict[str, Any]:
     t0 = time.time()
-    chunks = retrieve_vector_chunks(query_item["query"], query_item["target_entities"], top_k=4)
-    t_retrieval = time.time() - t0
+    chunks = retrieve_vector_chunks(query_item["query"], query_item["target_entities"], top_k=12 if CONTEXT_CHARS > 0 else 4)
+    return _answer_from_chunks("Vector RAG", query_item, pack_context(chunks, CHUNK_SEPARATOR), time.time() - t0)
 
-    context_str = "\n---\n".join(chunks)
+
+RERANKER = "cross-encoder"
+CHUNK_SEPARATOR = "\n---\n"
+
+
+def run_hybrid_vector_rag(query_item: dict[str, Any]) -> dict[str, Any]:
+    """BM25 + dense + rerank baseline. Retrieves from the question text only."""
+    from baselines import hybrid_retrieve
+
+    t0 = time.time()
+    search_text = query_item["query"]
+    if RETRIEVAL_INPUT == "entities":
+        # Same information the other pipelines receive in this condition.
+        search_text += " " + " ".join(query_item["target_entities"])
+    chunks = [c["text"] for c in hybrid_retrieve(search_text, top_k=12 if CONTEXT_CHARS > 0 else 4, reranker=RERANKER)]
+    return _answer_from_chunks("Hybrid Vector RAG (BM25+Dense+Rerank)", query_item, pack_context(chunks, CHUNK_SEPARATOR), time.time() - t0)
+
+
+def _answer_from_chunks(model_name: str, query_item: dict[str, Any], chunks: list[str], t_retrieval: float) -> dict[str, Any]:
+    context_str = CHUNK_SEPARATOR.join(chunks)
     system_prompt = (
         "You are a strict historical RAG assistant. Use only the retrieved document chunks. "
         "Separate documented facts from inference, never transfer a person or event across regions, "
@@ -137,7 +211,7 @@ def run_vector_rag(query_item: dict[str, Any]) -> dict[str, Any]:
         answer = call_llm([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
-        ], temperature=0.7, top_p=0.95)
+        ])
     except Exception as exc:
         answer = f"[Error: {exc}]"
     t_generation = time.time() - t_gen_start
@@ -147,7 +221,7 @@ def run_vector_rag(query_item: dict[str, Any]) -> dict[str, Any]:
     output_tokens = len(answer) // 3
 
     return {
-        "model": "Vector RAG",
+        "model": model_name,
         "answer": answer,
         "contexts": chunks,
         "context_chars": len(context_str),
@@ -187,7 +261,7 @@ def retrieve_graph_triples(target_entities: list[str], limit: int = 15) -> list[
 
 def run_graph_rag(query_item: dict[str, Any]) -> dict[str, Any]:
     t0 = time.time()
-    triples = retrieve_graph_triples(query_item["target_entities"], limit=15)
+    triples = pack_context(retrieve_graph_triples(query_item["target_entities"], limit=80 if CONTEXT_CHARS > 0 else 15), "\n")
     t_retrieval = time.time() - t0
 
     context_str = "\n".join(triples)
@@ -203,7 +277,7 @@ def run_graph_rag(query_item: dict[str, Any]) -> dict[str, Any]:
         answer = call_llm([
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
-        ], temperature=0.5, top_p=0.9)
+        ])
     except Exception as exc:
         answer = f"[Error: {exc}]"
     t_generation = time.time() - t_gen_start
@@ -222,6 +296,33 @@ def run_graph_rag(query_item: dict[str, Any]) -> dict[str, Any]:
         "retrieval_time": round(t_retrieval, 3),
         "generation_time": round(t_generation, 3),
         "total_time": round(t_retrieval + t_generation, 3),
+    }
+
+
+def run_ms_graphrag(query_item: dict[str, Any]) -> dict[str, Any]:
+    """Microsoft GraphRAG reference implementation, queried through its CLI.
+
+    The CLI returns only the final answer, so contexts and prompt tokens are
+    unavailable and the retrieval/token metrics are not comparable for it.
+    """
+    from baselines import msgraphrag_query
+
+    t0 = time.time()
+    try:
+        answer = msgraphrag_query(query_item["query"])
+    except Exception as exc:
+        answer = f"[Error: {exc}]"
+    elapsed = round(time.time() - t0, 3)
+    return {
+        "model": "Microsoft GraphRAG",
+        "answer": answer,
+        "contexts": [],
+        "context_chars": 0,
+        "prompt_tokens": 0,
+        "output_tokens": len(answer) // 3,
+        "retrieval_time": 0.0,
+        "generation_time": elapsed,
+        "total_time": elapsed,
     }
 
 
@@ -256,11 +357,12 @@ def retrieve_docent_scoped_context(target_entities: list[str]) -> str:
     if triples:
         envelopes.append(f"<GRAPH_TOPOLOGY>\n" + "\n".join(triples) + "\n</GRAPH_TOPOLOGY>")
 
-    # 2. Scoped PostgreSQL primary sources
-    for ent in target_entities[:2]:
+    # 2. Scoped PostgreSQL primary sources (more candidates when a shared budget decides the cut-off)
+    n_entities, per_entity = (3, 4) if CONTEXT_CHARS > 0 else (2, 2)
+    for ent in target_entities[:n_entities]:
         cur.execute("""
-            SELECT rowid, tei FROM raw_bibliography WHERE tei LIKE %s LIMIT 2
-        """, (f"%{ent}%",))
+            SELECT rowid, tei FROM raw_bibliography WHERE tei LIKE %s LIMIT %s
+        """, (f"%{ent}%", per_entity))
         for rowid, tei in cur.fetchall():
             clean = re.sub(r'<[^>]+>', ' ', tei)
             clean = re.sub(r'\s+', ' ', clean).strip()[:500]
@@ -272,7 +374,7 @@ def retrieve_docent_scoped_context(target_entities: list[str]) -> str:
 
     cur.close()
     conn.close()
-    return "\n\n".join(envelopes)
+    return "\n\n".join(pack_context(envelopes, "\n\n"))
 
 
 def run_docent_hybrid_rag(query_item: dict[str, Any]) -> dict[str, Any]:
@@ -280,7 +382,7 @@ def run_docent_hybrid_rag(query_item: dict[str, Any]) -> dict[str, Any]:
     scoped_context = retrieve_docent_scoped_context(query_item["target_entities"])
     t_retrieval = time.time() - t0
 
-    # ── Stage 1: Fact Table Extraction (temp=0.0, top_p=0.8) ──
+    # ── Stage 1: Fact Table Extraction ──
     ext_sys = (
         "당신은 한국 근현대사 1차 사료 분석 전문가입니다. "
         "제공된 <SOURCE_EVIDENCE> 사료 블록들을 사료 비판적으로 정밀 분석하여, "
@@ -294,11 +396,11 @@ def run_docent_hybrid_rag(query_item: dict[str, Any]) -> dict[str, Any]:
         fact_table = call_llm([
             {"role": "system", "content": ext_sys},
             {"role": "user", "content": ext_user}
-        ], temperature=0.0, top_p=0.8, max_tokens=1000)
+        ], max_tokens=1000)
     except Exception as exc:
         fact_table = f"[Fact Extraction Error: {exc}]"
 
-    # ── Stage 2: Synthesis (temp=0.1, top_p=0.85) ──
+    # ── Stage 2: Synthesis ──
     synth_sys = (
         "당신은 국사편찬위원회 및 독립기념관 수준의 전문성을 갖춘 '3·1운동 역사 AI 도슨트'입니다.\n"
         "당신의 임무는 제공된 지식그래프(Graph DB) 사료와 RDB 문맥(Context)을 교차 분석하여, 사용자의 질의에 대한 학술적이고 객관적인 역사 해설을 제공하는 것입니다.\n\n"
@@ -323,7 +425,7 @@ def run_docent_hybrid_rag(query_item: dict[str, Any]) -> dict[str, Any]:
         answer = call_llm([
             {"role": "system", "content": synth_sys},
             {"role": "user", "content": synth_user}
-        ], temperature=0.1, top_p=0.85, max_tokens=1500)
+        ], max_tokens=1500)
     except Exception as exc:
         answer = f"[Synthesis Error: {exc}]"
     t_generation = time.time() - t_gen_start
@@ -349,6 +451,34 @@ def run_docent_hybrid_rag(query_item: dict[str, Any]) -> dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Metric Evaluation Harness
 # ─────────────────────────────────────────────────────────────────────────────
+def is_generation_failure(answer: str) -> bool:
+    """True when the pipeline produced no answer (API error), as opposed to a wrong one."""
+    stripped = answer.strip()
+    return not stripped or bool(re.match(r"\[[A-Za-z ]*Error", stripped))
+
+
+def run_pipeline(query_item: dict[str, Any], model_name: str, runner_fn: Any, retries: int, delay: float) -> dict[str, Any]:
+    """Run one pipeline on one question under the shared input condition, retrying failed generations."""
+    res: dict[str, Any] = {}
+    for attempt in range(retries + 1):
+        if attempt:
+            wait = max(delay, 30.0) * attempt
+            print(f"    🔁 생성 실패, {wait:.0f}초 후 재시도 ({attempt}/{retries})...", flush=True)
+            time.sleep(wait)
+        try:
+            run_item = {**query_item, "target_entities": retrieval_entities(query_item)}
+            res = runner_fn(run_item)
+        except Exception as exc:
+            res = {"model": model_name, "answer": f"[Error: {exc}]", "contexts": [], "context_chars": 0,
+                   "prompt_tokens": 0, "output_tokens": 0, "total_time": 0.0}
+        # A failed fact-table stage means the Docent answer was not produced by the full pipeline.
+        if not is_generation_failure(res["answer"]) and not is_generation_failure(res.get("fact_table", "ok")):
+            res["failed"] = False
+            return res
+    res["failed"] = True
+    return res
+
+
 def evaluate_faithfulness(answer: str, gold_facts: list[str]) -> tuple[float, int, int]:
     """Check how many gold facts are covered accurately in the answer."""
     if not gold_facts:
@@ -403,30 +533,47 @@ def evaluate_hallucination(answer: str, negative_traps: list[str], category: str
 
 
 def export_rag_latex_table(results_by_model: dict[str, dict[str, Any]], out_path: Path) -> str:
-    """Generate IEEE/ACM ready LaTeX table comparing the three RAG models."""
-    latex = r"""\begin{table*}[htbp]
-\centering
-\caption{Quantitative Comparative Evaluation: Vector RAG vs. GraphRAG vs. Proposed Docent Hybrid RAG}
-\label{tab:rag_comparison}
-\begin{tabular}{l|c|c|c}
-\hline
-\textbf{Evaluation Metric} & \textbf{Vector RAG} & \textbf{Standard GraphRAG} & \textbf{Docent Hybrid RAG (Proposed)} \\
-\hline
-Fact Recall / Faithfulness (\%) $\uparrow$ & """
-    m1 = results_by_model["Vector RAG"]
-    m2 = results_by_model["Standard GraphRAG"]
-    m3 = results_by_model["Docent Hybrid RAG (Proposed)"]
-
-    latex += f"{m1['faithfulness']:.1f}\\% & {m2['faithfulness']:.1f}\\% & \\textbf{{{m3['faithfulness']:.1f}\\%}} \\\\\n"
-    latex += f"Hallucination Rate (Traps) (\\%) $\\downarrow$ & {m1['hallucination_rate']:.1f}\\% & {m2['hallucination_rate']:.1f}\\% & \\textbf{{{m3['hallucination_rate']:.1f}\\%}} \\\\\n"
-    latex += f"Avg. Context Tokens Ingested & {int(m1['avg_context_tokens'])} & {int(m2['avg_context_tokens'])} & {int(m3['avg_context_tokens'])} \\\\\n"
-    latex += f"Avg. Output Tokens Generated & {int(m1['avg_output_tokens'])} & {int(m2['avg_output_tokens'])} & {int(m3['avg_output_tokens'])} \\\\\n"
-    latex += f"Token Efficiency (Facts / 1k tokens) $\\uparrow$ & {m1['token_efficiency']:.2f} & {m2['token_efficiency']:.2f} & \\textbf{{{m3['token_efficiency']:.2f}}} \\\\\n"
-    latex += f"Avg. Latency (Total s) $\\downarrow$ & {m1['avg_latency']:.2f}s & {m2['avg_latency']:.2f}s & {m3['avg_latency']:.2f}s \\\\\n"
-    latex += r"""\hline
-\end{tabular}
-\end{table*}
-"""
+    """Generate IEEE/ACM ready LaTeX table comparing the evaluated RAG models."""
+    names = list(results_by_model)
+    # (label, key, format, better direction: 1 higher / -1 lower / 0 none)
+    rows = [
+        (r"Fact Recall / Faithfulness (\%) $\uparrow$", "faithfulness", "{:.1f}\\%", 1),
+        (r"Hallucination Rate (Traps) (\%) $\downarrow$", "hallucination_rate", "{:.1f}\\%", -1),
+        ("Avg. Context Tokens Ingested", "avg_context_tokens", "{:.0f}", 0),
+        ("Avg. Output Tokens Generated", "avg_output_tokens", "{:.0f}", 0),
+        (r"Token Efficiency (Facts / 1k tokens) $\uparrow$", "token_efficiency", "{:.2f}", 1),
+        (r"Avg. Latency (Total s) $\downarrow$", "avg_latency", "{:.2f}s", -1),
+    ]
+    token_keys = {"avg_context_tokens", "token_efficiency"}
+    lines = [
+        r"\begin{table*}[htbp]",
+        r"\centering",
+        r"\caption{Quantitative Comparative Evaluation of RAG Pipelines}",
+        r"\label{tab:rag_comparison}",
+        r"\begin{tabular}{l|" + "|".join("c" * len(names)) + "}",
+        r"\hline",
+        r"\textbf{Evaluation Metric} & " + " & ".join(rf"\textbf{{{n}}}" for n in names) + r" \\",
+        r"\hline",
+    ]
+    for label, key, fmt, direction in rows:
+        # Models that do not expose their prompt (context tokens == 0) get n/a.
+        usable = {n: results_by_model[n][key] for n in names
+                  if not (key in token_keys and results_by_model[n]["avg_context_tokens"] == 0)}
+        best = None
+        if direction and usable:
+            best = max(usable.values()) if direction > 0 else min(usable.values())
+            if list(usable.values()).count(best) > 1:
+                best = None  # ties are not highlighted
+        cells = []
+        for n in names:
+            if n not in usable:
+                cells.append("n/a")
+                continue
+            text = fmt.format(usable[n])
+            cells.append(rf"\textbf{{{text}}}" if best is not None and usable[n] == best else text)
+        lines.append(f"{label} & " + " & ".join(cells) + r" \\")
+    lines += [r"\hline", r"\end{tabular}", r"\end{table*}", ""]
+    latex = "\n".join(lines)
     out_path.write_text(latex, encoding="utf-8")
     return latex
 
@@ -441,6 +588,15 @@ def export_rag_csv(detailed_records: list[dict[str, Any]], out_path: Path) -> No
         writer.writerows(detailed_records)
 
 
+MODEL_REGISTRY = {
+    "vector": ("Vector RAG", run_vector_rag),
+    "hybrid": ("Hybrid Vector RAG (BM25+Dense+Rerank)", run_hybrid_vector_rag),
+    "graph": ("Standard GraphRAG", run_graph_rag),
+    "msgraphrag": ("Microsoft GraphRAG", run_ms_graphrag),
+    "docent": ("Docent Hybrid RAG (Proposed)", run_docent_hybrid_rag),
+}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate Vector RAG vs GraphRAG vs Docent Hybrid RAG.")
     parser.add_argument("--quick", action="store_true", help="Run on 3 representative queries (1 Multi-hop, 1 Spatial, 1 Trap)")
@@ -448,7 +604,28 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="Limit number of queries to evaluate")
     parser.add_argument("--delay", type=float, default=15.0, help="Delay in seconds between API calls to prevent 429 rate limit (default: 15.0)")
     parser.add_argument("--ragas", action="store_true", help="Run RAGAS metrics after generating benchmark responses")
+    parser.add_argument("--models", default="vector,hybrid,graph,docent",
+                        help=f"Comma-separated pipelines to run. Choices: {','.join(MODEL_REGISTRY)} (default: vector,hybrid,graph,docent)")
+    parser.add_argument("--reranker", choices=["cross-encoder", "none"], default="cross-encoder",
+                        help="Reranker for the hybrid baseline (default: cross-encoder)")
+    parser.add_argument("--retrieval-input", choices=["question", "entities"], default="question",
+                        help="What every pipeline may retrieve with: entities extracted from the question text (default), "
+                             "or the benchmark's gold target_entities")
+    parser.add_argument("--temperature", type=float, default=0.0, help="Generation temperature for every LLM call (default: 0.0)")
+    parser.add_argument("--top-p", type=float, default=0.8, help="Generation top_p for every LLM call (default: 0.8)")
+    parser.add_argument("--context-chars", type=int, default=2400,
+                        help="Retrieved-context character budget shared by all pipelines (default: 2400; 0 = legacy per-pipeline sizes)")
+    parser.add_argument("--retries", type=int, default=2, help="Extra attempts for a failed generation (default: 2)")
     args = parser.parse_args()
+
+    global RERANKER, RETRIEVAL_INPUT, GEN_TEMPERATURE, GEN_TOP_P, CONTEXT_CHARS
+    RERANKER = args.reranker
+    RETRIEVAL_INPUT = args.retrieval_input
+    GEN_TEMPERATURE, GEN_TOP_P, CONTEXT_CHARS = args.temperature, args.top_p, args.context_chars
+    model_keys = [k.strip() for k in args.models.split(",") if k.strip()]
+    unknown = [k for k in model_keys if k not in MODEL_REGISTRY]
+    if unknown:
+        parser.error(f"알 수 없는 모델: {unknown} (선택 가능: {list(MODEL_REGISTRY)})")
 
     benchmark_data = json.loads(DATASET_PATH.read_text(encoding="utf-8"))
     if args.single:
@@ -467,15 +644,14 @@ def main() -> int:
 
     mode_str = "1번 질의 단독 디버깅 모드" if args.single else f"총 {len(selected)}건 정량 평가 모드"
     print(f"🚀 [RAG 정량 평가 벤치마크] {mode_str}를 시작합니다. (호출 간 딜레이: {args.delay}초)")
+    print(f"   공통 조건: 검색 입력={RETRIEVAL_INPUT}, temperature={GEN_TEMPERATURE}, top_p={GEN_TOP_P}, "
+          f"문맥 예산={CONTEXT_CHARS or '제한 없음'}자, 재시도={args.retries}회")
 
-    models = [
-        ("Vector RAG", run_vector_rag),
-        ("Standard GraphRAG", run_graph_rag),
-        ("Docent Hybrid RAG (Proposed)", run_docent_hybrid_rag),
-    ]
+    models = [MODEL_REGISTRY[k] for k in model_keys]
 
     detailed_records = []
     ragas_records = []
+    failed_generations = 0
     aggregated = {m_name: {
         "faithfulness_scores": [],
         "hallucination_scores": [],
@@ -490,7 +666,11 @@ def main() -> int:
         print(f"\n[{i}/{len(selected)}] [{item['category']}] {item['query']}")
         for m_name, runner_fn in models:
             print(f"\n  🔹 [{m_name}] 실행 중...", flush=True)
-            res = runner_fn(item)
+            res = run_pipeline(item, m_name, runner_fn, args.retries, args.delay)
+            failed = res["failed"]
+            if failed:
+                failed_generations += 1
+                print(f"    ⚠️ 생성 실패 — 이 질문은 유의성 검정에서 제외됩니다: {res['answer'][:120]}")
             f_score, f_cov, f_tot = evaluate_faithfulness(res["answer"], item["gold_facts"])
             h_score, h_traps = evaluate_hallucination(res["answer"], item["negative_traps"], item["category"])
 
@@ -514,9 +694,11 @@ def main() -> int:
                 "faithfulness": f_score,
                 "hallucination_rate": h_score,
                 "prompt_tokens": res["prompt_tokens"],
+                "context_chars": res.get("context_chars", 0),
                 "output_tokens": res["output_tokens"],
                 "latency_sec": res["total_time"],
                 "answer_snippet": res["answer"].replace("\n", " ")[:120],
+                "generation_failed": failed,
                 **evaluate_retrieval_direct(item, res.get("contexts", [])),
             })
             ragas_records.append({
@@ -527,6 +709,8 @@ def main() -> int:
                 "model": m_name,
                 "query_id": item["id"],
                 "evaluation_type": item.get("evaluation_type", "direct"),
+                "category": item["category"],
+                "generation_failed": failed,
             })
             print(f"    ✅ 완료 (Fact Recall: {f_score}%, Hallucination: {h_score}%, Latency: {res['total_time']}s)")
             if args.delay > 0:
@@ -577,6 +761,15 @@ def main() -> int:
     print(f"\n📄 LaTeX 표 생성 완료: {tex_path}")
     print(f"💾 CSV 상세 결과 저장 완료: {csv_path}")
     print(f"🧾 RAGAS 입력 데이터 저장 완료: {ragas_input_path}")
+
+    from analyze_rag_results import run as run_analysis
+
+    counts = run_analysis(csv_path, RESULTS_DIR)
+    print(f"📈 범주별 결과·쌍대 유의성 검정 저장 완료 (분석 대상 {counts['questions_used']}/{counts['questions_total']}문항): "
+          f"{RESULTS_DIR / 'rag_category_results.csv'}, {RESULTS_DIR / 'rag_significance.csv'}")
+    if failed_generations:
+        print(f"⚠️ 생성 실패 {failed_generations}건 발생: 위 요약 표의 평균에는 실패 응답이 포함되어 있습니다. "
+              "--delay를 늘려 다시 실행하세요.")
     if args.ragas:
         from eval_ragas import evaluate_dataset
 

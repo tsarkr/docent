@@ -10,6 +10,7 @@ Outputs:
 - evaluation/results/table_rag_comparison.tex
 - evaluation/results/ner_evaluation_results.csv
 - evaluation/results/rag_evaluation_results.csv
+- evaluation/results/rag_category_results.csv, rag_significance.csv, table_rag_by_category.tex
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ def main() -> int:
     parser.add_argument("--delay", type=float, default=15.0, help="Delay in seconds between RAG API calls (default: 15.0)")
     parser.add_argument("--generate-dataset", action="store_true", help="Regenerate benchmark dataset before evaluation")
     parser.add_argument("--ragas", action="store_true", help="Run RAGAS metrics after the RAG benchmark")
+    parser.add_argument("--models", default="", help="Pipelines for the RAG comparison (passed to eval_rag_comparison.py --models)")
     args = parser.parse_args()
 
     python_bin = sys.executable
@@ -52,7 +54,7 @@ def main() -> int:
     # 0. Optional: Regenerate benchmark dataset
     if args.generate_dataset:
         gen_script = ROOT / "generate_benchmark_dataset.py"
-        ok_gen = run_command([python_bin, str(gen_script), "--target-count", "60"], "0단계: 벤치마크 평가 데이터셋(60건) 자동 생성")
+        ok_gen = run_command([python_bin, str(gen_script), "--target-count", "120"], "0단계: 벤치마크 평가 데이터셋(120건) 자동 생성")
         if not ok_gen:
             return 1
 
@@ -79,6 +81,8 @@ def main() -> int:
         rag_cmd.extend(["--limit", str(args.limit)])
     if args.ragas:
         rag_cmd.append("--ragas")
+    if args.models:
+        rag_cmd.extend(["--models", args.models])
 
     ok_rag = run_command(rag_cmd, "2단계: Vector RAG vs. GraphRAG vs. Docent Hybrid RAG 비교 실험 실행")
     if not ok_rag:
