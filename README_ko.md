@@ -360,8 +360,11 @@ MCP 클라이언트에는 `mcp_client_config.json`의 절대경로를 현재 환
 
 ```bash
 .venv3.14/bin/python evaluation/generate_benchmark_dataset.py \
-  --target-count 30
+  --target-count 30 --out evaluation/dataset/benchmark_new.json --validate
 ```
+
+`--out`을 지정하지 않으면 기존 기본 데이터셋 파일을 덮어쓰지 않고 오류로
+종료합니다. 의도적으로 덮어쓸 때만 `--force`를 지정합니다.
 
 ### RAGAS
 
@@ -444,6 +447,55 @@ GRAPHRAG_ROOT=./graphrag_root .venv3.14/bin/python evaluation/eval_rag_compariso
 .venv3.14/bin/python evaluation/analyze_rag_results.py
 ```
 
+### 데이터셋·결과 폴더 지정, 문항 출처, Ablation
+
+`--dataset`으로 벤치마크 파일을, `--out-dir`로 실행 결과가 저장될 폴더를
+지정합니다. 실행마다 폴더를 달리하면 이전 결과를 덮어쓰지 않습니다. 사용한
+데이터셋 파일명은 CSV의 `dataset` 열과 `ragas_dataset.json`의 각 레코드에
+기록됩니다.
+
+```bash
+.venv3.14/bin/python evaluation/eval_rag_comparison.py --quick --delay 0 \
+  --dataset evaluation/dataset/benchmark_v1_tagged.json \
+  --out-dir evaluation/results_run3
+```
+
+[evaluation/dataset/benchmark_v1_tagged.json](./evaluation/dataset/benchmark_v1_tagged.json)은
+기존 30문항에 `source` 필드를 추가한 파일입니다(앞 13개 `curated`, 나머지
+`template`). 데이터셋에 `source`가 있으면 결과에 `source` 열이 기록되고,
+분석 단계가 Overall / `curated` / `template` / `third_party`별 평균과 같은
+쌍대 검정을 추가로 출력합니다(`rag_source_results.csv`,
+`rag_source_significance.csv`). `source` 열이 없던 시기의 CSV는 태그된
+데이터셋을 함께 지정합니다.
+
+```bash
+.venv3.14/bin/python evaluation/analyze_rag_results.py \
+  --input evaluation/results/rag_evaluation_results.csv \
+  --dataset evaluation/dataset/benchmark_v1_tagged.json \
+  --out-dir evaluation/results_by_source
+```
+
+증거의 효과와 2단계 생성의 효과를 분리하기 위한 ablation 파이프라인 2개를
+`--models`로 선택할 수 있습니다. 둘 다 위의 공통 조건을 그대로 따릅니다.
+
+| `--models` 키 | 증거 | 생성 |
+|---|---|---|
+| `docent_1stage` | Docent와 동일(`retrieve_docent_scoped_context`) | 사실표 단계 없이 답변 프롬프트 1회 |
+| `hybrid_2stage` | 하이브리드 베이스라인과 동일(`hybrid_retrieve`). 청크를 `<SOURCE_EVIDENCE id="chunk_N">`으로 감쌈 | Docent와 같은 사실표 → 답변 |
+
+```bash
+.venv3.14/bin/python evaluation/eval_rag_comparison.py \
+  --models vector,hybrid,graph,docent,docent_1stage,hybrid_2stage \
+  --dataset evaluation/dataset/benchmark_v1_tagged.json --out-dir evaluation/results_ablation
+```
+
+`hallucination_rate`는 문항의 `negative_traps`에 대한 키워드 휴리스틱입니다.
+함정 문장의 인명 또는 고유명사가 다른 키워드 하나와 함께 답변의 한 문장에
+나타나고(연도·날짜·도/군/도시 지명만으로는 매칭되지 않음), 답변에 부정 표현
+(`확인되지 않`, `사실이 아니`, `허구`, `근거가 없` 등)이 없을 때만 함정에
+걸린 것으로 셉니다. 걸린 문장은 `trap_flagged_text` 열에 남으므로, 수치를
+보고하기 전에 사람이 확인해야 합니다.
+
 ### 벤치마크 규모와 제3자 출제
 
 ```bash
@@ -457,6 +509,31 @@ GRAPHRAG_ROOT=./graphrag_root .venv3.14/bin/python evaluation/eval_rag_compariso
 복사해 작성합니다. 템플릿 문항은 `raw_event_info`에서 자동으로 채워지므로,
 보고 전에 gold fact를 검수해야 합니다.
 
+템플릿 문항은 사용 전에 검증합니다
+([evaluation/validate_benchmark.py](./evaluation/validate_benchmark.py).
+`raw_event_info`만 읽고 LLM은 호출하지 않으며, 입력 파일은 수정하지 않습니다).
+
+```bash
+.venv3.14/bin/python evaluation/validate_benchmark.py evaluation/dataset/benchmark_v2.json
+# 옵션: --out-dir DIR  --sources template,third_party  --seed 42  --review-fraction 0.3  --no-db
+```
+
+`evaluation/validation/`에 `<이름>_validation.xlsx`(문항별 PASS/FAIL과 사유,
+조사 수정 내역, 통과 문항의 무작위 30%를 담은 `human_review` 시트),
+`<이름>_validation_summary.json`, `<이름>_validated.json`(탈락하지 않은 문항.
+`--dataset`에 그대로 사용 가능)을 저장합니다. 탈락 규칙은 다음과 같습니다.
+
+- 인명이 2글자 미만이거나 로마자 조각, 직책·일반명사인 경우
+- 질문의 사건명·날짜가 `raw_event_info`, 사건명에 적힌 날짜, 질문이 밝힌
+  시기와 맞지 않는 경우
+- 함정 인물이 해당 사건의 참여자 목록에 있는 경우
+- 함정이 같은 지명을 서로 비교하는 자기모순인 경우
+- 앞선 문항과 중복인 경우
+
+인명 뒤 조사 오류(`김상열가`)는 탈락시키지 않고 자동으로 고친 뒤 내역을
+기록합니다. `generate_benchmark_dataset.py --validate`는 방금 생성한 파일에
+같은 검증을 실행합니다.
+
 ### 사람 평가
 
 개체·관계 추출 품질(역사학자가 무작위 표본 사료를 판정):
@@ -467,16 +544,36 @@ GRAPHRAG_ROOT=./graphrag_root .venv3.14/bin/python evaluation/eval_rag_compariso
   evaluation/expert_validation/annotation_A.xlsx evaluation/expert_validation/annotation_B.xlsx
 ```
 
-최종 답변(사실 정확성·인용 정확성·유용성 블라인드 채점):
+`--n`으로 표본 크기를 정합니다(기본 150, 네 사료 테이블에 균등 배분. 범위를
+줄이려면 예: `--n 80 --out-dir evaluation/expert_validation_80`). `export`는
+출력 폴더의 시트를 덮어쓰므로, 판정을 시작한 뒤에는 새 `--out-dir`를
+사용합니다. `score`는 유형별 점수와 함께 표본 크기, 사료 유형(table)별
+정밀도·재현율을 출력합니다.
+
+최종 답변 블라인드 채점:
 
 ```bash
 .venv3.14/bin/python evaluation/human_answer_eval.py export
 .venv3.14/bin/python evaluation/human_answer_eval.py score \
   evaluation/human_eval/rating_A.xlsx evaluation/human_eval/rating_B.xlsx
+
+# 수작업 문항만 평가. --dataset 은 source가 기록되지 않은 답변 파일에 출처를 보충
+.venv3.14/bin/python evaluation/human_answer_eval.py export --source curated,third_party \
+  --dataset evaluation/dataset/benchmark_v1_tagged.json
 ```
 
-`blinding_key.json`은 섞인 답변 라벨과 모델의 대응표이므로 평가자에게
-전달하지 않습니다.
+평가자는 답변마다 `declined`(Y/N), `decline_justified`(Y/N/해당없음),
+`accuracy`(1~5, 거절뿐인 답변은 해당없음), `completeness`(1~5),
+`unsupported_claims`(인용 여부와 무관한 개수), `usefulness`(1~5)를
+기입합니다. 안내 시트에 항목별 판정 예시와 "답변 길이로 판단하지 말 것"이
+명시되어 있습니다. `score`는 항목별 평균과 부트스트랩 CI, 시스템 쌍대
+순열검정(Holm), 평가자 간 가중 κ, 인용 정확성, 그리고
+`accuracy`/`completeness`와 답변 길이의 상관계수(길이 편향 점검)를
+출력합니다.
+
+`blinding_key.json`은 섞인 답변 라벨과 모델의 대응표입니다. 평가자 시트
+(`evaluation/human_eval/`)와 분리해 `evaluation/human_eval_key/`
+(`--key-dir`)에 저장하며, 평가자에게는 시트 폴더만 전달합니다.
 
 ### 그래프 희소성
 
@@ -496,6 +593,8 @@ GRAPHRAG_ROOT=./graphrag_root .venv3.14/bin/python evaluation/eval_rag_compariso
 | `evaluation/results/table_rag_comparison.tex` | 논문용 비교 표 |
 | `evaluation/results/rag_category_results.csv` | 범주별 평균과 95% CI |
 | `evaluation/results/rag_significance.csv` | 파이프라인 간 쌍대 유의성 검정 |
+| `evaluation/results/rag_source_results.csv`, `rag_source_significance.csv` | 같은 두 표의 문항 출처별 버전(`source`가 기록된 경우) |
+| `evaluation/validation/<이름>_validation.xlsx` | 벤치마크 검증: PASS/FAIL, 수정 내역, 사람 검토 표본 |
 | `evaluation/results/table_rag_by_category.tex` | 범주별 LaTeX 표 |
 | `evaluation/results/expert_validation_results.json` | 전문가 판정 기반 추출 정밀도·재현율 |
 | `evaluation/results/human_eval_results.json` | 답변 사람 평가·인용 정확성 |
@@ -516,6 +615,13 @@ Hit@K, 질의 유형별 결과와 함께 보고해야 합니다.
 전체에 대한 통계적 유의성이나 일반화를 단독으로 주장하기에는 작습니다.
 논문에는 질의별 결과, bootstrap 신뢰구간, 유형별 결과와 함께 데이터셋의
 템플릿·엔티티 앵커 편향을 명시하십시오.
+
+### 이름 검색 인덱스 (선택, 자동 적용되지 않음)
+
+[migrations/001_pg_trgm_name_search.sql](./migrations/001_pg_trgm_name_search.sql)은
+[includes/](./includes/)의 `LIKE '%이름%'` 검색을 위한 `pg_trgm` GIN 인덱스를
+만듭니다. 내용을 검토한 뒤 직접 실행하십시오. 전제 조건, `EXPLAIN` 확인
+방법, 롤백 구문은 파일 안에 적혀 있습니다.
 
 ## 검증
 

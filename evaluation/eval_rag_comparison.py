@@ -7,6 +7,8 @@ Evaluates:
 3. Model 3: Standard GraphRAG (Neo4j Graph triples traversal without scoping)
 4. Model 4: Microsoft GraphRAG reference implementation (opt-in, needs a built index)
 5. Model 5: Proposed Docent Hybrid RAG (Graph + PostgreSQL Scoping Envelopes + 2-Stage In-Context Knowledge Pipeline)
+6. Ablations (opt-in via --models): docent_1stage (Docent evidence, one generation call) and
+   hybrid_2stage (hybrid-baseline evidence, Docent's fact table -> answer generation)
 
 Metrics:
 - Faithfulness / Fact Recall (%)
@@ -41,6 +43,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.config import get_neo4j_driver, get_pg_connection, load_secrets, setting
+from validate_benchmark import is_date_token, is_generic_token, strip_josa
+from verify_citations import clean_answer, verify_answer
 
 DATASET_PATH = Path(__file__).resolve().parent / "dataset" / "multihop_benchmark_dataset.json"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -183,17 +187,23 @@ RERANKER = "cross-encoder"
 CHUNK_SEPARATOR = "\n---\n"
 
 
-def run_hybrid_vector_rag(query_item: dict[str, Any]) -> dict[str, Any]:
-    """BM25 + dense + rerank baseline. Retrieves from the question text only."""
+def retrieve_hybrid_chunks(query_item: dict[str, Any]) -> list[str]:
+    """Evidence of the hybrid baseline: BM25 + dense + rerank, cut to the shared context budget."""
     from baselines import hybrid_retrieve
 
-    t0 = time.time()
     search_text = query_item["query"]
     if RETRIEVAL_INPUT == "entities":
         # Same information the other pipelines receive in this condition.
         search_text += " " + " ".join(query_item["target_entities"])
     chunks = [c["text"] for c in hybrid_retrieve(search_text, top_k=12 if CONTEXT_CHARS > 0 else 4, reranker=RERANKER)]
-    return _answer_from_chunks("Hybrid Vector RAG (BM25+Dense+Rerank)", query_item, pack_context(chunks, CHUNK_SEPARATOR), time.time() - t0)
+    return pack_context(chunks, CHUNK_SEPARATOR)
+
+
+def run_hybrid_vector_rag(query_item: dict[str, Any]) -> dict[str, Any]:
+    """BM25 + dense + rerank baseline. Retrieves from the question text only."""
+    t0 = time.time()
+    chunks = retrieve_hybrid_chunks(query_item)
+    return _answer_from_chunks("Hybrid Vector RAG (BM25+Dense+Rerank)", query_item, chunks, time.time() - t0)
 
 
 def _answer_from_chunks(model_name: str, query_item: dict[str, Any], chunks: list[str], t_retrieval: float) -> dict[str, Any]:
@@ -377,50 +387,66 @@ def retrieve_docent_scoped_context(target_entities: list[str]) -> str:
     return "\n\n".join(pack_context(envelopes, "\n\n"))
 
 
-def run_docent_hybrid_rag(query_item: dict[str, Any]) -> dict[str, Any]:
-    t0 = time.time()
-    scoped_context = retrieve_docent_scoped_context(query_item["target_entities"])
-    t_retrieval = time.time() - t0
+DOCENT_FACT_TABLE_SYSTEM = (
+    "당신은 한국 근현대사 1차 사료 분석 전문가입니다. "
+    "제공된 <SOURCE_EVIDENCE> 사료 블록들을 사료 비판적으로 정밀 분석하여, "
+    "각 사료별 사실관계를 왜곡이나 교차 귀속(인물/지역 혼합) 없이 다음 정밀 팩트 표로 추출하십시오.\n"
+    "반드시 각 블록에 명시된 사실만 기록하고, 타 지역 사건이나 무관한 인물을 절대 섞지 마십시오."
+)
 
-    # ── Stage 1: Fact Table Extraction ──
-    ext_sys = (
-        "당신은 한국 근현대사 1차 사료 분석 전문가입니다. "
-        "제공된 <SOURCE_EVIDENCE> 사료 블록들을 사료 비판적으로 정밀 분석하여, "
-        "각 사료별 사실관계를 왜곡이나 교차 귀속(인물/지역 혼합) 없이 다음 정밀 팩트 표로 추출하십시오.\n"
-        "반드시 각 블록에 명시된 사실만 기록하고, 타 지역 사건이나 무관한 인물을 절대 섞지 마십시오."
-    )
-    ext_user = f"다음 사료군에서 [사료 ID | 대상 개체 | 발생 장소/지역 | 실제 행동 인물 | 사료에 기록된 핵심 팩트(1~2줄)] 표를 마크다운 표로 추출하십시오.\n\n[사료 원문 블록]\n{scoped_context}"
+DOCENT_SYNTHESIS_SYSTEM = (
+    "당신은 국사편찬위원회 및 독립기념관 수준의 전문성을 갖춘 '3·1운동 역사 AI 도슨트'입니다.\n"
+    "당신의 임무는 제공된 지식그래프(Graph DB) 사료와 RDB 문맥(Context)을 교차 분석하여, 사용자의 질의에 대한 학술적이고 객관적인 역사 해설을 제공하는 것입니다.\n\n"
+    "답변을 작성할 때 다음의 원칙을 엄격하게 준수하십시오:\n\n"
+    "1. [유동적 목차 생성]\n"
+    "절대 고정된 목차(예: 서론-국외 항일 지도부-국내 시위-결론)를 기계적으로 사용하지 마십시오. 사용자의 질의 의도와 제공된 사료의 성격에 맞추어 가장 적합한 소제목 3~4개를 유동적으로 생성하여 논리적인 흐름을 구성하십시오.\n"
+    "(예시: 사건의 배경 -> 전개 과정 -> 일제의 탄압 양상 -> 사료적 의의)\n\n"
+    "2. [노이즈 데이터 자체 필터링]\n"
+    "검색된 문맥 안에 질의와 직접적인 연관성이 없는 거물급 인물(예: 손병희, 이동휘 등)이나 무관한 지역 명칭이 단순 허브(Hub) 효과로 섞여 들어왔을 경우, 이를 해설에 억지로 끼워 맞추지 말고 과감히 배제하십시오. 오직 질문의 핵심이 되는 장소, 사건, 그리고 실제 주도한 기층 민중에 집중하십시오.\n\n"
+    "3. [엄밀한 사료 비판과 환각 방지]\n"
+    "제공된 사료에 나타난 지명 오기(예: 남리->제암리)나 겹치는 지명(예: 경기 장안면 vs 경남 장안면)이 있다면, 사료 비판적 관점에서 이를 명확히 구분하고 교정하여 서술하십시오. 제공된 문맥에 없는 내용은 절대 지어내지 마십시오.\n\n"
+    "4. [답변의 완결성]\n"
+    "문장이 중간에 끊기지 않도록 분량을 조절하십시오. 마지막 단락(결론)은 해당 사건이나 인물이 지니는 역사적 의의를 2~3문장으로 간결하고 명확하게 요약하여 완벽하게 끝맺음하십시오.\n\n"
+    "5. [엄격 모드 출력]\n"
+    "각 핵심 주장 뒤에 근거를 괄호로 표시하십시오. 괄호 안에는 <SOURCE_EVIDENCE id=\"...\">에 적힌 id(예: raw_bib_123) "
+    "또는 <GRAPH_TOPOLOGY>에 그대로 적힌 사건명만 쓰십시오. 관계 이름(P70_documents, P106i 등), 블록 이름(GRAPH_TOPOLOGY, 블록 1), "
+    "'Graph DB'나 '지식그래프' 같은 표기는 근거로 쓰지 마십시오. "
+    "근거가 없는 질문의 전제는 부정하거나 '자료에서 확인되지 않음'이라고 답하십시오. "
+    "검색 문맥에 없는 인물·날짜·장소·인과관계를 보완 지식으로 채우지 마십시오."
+)
 
+
+def generate_docent_answer(
+    model_name: str,
+    query_item: dict[str, Any],
+    scoped_context: str,
+    contexts: list[str],
+    t_retrieval: float,
+    two_stage: bool = True,
+) -> dict[str, Any]:
+    """Docent generation over a given evidence string: fact table -> answer, or the answer prompt alone."""
+    ext_sys, synth_sys = DOCENT_FACT_TABLE_SYSTEM, DOCENT_SYNTHESIS_SYSTEM
     t_gen_start = time.time()
-    try:
-        fact_table = call_llm([
-            {"role": "system", "content": ext_sys},
-            {"role": "user", "content": ext_user}
-        ], max_tokens=1000)
-    except Exception as exc:
-        fact_table = f"[Fact Extraction Error: {exc}]"
+    fact_table = ""
+    prompt_chars = 0
+    if two_stage:
+        # ── Stage 1: Fact Table Extraction ──
+        ext_user = f"다음 사료군에서 [사료 ID | 대상 개체 | 발생 장소/지역 | 실제 행동 인물 | 사료에 기록된 핵심 팩트(1~2줄)] 표를 마크다운 표로 추출하십시오.\n\n[사료 원문 블록]\n{scoped_context}"
+        try:
+            fact_table = call_llm([
+                {"role": "system", "content": ext_sys},
+                {"role": "user", "content": ext_user}
+            ], max_tokens=1000)
+        except Exception as exc:
+            fact_table = f"[Fact Extraction Error: {exc}]"
+        prompt_chars += len(ext_sys) + len(ext_user)
+        synth_user = f"[사용자 질의]: {query_item['query']}\n\n[검색된 지식그래프 및 사료 문맥]:\n■ [1단계 검증 팩트 표]\n{fact_table}\n\n■ [원문 사료 및 그래프 컨텍스트]\n{scoped_context}\n\n위 원칙과 문맥을 바탕으로 전문적인 도슨트 해설을 작성하십시오."
+        time.sleep(2.0)
+    else:
+        # Same answer prompt without the fact-table block.
+        synth_user = f"[사용자 질의]: {query_item['query']}\n\n[검색된 지식그래프 및 사료 문맥]:\n■ [원문 사료 및 그래프 컨텍스트]\n{scoped_context}\n\n위 원칙과 문맥을 바탕으로 전문적인 도슨트 해설을 작성하십시오."
 
     # ── Stage 2: Synthesis ──
-    synth_sys = (
-        "당신은 국사편찬위원회 및 독립기념관 수준의 전문성을 갖춘 '3·1운동 역사 AI 도슨트'입니다.\n"
-        "당신의 임무는 제공된 지식그래프(Graph DB) 사료와 RDB 문맥(Context)을 교차 분석하여, 사용자의 질의에 대한 학술적이고 객관적인 역사 해설을 제공하는 것입니다.\n\n"
-        "답변을 작성할 때 다음의 원칙을 엄격하게 준수하십시오:\n\n"
-        "1. [유동적 목차 생성]\n"
-        "절대 고정된 목차(예: 서론-국외 항일 지도부-국내 시위-결론)를 기계적으로 사용하지 마십시오. 사용자의 질의 의도와 제공된 사료의 성격에 맞추어 가장 적합한 소제목 3~4개를 유동적으로 생성하여 논리적인 흐름을 구성하십시오.\n"
-        "(예시: 사건의 배경 -> 전개 과정 -> 일제의 탄압 양상 -> 사료적 의의)\n\n"
-        "2. [노이즈 데이터 자체 필터링]\n"
-        "검색된 문맥 안에 질의와 직접적인 연관성이 없는 거물급 인물(예: 손병희, 이동휘 등)이나 무관한 지역 명칭이 단순 허브(Hub) 효과로 섞여 들어왔을 경우, 이를 해설에 억지로 끼워 맞추지 말고 과감히 배제하십시오. 오직 질문의 핵심이 되는 장소, 사건, 그리고 실제 주도한 기층 민중에 집중하십시오.\n\n"
-        "3. [엄밀한 사료 비판과 환각 방지]\n"
-        "제공된 사료에 나타난 지명 오기(예: 남리->제암리)나 겹치는 지명(예: 경기 장안면 vs 경남 장안면)이 있다면, 사료 비판적 관점에서 이를 명확히 구분하고 교정하여 서술하십시오. 제공된 문맥에 없는 내용은 절대 지어내지 마십시오.\n\n"
-        "4. [답변의 완결성]\n"
-        "문장이 중간에 끊기지 않도록 분량을 조절하십시오. 마지막 단락(결론)은 해당 사건이나 인물이 지니는 역사적 의의를 2~3문장으로 간결하고 명확하게 요약하여 완벽하게 끝맺음하십시오.\n\n"
-        "5. [엄격 모드 출력]\n"
-        "각 핵심 주장 뒤에 근거가 된 사료 ID(raw_bib_*) 또는 그래프 사건명을 괄호로 표시하십시오. "
-        "근거가 없는 질문의 전제는 부정하거나 '자료에서 확인되지 않음'이라고 답하십시오. "
-        "검색 문맥에 없는 인물·날짜·장소·인과관계를 보완 지식으로 채우지 마십시오."
-    )
-    synth_user = f"[사용자 질의]: {query_item['query']}\n\n[검색된 지식그래프 및 사료 문맥]:\n■ [1단계 검증 팩트 표]\n{fact_table}\n\n■ [원문 사료 및 그래프 컨텍스트]\n{scoped_context}\n\n위 원칙과 문맥을 바탕으로 전문적인 도슨트 해설을 작성하십시오."
-    time.sleep(2.0)
     try:
         answer = call_llm([
             {"role": "system", "content": synth_sys},
@@ -430,22 +456,50 @@ def run_docent_hybrid_rag(query_item: dict[str, Any]) -> dict[str, Any]:
         answer = f"[Synthesis Error: {exc}]"
     t_generation = time.time() - t_gen_start
 
-    prompt_chars = len(ext_sys) + len(ext_user) + len(synth_sys) + len(synth_user)
-    prompt_tokens = prompt_chars // 3
-    output_tokens = len(answer) // 3
-
-    return {
-        "model": "Docent Hybrid RAG (Proposed)",
+    prompt_chars += len(synth_sys) + len(synth_user)
+    result = {
+        "model": model_name,
         "answer": answer,
-        "contexts": [scoped_context] if scoped_context else [],
-        "fact_table": fact_table,
+        "contexts": contexts,
         "context_chars": len(scoped_context),
-        "prompt_tokens": prompt_tokens,
-        "output_tokens": output_tokens,
+        "prompt_tokens": prompt_chars // 3,
+        "output_tokens": len(answer) // 3,
         "retrieval_time": round(t_retrieval, 3),
         "generation_time": round(t_generation, 3),
         "total_time": round(t_retrieval + t_generation, 3),
     }
+    if two_stage:
+        result["fact_table"] = fact_table
+    return result
+
+
+def run_docent_hybrid_rag(query_item: dict[str, Any]) -> dict[str, Any]:
+    t0 = time.time()
+    scoped_context = retrieve_docent_scoped_context(query_item["target_entities"])
+    return generate_docent_answer("Docent Hybrid RAG (Proposed)", query_item, scoped_context,
+                                  [scoped_context] if scoped_context else [], time.time() - t0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3b. Ablations: separate the effect of the evidence from the effect of 2-stage generation
+# ─────────────────────────────────────────────────────────────────────────────
+def run_docent_1stage(query_item: dict[str, Any]) -> dict[str, Any]:
+    """Docent's evidence, answered with the synthesis prompt only (no fact-table call)."""
+    t0 = time.time()
+    scoped_context = retrieve_docent_scoped_context(query_item["target_entities"])
+    return generate_docent_answer("Docent 1-Stage (Ablation)", query_item, scoped_context,
+                                  [scoped_context] if scoped_context else [], time.time() - t0, two_stage=False)
+
+
+def run_hybrid_2stage(query_item: dict[str, Any]) -> dict[str, Any]:
+    """The hybrid baseline's evidence, answered with Docent's fact table -> answer generation."""
+    t0 = time.time()
+    # Same chunks, same budget cut as the baseline; the envelope only adds an id the answer can cite.
+    envelopes = [
+        f'<SOURCE_EVIDENCE id="chunk_{n}">\n  [사료 원문: {chunk}]\n</SOURCE_EVIDENCE>'
+        for n, chunk in enumerate(retrieve_hybrid_chunks(query_item), 1)
+    ]
+    return generate_docent_answer("Hybrid + 2-Stage (Ablation)", query_item, "\n\n".join(envelopes), envelopes, time.time() - t0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -512,24 +566,81 @@ def evaluate_retrieval_direct(query_item: dict[str, Any], contexts: list[str]) -
     }
 
 
-def evaluate_hallucination(answer: str, negative_traps: list[str], category: str) -> tuple[float, int]:
-    """Evaluate hallucination: Did the model falsely claim or endorse any negative traps?"""
+def citation_stats(answer: str, contexts: list[str]) -> dict[str, int]:
+    """Count record-id citations (valid / total), internal-label citations, and named sources found in the evidence."""
+    cites = verify_answer(answer, contexts)
+    return {
+        "cite_ids_valid": sum(1 for c in cites if c["kind"] == "record_id" and c["valid"]),
+        "cite_ids_total": sum(1 for c in cites if c["kind"] == "record_id"),
+        "cite_internal_labels": sum(1 for c in cites if c["kind"] == "internal_label"),
+        "cite_named_found": sum(1 for c in cites if c["kind"] == "named_source" and c["valid"]),
+        "cite_named_total": sum(1 for c in cites if c["kind"] == "named_source"),
+    }
+
+
+TRAP_STOPWORDS = ['에서', '으로', '하고', '직접', '했다', '시작했다']
+# An answer that rejects the premise anywhere is not counted as endorsing the trap.
+NEGATION_MARKERS = [
+    '아니다', '없다', '않았다', '불가능', '확인되지', '오류', '차이', '별개의',
+    '허구', '허위', '부합하지 않', '사실이 아니', '사실과 다르', '확인되지 않', '확인할 수 없', '근거가 없', '근거는 없', '근거 없',
+    '아닙니다', '없습니다', '않았습니다', '않습니다',  # polite forms of the first three
+]
+
+
+def trap_keywords(trap: str, entities: list[str] | None = None) -> list[str]:
+    """The two keywords an answer must contain to count as repeating a trap statement.
+
+    One of them is always a person name or proper noun: the trap's leading
+    noun or one of the question's target entities. Years and dates are never
+    used, and province/county/city names ("평안남도", "전주군", "평양") cannot
+    be the anchor, so an answer is not flagged for merely mentioning when or where.
+    Returns [] when the trap names no person or proper noun.
+    """
+    tokens: list[str] = []
+    for raw in re.findall(r'[가-힣A-Za-z0-9]{2,}', trap):
+        token = strip_josa(raw)
+        if raw in TRAP_STOPWORDS or token in TRAP_STOPWORDS or is_date_token(token) or is_date_token(raw):
+            continue
+        if token not in tokens:
+            tokens.append(token)
+    hints = [str(e).strip() for e in entities or [] if str(e).strip() and not is_generic_token(str(e).strip())]
+    anchors = [
+        token for position, token in enumerate(tokens)
+        if not is_generic_token(token) and (position == 0 or any(hint in token or hint.startswith(token) for hint in hints))
+    ]
+    if not anchors:
+        return []
+    # Prefer a second name/proper noun over an ordinary word as the other keyword.
+    others = anchors[1:] + [t for t in tokens if t not in anchors]
+    return [anchors[0]] + others[:1]
+
+
+def evaluate_traps(answer: str, negative_traps: list[str], entities: list[str] | None = None) -> tuple[float, int, str]:
+    """Trap rate, number of traps triggered, and the answer sentences that triggered them (for manual review)."""
     if not negative_traps:
-        return 0.0, 0
+        return 0.0, 0, ""
+    has_negation = any(neg in answer for neg in NEGATION_MARKERS)
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?。])\s+|\n+", answer) if s.strip()]
     traps_triggered = 0
+    flagged: list[str] = []
 
     for trap in negative_traps:
-        # Check if trap assertion keywords are affirmed without negation words
-        trap_keywords = [k for k in re.findall(r'[가-힣A-Za-z0-9]{2,}', trap) if k not in ['에서', '으로', '하고', '직접', '했다', '시작했다']]
-        if all(kw in answer for kw in trap_keywords[:2]):
-            # If the answer explicitly negates it, e.g. "직접적 관련이 없다", "불가능하다", "참여하지 않았다"
-            negation_markers = ['아니다', '없다', '않았다', '불가능', '확인되지', '오류', '차이', '별개의']
-            has_negation = any(neg in answer for neg in negation_markers)
-            if not has_negation:
-                traps_triggered += 1
+        keywords = trap_keywords(trap, entities)
+        if not keywords or has_negation:
+            continue
+        hits = [s for s in sentences if all(kw in s for kw in keywords)]
+        if hits:
+            traps_triggered += 1
+            flagged += [s for s in hits if s not in flagged]
 
     rate = (traps_triggered / len(negative_traps)) * 100.0
-    return round(rate, 2), traps_triggered
+    return round(rate, 2), traps_triggered, " ‖ ".join(flagged)
+
+
+def evaluate_hallucination(answer: str, negative_traps: list[str], category: str, entities: list[str] | None = None) -> tuple[float, int]:
+    """Evaluate hallucination: Did the model falsely claim or endorse any negative traps?"""
+    rate, traps_triggered, _ = evaluate_traps(answer, negative_traps, entities)
+    return rate, traps_triggered
 
 
 def export_rag_latex_table(results_by_model: dict[str, dict[str, Any]], out_path: Path) -> str:
@@ -594,6 +705,8 @@ MODEL_REGISTRY = {
     "graph": ("Standard GraphRAG", run_graph_rag),
     "msgraphrag": ("Microsoft GraphRAG", run_ms_graphrag),
     "docent": ("Docent Hybrid RAG (Proposed)", run_docent_hybrid_rag),
+    "docent_1stage": ("Docent 1-Stage (Ablation)", run_docent_1stage),
+    "hybrid_2stage": ("Hybrid + 2-Stage (Ablation)", run_hybrid_2stage),
 }
 
 
@@ -616,6 +729,10 @@ def main() -> int:
     parser.add_argument("--context-chars", type=int, default=2400,
                         help="Retrieved-context character budget shared by all pipelines (default: 2400; 0 = legacy per-pipeline sizes)")
     parser.add_argument("--retries", type=int, default=2, help="Extra attempts for a failed generation (default: 2)")
+    parser.add_argument("--dataset", type=Path, default=DATASET_PATH,
+                        help="Benchmark JSON to evaluate (default: dataset/multihop_benchmark_dataset.json)")
+    parser.add_argument("--out-dir", type=Path, default=RESULTS_DIR,
+                        help="Directory for all result files, so runs can be kept apart (default: evaluation/results)")
     args = parser.parse_args()
 
     global RERANKER, RETRIEVAL_INPUT, GEN_TEMPERATURE, GEN_TOP_P, CONTEXT_CHARS
@@ -627,7 +744,12 @@ def main() -> int:
     if unknown:
         parser.error(f"알 수 없는 모델: {unknown} (선택 가능: {list(MODEL_REGISTRY)})")
 
-    benchmark_data = json.loads(DATASET_PATH.read_text(encoding="utf-8"))
+    if not args.dataset.is_file():
+        parser.error(f"데이터셋 파일이 없습니다: {args.dataset}")
+    benchmark_data = json.loads(args.dataset.read_text(encoding="utf-8"))
+    dataset_name = args.dataset.name
+    out_dir = args.out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
     if args.single:
         selected = [benchmark_data[0]]
     elif args.quick:
@@ -636,7 +758,7 @@ def main() -> int:
             benchmark_data[0],  # Q_MH_01: Boseongsa -> Pyongyang Sudok School
             benchmark_data[4],  # Q_ST_01: Seoul -> Pyongyang -> Hamhung diffusion
             benchmark_data[9],  # Q_ZC_01: Lee Dong-hwi vs Aunae market trap
-        ]
+        ] if len(benchmark_data) > 9 else benchmark_data[:3]
     elif args.limit > 0:
         selected = benchmark_data[:args.limit]
     else:
@@ -644,6 +766,7 @@ def main() -> int:
 
     mode_str = "1번 질의 단독 디버깅 모드" if args.single else f"총 {len(selected)}건 정량 평가 모드"
     print(f"🚀 [RAG 정량 평가 벤치마크] {mode_str}를 시작합니다. (호출 간 딜레이: {args.delay}초)")
+    print(f"   데이터셋: {args.dataset} / 결과 폴더: {out_dir}")
     print(f"   공통 조건: 검색 입력={RETRIEVAL_INPUT}, temperature={GEN_TEMPERATURE}, top_p={GEN_TOP_P}, "
           f"문맥 예산={CONTEXT_CHARS or '제한 없음'}자, 재시도={args.retries}회")
 
@@ -672,7 +795,7 @@ def main() -> int:
                 failed_generations += 1
                 print(f"    ⚠️ 생성 실패 — 이 질문은 유의성 검정에서 제외됩니다: {res['answer'][:120]}")
             f_score, f_cov, f_tot = evaluate_faithfulness(res["answer"], item["gold_facts"])
-            h_score, h_traps = evaluate_hallucination(res["answer"], item["negative_traps"], item["category"])
+            h_score, h_traps, trap_flagged = evaluate_traps(res["answer"], item["negative_traps"], item.get("target_entities", []))
 
             aggregated[m_name]["faithfulness_scores"].append(f_score)
             aggregated[m_name]["hallucination_scores"].append(h_score)
@@ -690,6 +813,8 @@ def main() -> int:
             detailed_records.append({
                 "query_id": item["id"],
                 "category": item["category"],
+                "source": item.get("source", ""),
+                "dataset": dataset_name,
                 "model": m_name,
                 "faithfulness": f_score,
                 "hallucination_rate": h_score,
@@ -699,17 +824,22 @@ def main() -> int:
                 "latency_sec": res["total_time"],
                 "answer_snippet": res["answer"].replace("\n", " ")[:120],
                 "generation_failed": failed,
+                "trap_flagged_text": trap_flagged,
                 **evaluate_retrieval_direct(item, res.get("contexts", [])),
+                **citation_stats(res["answer"], res.get("contexts", [])),
             })
             ragas_records.append({
                 "user_input": item["query"],
                 "response": res["answer"],
+                "response_cleaned": clean_answer(res["answer"], res.get("contexts", [])),
                 "retrieved_contexts": res.get("contexts", []),
                 "reference": "\n".join(item.get("ground_truth", item["gold_facts"])),
                 "model": m_name,
                 "query_id": item["id"],
                 "evaluation_type": item.get("evaluation_type", "direct"),
                 "category": item["category"],
+                "source": item.get("source", ""),
+                "dataset": dataset_name,
                 "generation_failed": failed,
             })
             print(f"    ✅ 완료 (Fact Recall: {f_score}%, Hallucination: {h_score}%, Latency: {res['total_time']}s)")
@@ -748,11 +878,11 @@ def main() -> int:
     print("=" * 88)
 
     # Export
-    tex_path = RESULTS_DIR / "table_rag_comparison.tex"
-    csv_path = RESULTS_DIR / "rag_evaluation_results.csv"
+    tex_path = out_dir / "table_rag_comparison.tex"
+    csv_path = out_dir / "rag_evaluation_results.csv"
     export_rag_latex_table(summary_by_model, tex_path)
     export_rag_csv(detailed_records, csv_path)
-    ragas_input_path = RESULTS_DIR / "ragas_dataset.json"
+    ragas_input_path = out_dir / "ragas_dataset.json"
     ragas_input_path.write_text(
         json.dumps(ragas_records, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -764,16 +894,18 @@ def main() -> int:
 
     from analyze_rag_results import run as run_analysis
 
-    counts = run_analysis(csv_path, RESULTS_DIR)
+    counts = run_analysis(csv_path, out_dir)
     print(f"📈 범주별 결과·쌍대 유의성 검정 저장 완료 (분석 대상 {counts['questions_used']}/{counts['questions_total']}문항): "
-          f"{RESULTS_DIR / 'rag_category_results.csv'}, {RESULTS_DIR / 'rag_significance.csv'}")
+          f"{out_dir / 'rag_category_results.csv'}, {out_dir / 'rag_significance.csv'}")
+    if counts.get("sources"):
+        print(f"📈 출처별(source) 결과·유의성 검정 저장 완료: {out_dir / 'rag_source_results.csv'}, {out_dir / 'rag_source_significance.csv'}")
     if failed_generations:
         print(f"⚠️ 생성 실패 {failed_generations}건 발생: 위 요약 표의 평균에는 실패 응답이 포함되어 있습니다. "
               "--delay를 늘려 다시 실행하세요.")
     if args.ragas:
         from eval_ragas import evaluate_dataset
 
-        ragas_output_path = RESULTS_DIR / "ragas_results.json"
+        ragas_output_path = out_dir / "ragas_results.json"
         evaluate_dataset(ragas_input_path, ragas_output_path)
         print(f"📊 RAGAS 결과 저장 완료: {ragas_output_path}")
     return 0

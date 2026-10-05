@@ -10,6 +10,8 @@ independent, human-judged estimate instead:
           The annotator marks each item O/X and adds what the pipeline missed.
   score   Read the completed workbooks and report precision / recall / F1 with
           bootstrap confidence intervals, plus Cohen's kappa between annotators.
+          The report states the sample size and repeats precision / recall
+          per source table (raw_event_info, raw_source_info, ...).
 
 Records are sampled from all rows that have TEI, including rows where the
 pipeline extracted nothing; otherwise recall would be overestimated.
@@ -203,9 +205,14 @@ def _score_type(per_record: dict[str, dict[str, int]], records: list[str], n_boo
             "recall": clean(recall), "recall_ci95": interval(boot_r), "f1": clean(f1)}
 
 
+def _table_of(record_id: str) -> str:
+    return record_id.rsplit(":", 1)[0]
+
+
 def cmd_score(args: argparse.Namespace) -> int:
     annotations = {path.stem: _load_annotation(path) for path in args.files}
     report: dict[str, Any] = {"annotators": {}, "agreement": {}}
+    fmt = lambda v: "   n/a" if v is None else f"{v * 100:6.1f}"
     for name, ann in annotations.items():
         merged = {"Entity (all)": defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0}),
                   "Relation (all)": defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0})}
@@ -214,15 +221,38 @@ def cmd_score(args: argparse.Namespace) -> int:
             for record_id, c in ann["counts"][type_name].items():
                 for key in c:
                     merged[group][record_id][key] += c[key]
-        scores = {t: _score_type(ann["counts"][t], ann["records"]) for t in TYPES}
-        scores.update({g: _score_type(per_record, ann["records"]) for g, per_record in merged.items()})
-        report["annotators"][name] = {"n_records": len(ann["records"]), "unjudged_items": ann["unjudged"], "scores": scores}
+        per_type = {**{t: ann["counts"][t] for t in TYPES}, **merged}
+        scores = {t: _score_type(per_record, ann["records"]) for t, per_record in per_type.items()}
 
-        print(f"\n■ {name} (사료 {len(ann['records'])}건, 미판정 {ann['unjudged']}개)")
+        # The same scores restricted to the records of one source table.
+        tables = list(dict.fromkeys(_table_of(r) for r in ann["records"]))
+        by_table = {}
+        for table in tables:
+            table_records = [r for r in ann["records"] if _table_of(r) == table]
+            by_table[table] = {"n_records": len(table_records),
+                               "scores": {t: _score_type(per_record, table_records) for t, per_record in per_type.items()}}
+
+        report["annotators"][name] = {
+            "n_records": len(ann["records"]),
+            "n_records_by_table": {t: by_table[t]["n_records"] for t in tables},
+            "n_items_judged": len(ann["verdicts"]),
+            "n_items_missed_added": sum(c["fn"] for per_record in ann["counts"].values() for c in per_record.values()),
+            "unjudged_items": ann["unjudged"],
+            "scores": scores,
+            "by_table": by_table,
+        }
+
+        print(f"\n■ {name} — 표본: 사료 {len(ann['records'])}건 ("
+              + ", ".join(f"{t} {by_table[t]['n_records']}" for t in tables)
+              + f"), 판정 항목 {len(ann['verdicts'])}개, 미판정 {ann['unjudged']}개")
         print(f"  {'type':<22} {'P':>7} {'R':>7} {'F1':>7}   TP/FP/FN")
         for type_name, s in scores.items():
-            fmt = lambda v: "   n/a" if v is None else f"{v * 100:6.1f}"
             print(f"  {type_name:<22} {fmt(s['precision'])} {fmt(s['recall'])} {fmt(s['f1'])}   {s['tp']}/{s['fp']}/{s['fn']}")
+        print(f"  사료 유형(table)별 — {'table':<18} {'n':>4}  {'Entity P':>8} {'Entity R':>8}  {'Rel. P':>7} {'Rel. R':>7}")
+        for table in tables:
+            e, r = by_table[table]["scores"]["Entity (all)"], by_table[table]["scores"]["Relation (all)"]
+            print(f"                      {table:<18} {by_table[table]['n_records']:>4}  "
+                  f"{fmt(e['precision']):>8} {fmt(e['recall']):>8}  {fmt(r['precision']):>7} {fmt(r['recall']):>7}")
         if ann["unjudged"]:
             print(f"  ⚠️ verdict가 비어 있는 {ann['unjudged']}개 항목은 계산에서 제외했습니다.")
 

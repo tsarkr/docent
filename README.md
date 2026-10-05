@@ -365,8 +365,11 @@ will be manually reviewed:
 
 ```bash
 .venv3.14/bin/python evaluation/generate_benchmark_dataset.py \
-  --target-count 30
+  --target-count 30 --out evaluation/dataset/benchmark_new.json --validate
 ```
+
+Without `--out` the generator refuses to overwrite the existing default
+dataset; pass `--force` only when that is intended.
 
 ### RAGAS
 
@@ -453,6 +456,56 @@ To recompute them from an existing CSV:
 .venv3.14/bin/python evaluation/analyze_rag_results.py
 ```
 
+### Datasets, run folders, question sources, and ablations
+
+`--dataset` selects the benchmark file and `--out-dir` the folder that receives
+every output of the run, so earlier results are not overwritten. The dataset
+file name is recorded in the `dataset` column of the CSV and in each record of
+`ragas_dataset.json`.
+
+```bash
+.venv3.14/bin/python evaluation/eval_rag_comparison.py --quick --delay 0 \
+  --dataset evaluation/dataset/benchmark_v1_tagged.json \
+  --out-dir evaluation/results_run3
+```
+
+[evaluation/dataset/benchmark_v1_tagged.json](./evaluation/dataset/benchmark_v1_tagged.json)
+is the 30-question benchmark with a `source` field added (first 13 `curated`,
+the rest `template`). When the dataset has `source`, the results carry a
+`source` column and the analysis additionally reports Overall / `curated` /
+`template` / `third_party` means with the same paired tests
+(`rag_source_results.csv`, `rag_source_significance.csv`). For a CSV written
+before the column existed, pass the tagged dataset:
+
+```bash
+.venv3.14/bin/python evaluation/analyze_rag_results.py \
+  --input evaluation/results/rag_evaluation_results.csv \
+  --dataset evaluation/dataset/benchmark_v1_tagged.json \
+  --out-dir evaluation/results_by_source
+```
+
+Two opt-in ablation pipelines separate the effect of the evidence from the
+effect of two-stage generation. Both use the shared conditions above.
+
+| `--models` key | Evidence | Generation |
+|---|---|---|
+| `docent_1stage` | Same as Docent (`retrieve_docent_scoped_context`) | Answer prompt only, no fact-table call |
+| `hybrid_2stage` | Same as the hybrid baseline (`hybrid_retrieve`), each chunk wrapped as `<SOURCE_EVIDENCE id="chunk_N">` | Docent's fact table, then answer |
+
+```bash
+.venv3.14/bin/python evaluation/eval_rag_comparison.py \
+  --models vector,hybrid,graph,docent,docent_1stage,hybrid_2stage \
+  --dataset evaluation/dataset/benchmark_v1_tagged.json --out-dir evaluation/results_ablation
+```
+
+`hallucination_rate` is a keyword heuristic over each question's
+`negative_traps`. A trap counts only when one answer sentence contains a person
+name or proper noun from the trap together with a second keyword (years, dates,
+and province/county/city names alone never match), and the answer contains no
+rejection phrase (`확인되지 않`, `사실이 아니`, `허구`, `근거가 없`, ...). The
+sentences that triggered it are saved in the `trap_flagged_text` column and
+must be checked by a person before the rate is reported.
+
 ### Benchmark size and third-party questions
 
 ```bash
@@ -466,6 +519,28 @@ External authors start from
 Template questions are filled in from `raw_event_info` and their gold facts
 must be reviewed before they are reported.
 
+Validate template questions before using them
+([evaluation/validate_benchmark.py](./evaluation/validate_benchmark.py); reads
+`raw_event_info`, makes no LLM calls, never modifies the input file):
+
+```bash
+.venv3.14/bin/python evaluation/validate_benchmark.py evaluation/dataset/benchmark_v2.json
+# options: --out-dir DIR  --sources template,third_party  --seed 42  --review-fraction 0.3  --no-db
+```
+
+It writes to `evaluation/validation/`: `<name>_validation.xlsx` (PASS/FAIL per
+question with reasons, the particle fixes, and a `human_review` sheet holding a
+seeded random 30% of the passed questions), `<name>_validation_summary.json`,
+and `<name>_validated.json` (the questions that did not fail, usable with
+`--dataset`). A question fails when a person name is shorter than two
+characters, a romanised fragment, or a title/common noun; when the event name
+and date in the question disagree with `raw_event_info`, with the date in the
+event name, or with the period the question states; when the trap person is a
+recorded participant of that event; when a trap compares a place with itself;
+or when it duplicates an earlier question. Wrong particles after names
+(`김상열가`) are corrected and listed, not failed. `generate_benchmark_dataset.py
+--validate` runs the same check on the file it just wrote.
+
 ### Human evaluation
 
 Extraction quality, judged by historians on a seeded random sample of records:
@@ -476,17 +551,36 @@ Extraction quality, judged by historians on a seeded random sample of records:
   evaluation/expert_validation/annotation_A.xlsx evaluation/expert_validation/annotation_B.xlsx
 ```
 
-Final answers, rated blind for factual accuracy, citation accuracy, and
-usefulness:
+`--n` sets the sample size (default 150, split evenly over the four source
+tables; e.g. `--n 80 --out-dir evaluation/expert_validation_80` for a smaller
+round). `export` overwrites the workbooks in its output folder, so use a new
+`--out-dir` once annotation has started. `score` reports the sample size and
+precision/recall per source table in addition to the per-type scores.
+
+Final answers, rated blind:
 
 ```bash
 .venv3.14/bin/python evaluation/human_answer_eval.py export
 .venv3.14/bin/python evaluation/human_answer_eval.py score \
   evaluation/human_eval/rating_A.xlsx evaluation/human_eval/rating_B.xlsx
+
+# only hand-written questions; --dataset supplies `source` for older answer files
+.venv3.14/bin/python evaluation/human_answer_eval.py export --source curated,third_party \
+  --dataset evaluation/dataset/benchmark_v1_tagged.json
 ```
 
-`blinding_key.json` maps the shuffled answer labels back to models; do not
-send it to raters.
+Raters fill in, per answer: `declined` (Y/N), `decline_justified`
+(Y/N/해당없음), `accuracy` (1-5, 해당없음 for a pure refusal), `completeness`
+(1-5), `unsupported_claims` (count, whether or not a citation is attached), and
+`usefulness` (1-5). The instruction sheet gives examples for each and tells
+raters not to judge by answer length. `score` prints per-item means with
+bootstrap CIs, pairwise permutation tests (Holm), weighted kappa between
+raters, citation accuracy, and the correlation of `accuracy`/`completeness`
+with answer length as a length-bias check.
+
+`blinding_key.json` maps the shuffled answer labels back to models. It is
+written to `evaluation/human_eval_key/` (`--key-dir`), apart from the rater
+workbooks in `evaluation/human_eval/`; send raters only the latter.
 
 ### Graph sparsity
 
@@ -506,6 +600,8 @@ artifact nodes and deletes them only with `--apply`):
 | `evaluation/results/table_rag_comparison.tex` | Paper-ready RAG comparison table |
 | `evaluation/results/rag_category_results.csv` | Per-category means with 95% CIs |
 | `evaluation/results/rag_significance.csv` | Paired significance tests between pipelines |
+| `evaluation/results/rag_source_results.csv`, `rag_source_significance.csv` | The same two tables by question source (only when `source` is recorded) |
+| `evaluation/validation/<name>_validation.xlsx` | Benchmark validation: PASS/FAIL, fixes, human-review sample |
 | `evaluation/results/table_rag_by_category.tex` | Per-category LaTeX table |
 | `evaluation/results/expert_validation_results.json` | Expert-judged extraction precision/recall |
 | `evaluation/results/human_eval_results.json` | Human answer ratings and citation accuracy |
@@ -526,6 +622,13 @@ The current benchmark has `N=30`. This is useful for system verification and
 effect-size exploration, but is too small by itself for broad population-level
 significance or generalization claims. Report per-query results, bootstrap
 confidence intervals, query-type results, and the template/entity-anchor bias.
+
+### Name-search index (optional, not applied automatically)
+
+[migrations/001_pg_trgm_name_search.sql](./migrations/001_pg_trgm_name_search.sql)
+adds `pg_trgm` GIN indexes for the `LIKE '%name%'` lookups in
+[includes/](./includes/). Review it and run it by hand; the file lists the
+prerequisites, the `EXPLAIN` checks, and the rollback statements.
 
 ## Validation
 

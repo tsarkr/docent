@@ -30,11 +30,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from scripts.config import get_neo4j_driver, get_pg_connection
 from scripts.hanja_utils import translate_hanja_name
+from validate_benchmark import NON_NAME_TOKENS, parse_person_list, with_josa  # name rules shared with the validator
 
 DATASET_PATH = Path(__file__).resolve().parent / "dataset" / "multihop_benchmark_dataset.json"
-NON_NAME_TOKENS = {'목사', '장로', '전도사', '선교사', '교사', '학생', '면장', '구장', '군수', '순사', '헌병', '의사', '기자', '승려', '농민', '주민'}
 
 
 def clean_name(raw: str) -> str:
@@ -63,14 +65,8 @@ def load_events_from_pg() -> list[dict[str, Any]]:
     events = []
     for r in rows:
         ev_id, title, s_date, e_date, place, persons_raw, rel_ids = r
-        persons = []
-        if persons_raw:
-            raw_tokens = re.split(r'[;, \t\n]+', str(persons_raw))
-            for tok in raw_tokens:
-                c = clean_name(tok)
-                # Hangul names only: drops romanised fragments ("Sun") and titles ("목사").
-                if re.fullmatch(r'[가-힣]{2,4}', c) and c not in NON_NAME_TOKENS and c not in persons:
-                    persons.append(c)
+        # Hangul names only: drops romanised fragments ("Sun") and titles ("목사").
+        persons = parse_person_list(persons_raw, clean_name) if persons_raw else []
 
         clean_place = re.sub(r'[\u4e00-\u9fff]+', lambda m: translate_hanja_name(m.group(0)), str(place))
         clean_place = re.sub(r'\s+', ' ', clean_place).strip()
@@ -189,8 +185,8 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
                     f"두 사건은 {ev['place']}와 {target_ev['place']} 간의 연계망을 통해 순차적으로 발생함"
                 ],
                 "negative_traps": [
-                    f"{ev['persons'][0]}가 {target_ev['place']}의 {target_ev['title']} 현장을 직접 지휘했다",
-                    f"{target_ev['persons'][0]}가 {ev['place']} 사건의 총책임자로 체포되었다"
+                    f"{with_josa(ev['persons'][0])} {target_ev['place']}의 {target_ev['title']} 현장을 직접 지휘했다",
+                    f"{with_josa(target_ev['persons'][0])} {ev['place']} 사건의 총책임자로 체포되었다"
                 ]
             }
             generated.append(item)
@@ -250,7 +246,7 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
                 f"{prov} 내에서 초기 거점에서 점차 인근 읍·면 지역으로 시위가 파급됨"
             ],
             "negative_traps": [
-                f"{e1['persons'][0]}가 {e2['start_date']} {e2['place']} 시위까지 직접 이동하여 주동했다",
+                f"{with_josa(e1['persons'][0])} {e2['start_date']} {e2['place']} 시위까지 직접 이동하여 주동했다",
                 f"{e2['place']} 시위가 {e1['place']}보다 먼저 발생한 발원지이다"
             ]
         }
@@ -286,7 +282,7 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
 
         q_id = f"Q_ZC_{len(generated) + 1:02d}"
         query_text = (
-            f"{fig_name}가 {ev['start_date'] if ev['start_date'] else '1919년 3월'} {ev['place']}에서 일어난 "
+            f"{with_josa(fig_name)} {ev['start_date'] if ev['start_date'] else '1919년 3월'} {ev['place']}에서 일어난 "
             f"'{ev['title']}' 현장에서 군중을 직접 인솔하며 만세 시위를 지휘했는가?"
         )
         if query_text in seen_queries:
@@ -301,13 +297,13 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
             "hops": 0,
             "target_entities": [fig_name, ev["place"].split()[-1], ev["title"][:12]] + ev["persons"][:2],
             "gold_facts": [
-                f"{fig_name}는 해당 시기 {fig_loc} 등에서 독자적인 활동({fig_role})을 수행 중이었음",
-                f"{ev['place']}의 {ev['title']}은 현지 인물인 {real_leaders} 등에 의해 독자적으로 주도됨",
-                f"{fig_name}가 {ev['place']} 시위 현장에 직접 나타나 군중을 지휘했다는 것은 사료적 근거가 없는 허위 사실임"
+                f"{with_josa(fig_name, '은', '는')} 해당 시기 {fig_loc} 등에서 독자적인 활동({fig_role})을 수행 중이었음",
+                f"{ev['place']}의 {with_josa(ev['title'], '은', '는')} 현지 인물인 {real_leaders} 등에 의해 독자적으로 주도됨",
+                f"{with_josa(fig_name)} {ev['place']} 시위 현장에 직접 나타나 군중을 지휘했다는 것은 사료적 근거가 없는 허위 사실임"
             ],
             "negative_traps": [
-                f"{fig_name}가 {ev['place']} 시위대 선두에서 태극기를 흔들다 현장에서 일제 순사에게 연행되었다",
-                f"{fig_name}가 {ev['title']}의 격문을 직접 작성하여 배포하였다"
+                f"{with_josa(fig_name)} {ev['place']} 시위대 선두에서 태극기를 흔들다 현장에서 일제 순사에게 연행되었다",
+                f"{with_josa(fig_name)} {ev['title']}의 격문을 직접 작성하여 배포하였다"
             ]
         }
         generated.append(item)
@@ -332,15 +328,32 @@ def generate_benchmark_queries(target_count: int = 120, third_party_paths: list[
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate comprehensive quantitative RAG benchmark dataset.")
     parser.add_argument("--target-count", type=int, default=120, help="Target total benchmark dataset size (default: 120)")
-    parser.add_argument("--out", type=Path, default=DATASET_PATH, help="Output dataset path")
+    parser.add_argument("--out", type=Path, default=None,
+                        help="Output dataset path (default: dataset/multihop_benchmark_dataset.json, written only if it does not exist yet)")
+    parser.add_argument("--force", action="store_true",
+                        help="Allow overwriting the default dataset file when --out is not given")
+    parser.add_argument("--validate", action="store_true",
+                        help="Run validate_benchmark.py on the generated file and report which questions pass")
+    parser.add_argument("--validation-dir", type=Path, default=None,
+                        help="Where --validate writes its workbook and summary (default: evaluation/validation)")
     parser.add_argument("--third-party", type=Path, action="append", default=[],
                         help="JSON file of questions written by an external author (repeatable); see dataset/third_party_template.json")
     args = parser.parse_args()
 
+    out_path = args.out or DATASET_PATH
+    if args.out is None and out_path.exists() and not args.force:
+        print(f"❌ {out_path} 이(가) 이미 있습니다. 덮어쓰지 않고 종료합니다.\n"
+              f"   새 파일로 저장하려면 --out PATH 를, 기존 파일을 덮어쓰려면 --force 를 지정하세요.", file=sys.stderr)
+        return 1
+
     dataset = generate_benchmark_queries(target_count=args.target_count, third_party_paths=args.third_party)
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(dataset, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"💾 데이터셋 파일 저장 완료: {args.out} ({len(dataset)} items)")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(dataset, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"💾 데이터셋 파일 저장 완료: {out_path} ({len(dataset)} items)")
+    if args.validate:
+        from validate_benchmark import OUT_DIR as VALIDATION_DIR, print_summary, validate_dataset
+
+        print_summary(validate_dataset(out_path, args.validation_dir or VALIDATION_DIR))
     return 0
 
 

@@ -40,6 +40,8 @@ Latex/
 # Evaluation: human annotation working files and local run copies
 evaluation/expert_validation/*.xlsx
 evaluation/human_eval/
+evaluation/human_eval_key/
+evaluation/validation/
 evaluation/results_run*/
 ~$*.xlsx
 
