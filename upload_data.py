@@ -57,7 +57,7 @@ def process_task(file_name, table_name, skip_rows, dry_run=False):
     if ext in ('.xls', '.xlsx'):
         try:
             # Read without header to detect correct header row robustly
-            raw = pd.read_excel(full_path, header=None, dtype=str)
+            raw = pd.read_excel(full_path, header=None, dtype=str).fillna('')
             header_idx = None
             max_search = min(len(raw), 50)
             for idx in range(0, max_search):
@@ -202,7 +202,8 @@ tasks = [
     ("출처정보_260410.xlsx", "raw_source_info", 8),
     ("탄압기구(경찰).csv", "raw_oppression_org_police", 7),
     ("탄압기구(군대).csv", "raw_oppression_org_military", 7),
-    ("탄압기구(헌병)_20200131.csv", "raw_oppression_org_gendarme", 7)
+    ("탄압기구(헌병)_20200131.csv", "raw_oppression_org_gendarme", 7),
+    ("행정구역_20200131.xlsx", "raw_admin_region", 8)
 ]
 
 if __name__ == "__main__":

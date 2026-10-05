@@ -92,6 +92,7 @@ function _get_rel_label($rtype) {
         "foaf:knows" => "동지/지인", "foaf:member" => "소속 기구",
         "P11_had_participant" => "참여 인물", "P108_has_produced" => "생성/저작",
         "P102_has_title" => "명칭/제목", "소속" => "소속",
+        "P74_has_current_or_former_residence" => "설치 장소", "P89_falls_within" => "상위 행정구역",
         "동일인물" => "동일인물", "sameAs" => "동일인물", "owl:sameAs" => "동일인물"
     ];
     $en = [
@@ -100,6 +101,7 @@ function _get_rel_label($rtype) {
         "foaf:knows" => "Comrade/Acquaintance", "foaf:member" => "Affiliated organization",
         "P11_had_participant" => "Participant", "P108_has_produced" => "Created/Produced",
         "P102_has_title" => "Title", "소속" => "Affiliation",
+        "P74_has_current_or_former_residence" => "Installed at", "P89_falls_within" => "Falls within",
         "동일인물" => "Same Person", "sameAs" => "Same As", "owl:sameAs" => "Same As"
     ];
     return docent_is_english() ? ($en[$rtype] ?? $rtype) : ($ko[$rtype] ?? $rtype);

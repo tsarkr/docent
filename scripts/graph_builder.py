@@ -589,19 +589,46 @@ def collect_explicit_links():
         for code in region_refs(codes, names):
             links['place_region'].append({'place_id': str(place_id).strip(), 'region_id': code})
 
-    links['regions'] = [
-        {'id': code, 'name': name or code, 'h_name': hanja.translate(name or code, 'substitution')}
-        for code, name in regions.items()
-    ]
-    # Region hierarchy: nearest ancestor code that the data itself mentions (A05_05_019 -> A05_05 -> A05).
+    # 탄압기구 → 설치장소(행정구역)
+    links['org_region'] = []
+    for table_name, id_col, code_col, name_col in (
+        ('raw_oppression_org_police', '기구ID', '설치장소코드', '설치장소명'),
+        ('raw_oppression_org_gendarme', '기구id', '설치장소코드', '설치장소명'),
+        ('raw_oppression_org_military', '기구ID', '기구위치코드', '기구위치명'),
+    ):
+        df = pd.read_sql(f'SELECT "{id_col}", "{code_col}", "{name_col}" FROM {table_name}', pg_engine)
+        for org_id, codes, names in df.itertuples(index=False, name=None):
+            for code in region_refs(codes, names):
+                links['org_region'].append({'org_id': str(org_id).strip(), 'region_id': code})
+
+    # Region hierarchy from the 행정구역 master (A05_05_019 -> A05_05 -> A05 -> A). Ancestors that
+    # the data never mentions are created too, so every region reaches its province.
+    df = pd.read_sql('SELECT "행정구역 아이디", "지역명" FROM raw_admin_region', pg_engine)
+    master = {str(code).strip(): str(name).strip() for code, name in df.itertuples(index=False, name=None)}
+
+    def ancestors(code):
+        out = []
+        while '_' in code:
+            code = code.rsplit('_', 1)[0]
+            out.append(code)
+        if len(code) > 1 and code[0].isalpha():
+            out.append(code[0])
+        return out
+
     links['region_parent'] = []
-    for code in regions:
-        parent = code
-        while '_' in parent:
-            parent = parent.rsplit('_', 1)[0]
-            if parent in regions:
-                links['region_parent'].append({'child': code, 'parent': parent})
-                break
+    pending = list(regions)
+    for code in pending:
+        parent = next((a for a in ancestors(code) if a in regions or a in master), None)
+        if parent:
+            if parent not in regions:
+                regions[parent] = ''
+                pending.append(parent)
+            links['region_parent'].append({'child': code, 'parent': parent})
+
+    links['regions'] = []
+    for code, name in regions.items():
+        name = name or ' '.join(master[c] for c in reversed([code] + ancestors(code)) if master.get(c)) or code
+        links['regions'].append({'id': code, 'name': name, 'h_name': hanja.translate(name, 'substitution')})
     return links
 
 
@@ -671,6 +698,13 @@ def apply_explicit_links(session, links):
 
     _run_batches(session, """
         UNWIND $data AS row
+        MATCH (o:Organization {id: row.org_id})
+        MATCH (r:Place {id: row.region_id})
+        MERGE (o)-[:P74_has_current_or_former_residence]->(r)
+        """, links['org_region'], batch_size=batch)
+
+    _run_batches(session, """
+        UNWIND $data AS row
         MATCH (c:Place {id: row.child})
         MATCH (p:Place {id: row.parent})
         MERGE (c)-[:P89_falls_within]->(p)
@@ -682,7 +716,7 @@ def apply_explicit_links(session, links):
 def build_ultimate_graph():
     with neo4j_driver.session() as session:
         print("🧹 기존 데이터를 삭제하고 그래프를 재설계합니다...")
-        _clear_graph(session, batch_size=50000)
+        _clear_graph(session, batch_size=5000)
         _ensure_schema(session)
 
         print("📍 장소 노드 생성 중... (raw_detail_place 장소 마스터에서 로드)")
@@ -837,6 +871,8 @@ def build_ultimate_graph():
                         'id': ['id', '아이디', '기구ID', '기구_id', '기구id'],
                         'name': ['name', '명칭', '기구명', '기구명칭'],
                         'parent_id': ['parent_id', '상위ID', '상위_아이디', 'parent', '상위기구ID', '상위기구id'],
+                        'loc_code': ['설치장소코드', '기구위치코드'],
+                        'loc_name': ['설치장소명', '기구위치명'],
                     },
                     required=['id', 'name'],
                 )
@@ -857,8 +893,8 @@ def build_ultimate_graph():
                         'name': str(row['name']),
                         'h_name': str(row['한글명칭']),
                         'parent_id': str(parent_raw) if parent_raw and str(parent_raw).strip() != '' else None,
-                        'loc_name': '',
-                        'loc_code': '',
+                        'loc_name': str(row['loc_name']),
+                        'loc_code': str(row['loc_code']),
                         'note': '',
                     })
 
