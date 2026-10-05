@@ -356,21 +356,6 @@ def _clear_graph(session, batch_size=50000):
     return total_deleted
 
 
-def _extract_tei_values(tei_text, limit=None):
-    try:
-        soup = BeautifulSoup(tei_text or "", "xml")
-        values = []
-        for p in soup.find_all("p"):
-            text = p.get_text(" ", strip=True)
-            if text:
-                values.append(text)
-                if limit and len(values) >= limit:
-                    break
-        return values
-    except Exception:
-        return []
-
-
 _CIDOC_CRM = "http://www.cidoc-crm.org/cidoc-crm/"
 _CIDOC_EX = "http://example.org/historical-event/"
 
