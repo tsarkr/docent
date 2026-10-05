@@ -515,13 +515,15 @@ GRAPHRAG_ROOT=./graphrag_root .venv3.14/bin/python evaluation/eval_rag_compariso
 
 ```bash
 .venv3.14/bin/python evaluation/validate_benchmark.py evaluation/dataset/benchmark_v2.json
-# 옵션: --out-dir DIR  --sources template,third_party  --seed 42  --review-fraction 0.3  --no-db
+# 옵션: --out-dir DIR  --seed 42  --save-passed evaluation/dataset/benchmark_v2_passed.json
 ```
 
 `evaluation/validation/`에 `<이름>_validation.xlsx`(문항별 PASS/FAIL과 사유,
-조사 수정 내역, 통과 문항의 무작위 30%를 담은 `human_review` 시트),
-`<이름>_validation_summary.json`, `<이름>_validated.json`(탈락하지 않은 문항.
-`--dataset`에 그대로 사용 가능)을 저장합니다. 탈락 규칙은 다음과 같습니다.
+조사 수정 내역, 통과 문항의 무작위 30%를 담은 `human_review` 시트)와
+`<이름>_validation_summary.json`을 저장합니다. `--save-passed PATH`를 주면
+탈락하지 않은 문항을 `--dataset`에 쓸 수 있는 JSON으로 함께 저장합니다.
+`template` 문항만 검증하며, 다른 출처는 중복만 확인합니다. 탈락 규칙은 다음과
+같습니다.
 
 - 인명이 2글자 미만이거나 로마자 조각, 직책·일반명사인 경우
 - 질문의 사건명·날짜가 `raw_event_info`, 사건명에 적힌 날짜, 질문이 밝힌

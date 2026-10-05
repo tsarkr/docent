@@ -334,8 +334,6 @@ def main() -> int:
                         help="Allow overwriting the default dataset file when --out is not given")
     parser.add_argument("--validate", action="store_true",
                         help="Run validate_benchmark.py on the generated file and report which questions pass")
-    parser.add_argument("--validation-dir", type=Path, default=None,
-                        help="Where --validate writes its workbook and summary (default: evaluation/validation)")
     parser.add_argument("--third-party", type=Path, action="append", default=[],
                         help="JSON file of questions written by an external author (repeatable); see dataset/third_party_template.json")
     args = parser.parse_args()
@@ -351,9 +349,9 @@ def main() -> int:
     out_path.write_text(json.dumps(dataset, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"💾 데이터셋 파일 저장 완료: {out_path} ({len(dataset)} items)")
     if args.validate:
-        from validate_benchmark import OUT_DIR as VALIDATION_DIR, print_summary, validate_dataset
+        from validate_benchmark import validate_dataset
 
-        print_summary(validate_dataset(out_path, args.validation_dir or VALIDATION_DIR))
+        validate_dataset(out_path)
     return 0
 
 

@@ -209,38 +209,6 @@ def _fmt(value: float) -> str:
     return "  n/a" if value != value else f"{value:5.2f}"
 
 
-def _rank(values: list[float]) -> np.ndarray:
-    """Average ranks (ties share the mean rank)."""
-    arr = np.asarray(values, dtype=float)
-    order = arr.argsort(kind="mergesort")
-    ranks = np.empty(len(arr))
-    ranks[order] = np.arange(1, len(arr) + 1)
-    for value in np.unique(arr):
-        tied = arr == value
-        ranks[tied] = ranks[tied].mean()
-    return ranks
-
-
-def _correlation(x: list[float], y: list[float]) -> float:
-    if len(x) < 3 or len(set(x)) < 2 or len(set(y)) < 2:
-        return float("nan")
-    return float(np.corrcoef(x, y)[0, 1])
-
-
-def _parse_rating(metric: str, value: str) -> float | None:
-    """Numeric value of one cell; None when it is empty, '해당없음', or not a valid entry."""
-    value = value.strip()
-    if metric in ("declined", "decline_justified"):
-        return {YES: 1.0, NO: 0.0}.get(value.upper())
-    try:
-        number = float(value)
-    except ValueError:
-        return None
-    if metric == "unsupported_claims":
-        return number if number >= 0 and number == int(number) else None
-    return number if 1 <= number <= 5 else None
-
-
 def cmd_score(args: argparse.Namespace) -> int:
     key_path = args.key or next((p for p in (KEY_DIR / "blinding_key.json", OUT_DIR / "blinding_key.json") if p.exists()),
                                 KEY_DIR / "blinding_key.json")
@@ -257,8 +225,12 @@ def cmd_score(args: argparse.Namespace) -> int:
         for row in read_sheet(path, "answers"):
             answer_chars.setdefault(row["item_id"], len(row.get("answer", "")))
             for metric in RATING_COLUMNS:
-                cell = row.get(metric, "")
-                value = _parse_rating(metric, cell)
+                cell = row.get(metric, "").upper()
+                if metric in ("declined", "decline_justified"):
+                    value = {YES: 1.0, NO: 0.0}.get(cell)
+                else:
+                    low, high = (0, 10**6) if metric == "unsupported_claims" else (1, 5)
+                    value = float(cell) if re.fullmatch(r"\d+(\.0+)?", cell) and low <= float(cell) <= high else None
                 if value is not None:
                     ratings[metric][rater][row["item_id"]] = value
                 elif cell and cell != NA:
@@ -349,10 +321,10 @@ def cmd_score(args: argparse.Namespace) -> int:
         items = sorted(i for i in by_item if i in answer_chars)
         lengths = [float(answer_chars[i]) for i in items]
         scores = [sum(by_item[i]) / len(by_item[i]) for i in items]
-        pearson = _correlation(lengths, scores)
-        spearman = _correlation(list(_rank(lengths)), list(_rank(scores))) if len(items) >= 3 else float("nan")
-        report["length_bias"][metric] = {"n": len(items), "pearson_r": pearson, "spearman_rho": spearman}
-        print(f"  {metric:<14} Pearson r={_fmt(pearson)}, Spearman ρ={_fmt(spearman)} (n={len(items)})")
+        defined = len(items) >= 3 and len(set(lengths)) > 1 and len(set(scores)) > 1
+        pearson = float(np.corrcoef(lengths, scores)[0, 1]) if defined else float("nan")
+        report["length_bias"][metric] = {"n": len(items), "pearson_r": pearson}
+        print(f"  {metric:<14} Pearson r={_fmt(pearson)} (n={len(items)})")
     print("  (|r|이 크면 점수가 길이에 좌우되고 있다는 신호입니다. 시스템별 평균 길이가 다르면 해석에 유의하세요.)")
     if invalid_cells:
         print(f"\n⚠️ 허용되지 않는 값이 들어 있어 무시한 칸: {invalid_cells}개")

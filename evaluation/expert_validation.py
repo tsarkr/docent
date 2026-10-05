@@ -205,10 +205,6 @@ def _score_type(per_record: dict[str, dict[str, int]], records: list[str], n_boo
             "recall": clean(recall), "recall_ci95": interval(boot_r), "f1": clean(f1)}
 
 
-def _table_of(record_id: str) -> str:
-    return record_id.rsplit(":", 1)[0]
-
-
 def cmd_score(args: argparse.Namespace) -> int:
     annotations = {path.stem: _load_annotation(path) for path in args.files}
     report: dict[str, Any] = {"annotators": {}, "agreement": {}}
@@ -225,10 +221,10 @@ def cmd_score(args: argparse.Namespace) -> int:
         scores = {t: _score_type(per_record, ann["records"]) for t, per_record in per_type.items()}
 
         # The same scores restricted to the records of one source table.
-        tables = list(dict.fromkeys(_table_of(r) for r in ann["records"]))
+        tables = list(dict.fromkeys(r.rsplit(":", 1)[0] for r in ann["records"]))
         by_table = {}
         for table in tables:
-            table_records = [r for r in ann["records"] if _table_of(r) == table]
+            table_records = [r for r in ann["records"] if r.rsplit(":", 1)[0] == table]
             by_table[table] = {"n_records": len(table_records),
                                "scores": {t: _score_type(per_record, table_records) for t, per_record in per_type.items()}}
 

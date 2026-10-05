@@ -525,14 +525,16 @@ Validate template questions before using them
 
 ```bash
 .venv3.14/bin/python evaluation/validate_benchmark.py evaluation/dataset/benchmark_v2.json
-# options: --out-dir DIR  --sources template,third_party  --seed 42  --review-fraction 0.3  --no-db
+# options: --out-dir DIR  --seed 42  --save-passed evaluation/dataset/benchmark_v2_passed.json
 ```
 
 It writes to `evaluation/validation/`: `<name>_validation.xlsx` (PASS/FAIL per
 question with reasons, the particle fixes, and a `human_review` sheet holding a
-seeded random 30% of the passed questions), `<name>_validation_summary.json`,
-and `<name>_validated.json` (the questions that did not fail, usable with
-`--dataset`). A question fails when a person name is shorter than two
+seeded random 30% of the passed questions) and
+`<name>_validation_summary.json`. `--save-passed PATH` additionally writes the
+questions that did not fail, for use with `--dataset`. Only `template`
+questions are checked; other sources are checked for duplicates only. A
+question fails when a person name is shorter than two
 characters, a romanised fragment, or a title/common noun; when the event name
 and date in the question disagree with `raw_event_info`, with the date in the
 event name, or with the period the question states; when the trap person is a

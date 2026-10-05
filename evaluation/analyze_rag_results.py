@@ -162,21 +162,7 @@ def export_category_latex(category_rows: list[dict[str, Any]], out_path: Path, m
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def print_breakdown(rows: list[dict[str, Any]], significance_rows: list[dict[str, Any]], group_field: str) -> None:
-    """Console table of means with CIs per group, followed by the paired tests of each group."""
-    for metric in METRICS:
-        print(f"\n■ {metric} — {group_field}별 평균 [95% CI]")
-        for row in (r for r in rows if r["metric"] == metric):
-            print(f"  {row[group_field]:<28} {row['model']:<40} n={row['n']:<3} "
-                  f"{row['mean']:8.2f} [{row['ci95_low']:.2f}, {row['ci95_high']:.2f}]")
-        print(f"  쌍대 유의성 검정 (sign-flip permutation, Holm 보정)")
-        for row in (r for r in significance_rows if r["metric"] == metric):
-            mark = " *" if row["significant_0.05"] else ""
-            print(f"  {row[group_field]:<28} {row['model_a']} vs {row['model_b']}: "
-                  f"Δ={row['mean_diff_a_minus_b']:.2f} (n={row['n_pairs']}), p_holm={row['p_holm']}{mark}")
-
-
-def run(csv_path: Path, out_dir: Path = RESULTS_DIR, verbose: bool = False, dataset: Path | None = None) -> dict[str, Any]:
+def run(csv_path: Path, out_dir: Path = RESULTS_DIR, dataset: Path | None = None, verbose: bool = False) -> dict[str, Any]:
     records = load_records(csv_path)
     if dataset is not None:
         # Results written before the `source` column existed: take it from the benchmark file.
@@ -184,21 +170,27 @@ def run(csv_path: Path, out_dir: Path = RESULTS_DIR, verbose: bool = False, data
         for record in records:
             record["source"] = record.get("source") or source_of.get(record["query_id"], "")
     out_dir.mkdir(parents=True, exist_ok=True)
+
     category_rows, significance_rows, counts = analyze(records)
     _write_csv(category_rows, out_dir / "rag_category_results.csv")
     _write_csv(significance_rows, out_dir / "rag_significance.csv")
     export_category_latex(category_rows, out_dir / "table_rag_by_category.tex")
-    if verbose:
-        print_breakdown(category_rows, significance_rows, "category")
 
-    # Breakdown by question source, when the run recorded it.
-    counts["sources"] = sorted({(r.get("source") or "").strip() for r in records} - {""})
-    if counts["sources"]:
+    # Same breakdown by question source (curated / template / third_party), when the run recorded it.
+    counts["has_source"] = any((r.get("source") or "").strip() for r in records)
+    if counts["has_source"]:
         source_rows, source_significance, _ = analyze(records, group_field="source")
         _write_csv(source_rows, out_dir / "rag_source_results.csv")
         _write_csv(source_significance, out_dir / "rag_source_significance.csv")
         if verbose:
-            print_breakdown(source_rows, source_significance, "source")
+            for metric in METRICS:
+                print(f"\n■ {metric} — source별 평균 [95% CI]")
+                for r in (r for r in source_rows if r["metric"] == metric):
+                    print(f"  {r['source']:<12} {r['model']:<40} n={r['n']:<3} {r['mean']:8.2f} [{r['ci95_low']:.2f}, {r['ci95_high']:.2f}]")
+                print("  쌍대 유의성 검정 (sign-flip permutation, Holm 보정; * = p<0.05)")
+                for r in (r for r in source_significance if r["metric"] == metric):
+                    print(f"  {r['source']:<12} {r['model_a']} vs {r['model_b']}: Δ={r['mean_diff_a_minus_b']:.2f} "
+                          f"(n={r['n_pairs']}), p_holm={r['p_holm']}{' *' if r['significant_0.05'] else ''}")
     return counts
 
 
@@ -210,7 +202,7 @@ def main() -> int:
                         help="Benchmark JSON with a `source` field, used when the CSV has no source column")
     args = parser.parse_args()
 
-    counts = run(args.input, args.out_dir, verbose=True, dataset=args.dataset)
+    counts = run(args.input, args.out_dir, args.dataset, verbose=True)
     print(f"\n📊 분석 대상 질문: {counts['questions_used']}/{counts['questions_total']}건")
     if counts["questions_excluded_generation_failed"]:
         print(f"⚠️ 생성 실패로 제외된 질문: {counts['questions_excluded_generation_failed']}건")
@@ -219,7 +211,7 @@ def main() -> int:
     print(f"💾 {args.out_dir / 'rag_category_results.csv'}")
     print(f"💾 {args.out_dir / 'rag_significance.csv'}")
     print(f"📄 {args.out_dir / 'table_rag_by_category.tex'}")
-    if counts["sources"]:
+    if counts["has_source"]:
         print(f"💾 {args.out_dir / 'rag_source_results.csv'}")
         print(f"💾 {args.out_dir / 'rag_source_significance.csv'}")
     else:
